@@ -876,6 +876,39 @@ mod tests {
     }
 
     #[test]
+    fn opaque_accessor_outputs_are_owned_after_handles_drop() {
+        let (children, detail, stream, render, text) = {
+            let shim = FakeShim::new().unwrap();
+            let mut doc = shim.open_document("fake.pdf").unwrap();
+            let summary = doc.summary().unwrap();
+            let root = NodeId::DocumentRoot {
+                doc: summary.doc.clone(),
+            };
+            let range = ChildRange {
+                offset: 0,
+                limit: 2,
+            };
+            let children = doc
+                .children(&root, range, ChildContainer::Dictionary)
+                .unwrap();
+            let first_child = children.items[0].id.clone();
+            let detail = doc.object_detail(&first_child, range).unwrap();
+            let stream = doc
+                .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 32)
+                .unwrap();
+            let render = doc.render_page(&RenderRequest::page(0)).unwrap();
+            let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+            (children, detail, stream, render, text)
+        };
+
+        assert_eq!(children.items[0].label, "Object 0");
+        assert_eq!(detail.preview, "<< /Type /Fake >>");
+        assert_eq!(stream.bytes, b"fake stream bytes");
+        assert_eq!(render.pixels_rgba, vec![255, 255, 255, 255]);
+        assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
+    }
+
+    #[test]
     fn decoded_stream_limit_returns_limit_error_before_buffer_materialization() {
         let shim = FakeShim::new().unwrap();
         let config = SafeModeConfig {

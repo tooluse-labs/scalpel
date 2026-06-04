@@ -49,6 +49,10 @@ Completed:
   test-only callback invoker, Rust `extern "C"` callbacks route through
   `catch_ffi_callback`, caught panics return `PDBG_ERROR_GENERIC`, and `pdbg_error`
   is filled before control returns to C.
+- **T3.1** opaque-handle accessor lifetime contract: node-list, object-detail,
+  stream-buffer, render-image, and text-page accessors copy borrowed C data into
+  owned Rust DTOs before the opaque handles/document are dropped; sanitizer
+  execution is wired by **T5.3**.
 - **T4.1** `DocumentSession` and fake lock/store wiring: sessions serialize
   document tasks through a per-document `std::sync::Mutex`, cache owned summary
   output, `PdbgDoc` is documented `Send`/not `Sync`, and `FakeShim` installs a
@@ -82,7 +86,7 @@ Partial:
 
 Not started:
 
-- **T3.1**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -258,9 +262,9 @@ All tasks are `needs_real_mupdf: false`.
 
 ### P3 — FFI boundary safety contracts (`pdbg-core` + `pdbg-shim` fake bodies; ∥ P2)
 
-- **T3.1** Opaque-handle accessor sanitizer tests (valid borrowed access before
-  cleanup; copy-before-drop; use-after-cleanup caught under ASAN/UBSan; no leaks).
-  — deps: T0.5, T2.4
+- **T3.1** Opaque-handle accessor lifetime tests (valid borrowed access before
+  cleanup; copy-before-drop into owned Rust DTOs; use-after-cleanup/leak checks
+  run under the ASAN/UBSan jobs finalized by T5.3). — deps: T0.5, T2.4
 - **T3.2** `pdbg_document_open_fd` ownership tests (success keeps caller's original
   fd; failure closes only the shim's dup; returned doc owns the dup; no-POSIX-fd
   fallback documented). *Depends only on the sys/shim layer — corrected from the
