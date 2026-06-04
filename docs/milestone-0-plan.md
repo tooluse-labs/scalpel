@@ -18,7 +18,8 @@ Last verified locally with:
 - `cargo clippy --workspace -- -D warnings`;
 - `python3 scripts/check_pdbg_shim_abi_snapshot.py`;
 - `python3 scripts/check_notices.py`;
-- `sh scripts/test_fz_try_gate.sh`.
+- `sh scripts/test_fz_try_gate.sh`;
+- `sh scripts/run_m0_fuzz_smoke.sh`.
 
 Completed:
 
@@ -27,6 +28,9 @@ Completed:
   Rust RAII wrappers/accessors for context, document, buffer, image, node-list,
   and text-page handles.
 - **T0.7** scaffold-level `fz_try` static gate with good/bad fixtures.
+- **T0.8** checked-in CI skeleton: `.github/workflows/m0.yml` defines contract,
+  C ASAN/UBSan, TSan, and fuzz-smoke jobs; `scripts/run_m0_local_gate.sh` runs
+  the stable local gate without linking MuPDF.
 - **T0.6** panic-into-C policy: workspace profiles explicitly use
   `panic = "unwind"` and `pdbg-core` exposes a single `catch_ffi_callback`
   boundary helper that catches Rust panics from future `extern "C"` callbacks,
@@ -84,18 +88,19 @@ Completed:
   plus all Cargo.lock workspace packages.
 - **T5.4** fixture policy: synthetic-only fixture README plus a tiny
   license-clean minimal PDF seed under `fixtures/synthetic/`.
+- **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and TSan jobs plus a
+  deterministic fake-shim fuzz-smoke job covering traversal, decode limits,
+  DTO/egress contracts, callback panic mapping, and concurrency smoke.
 
 Partial:
 
-- **T0.8** local green gate exists, but no checked-in CI workflow marks jobs
-  required yet.
 - **T2.5** capability logic exists; real app/MCP feature hiding is still pending.
 - **T2.6** text span byte copying is covered; full coordinate-normalization
   golden coverage is still pending.
 
 Not started:
 
-- **T5.3** and **T6.1**.
+- **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -321,11 +326,11 @@ All tasks are `needs_real_mupdf: false`.
   fixtures (where fixtures live, license-sensitive exclusion, how regressions are
   added). A documentation deliverable — don't defer to "when we add fixtures".
   — deps: T0.1
-- **T5.3** Finalize fuzz + ASAN/UBSan + **TSan** CI jobs (cargo-fuzz over
-  open/traversal/decode/DTO-conversion FakeShim-backed; C shim ASAN/UBSan; TSan
-  over the T4.2 harness + callback path; tiny corpus OK; uses T0.6 profile).
-  **Finalized last among CI** so it covers all earlier code. — deps: T0.8, T4.2,
-  T3.1, T3.3, T0.6
+- **T5.3** Finalize deterministic fuzz-smoke + ASAN/UBSan + **TSan** CI jobs
+  (fake-shim-backed traversal/decode/DTO/egress/callback/concurrency smoke; C
+  shim ASAN/UBSan; TSan over the T4.2 harness; uses T0.6 profile). **Finalized
+  last among CI** so it covers all earlier code. — deps: T0.8, T4.2, T3.1, T3.3,
+  T0.6
 
 ### P6 — Green-gate convergence
 

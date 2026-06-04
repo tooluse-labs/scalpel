@@ -13,17 +13,21 @@ fn main() {
     let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let ar = env::var("AR").unwrap_or_else(|_| "ar".to_string());
 
-    let cc_status = Command::new(&cc)
-        .args([
-            "-std=c11",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-Iinclude",
-            "-c",
-            "c/pdbg_shim_fake.c",
-            "-o",
-        ])
+    let mut cc_command = Command::new(&cc);
+    cc_command.args([
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Iinclude",
+        "-c",
+        "c/pdbg_shim_fake.c",
+        "-o",
+    ]);
+    for flag in env::var("CFLAGS").unwrap_or_default().split_whitespace() {
+        cc_command.arg(flag);
+    }
+    let cc_status = cc_command
         .arg(&obj)
         .status()
         .expect("failed to run C compiler");

@@ -1,0 +1,63 @@
+name: m0
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contract:
+    name: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: M0 local gate
+        run: sh scripts/run_m0_local_gate.sh
+
+  c-asan-ubsan:
+    name: c-asan-ubsan
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+      RUSTFLAGS: -Clink-arg=-fsanitize=address -Clink-arg=-fsanitize=undefined
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: C shim sanitizer tests
+        run: cargo test --workspace
+
+  tsan:
+    name: tsan
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -Zsanitizer=thread
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nightly Rust toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+      - name: Thread sanitizer smoke
+        run: >
+          cargo +nightly test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          -p pdbg-core
+          multiple_sessions_drive_shared_store_from_worker_threads
+
+  fuzz-smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Deterministic M0 fuzz smoke
+        run: sh scripts/run_m0_fuzz_smoke.sh
