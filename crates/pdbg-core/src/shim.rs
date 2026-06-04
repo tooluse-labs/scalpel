@@ -932,10 +932,14 @@ mod tests {
     fn temp_pdf_file() -> (std::path::PathBuf, std::fs::File) {
         use std::fs::OpenOptions;
         use std::io::{Seek, SeekFrom, Write};
+        use std::sync::atomic::{AtomicU64, Ordering};
 
+        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "pdbg-open-fd-{}-{}.pdf",
+            "pdbg-open-fd-{}-{}-{}.pdf",
             std::process::id(),
+            sequence,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
