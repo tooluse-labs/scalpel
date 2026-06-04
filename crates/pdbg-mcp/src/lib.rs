@@ -7,7 +7,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use pdbg_core::{ChildRange, DocumentId, ObjectId, RenderRequest};
+use pdbg_core::{
+    CapabilityDecision, CapabilityFeature, ChildRange, DocumentId, MuPdfCapabilities, ObjectId,
+    RenderRequest,
+};
 
 #[derive(Clone, Debug)]
 pub struct Allowlist {
@@ -332,6 +335,56 @@ pub fn validate_render_request(
         ));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpTool {
+    InspectStructure,
+    GetChildren,
+    GetObjectDetail,
+    LoadRawStream,
+    LoadDecodedStream,
+    RenderPage,
+    ExtractText,
+    GetArtifact,
+}
+
+impl McpTool {
+    pub fn required_feature(self) -> Option<CapabilityFeature> {
+        match self {
+            Self::InspectStructure | Self::GetChildren | Self::GetObjectDetail => {
+                Some(CapabilityFeature::InspectStructure)
+            }
+            Self::LoadRawStream => Some(CapabilityFeature::RawStreams),
+            Self::LoadDecodedStream => Some(CapabilityFeature::DecodedStreams),
+            Self::RenderPage => Some(CapabilityFeature::RenderPages),
+            Self::ExtractText => Some(CapabilityFeature::ExtractText),
+            Self::GetArtifact => None,
+        }
+    }
+}
+
+pub fn gate_mcp_tool(capabilities: &MuPdfCapabilities, tool: McpTool) -> CapabilityDecision {
+    match tool.required_feature() {
+        Some(feature) => capabilities.gate(feature),
+        None => CapabilityDecision::Enabled,
+    }
+}
+
+pub fn visible_mcp_tools(capabilities: &MuPdfCapabilities) -> Vec<McpTool> {
+    [
+        McpTool::InspectStructure,
+        McpTool::GetChildren,
+        McpTool::GetObjectDetail,
+        McpTool::LoadRawStream,
+        McpTool::LoadDecodedStream,
+        McpTool::RenderPage,
+        McpTool::ExtractText,
+        McpTool::GetArtifact,
+    ]
+    .into_iter()
+    .filter(|tool| gate_mcp_tool(capabilities, *tool) == CapabilityDecision::Enabled)
+    .collect()
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -814,6 +867,29 @@ mod tests {
             ..valid_render_request(&limits)
         };
         validate_render_request(&valid_inverted, &limits).unwrap();
+    }
+
+    #[test]
+    fn mcp_tools_are_hidden_or_unsupported_by_capability() {
+        let mut capabilities = MuPdfCapabilities::mupdf_only_default();
+        assert_eq!(
+            gate_mcp_tool(&capabilities, McpTool::RenderPage),
+            CapabilityDecision::Enabled
+        );
+        assert!(visible_mcp_tools(&capabilities).contains(&McpTool::RenderPage));
+
+        capabilities.can_render_pages = false;
+        assert_eq!(
+            gate_mcp_tool(&capabilities, McpTool::RenderPage),
+            CapabilityDecision::Unsupported {
+                reason: "page rendering is unavailable"
+            }
+        );
+        assert!(!visible_mcp_tools(&capabilities).contains(&McpTool::RenderPage));
+        assert_eq!(
+            gate_mcp_tool(&capabilities, McpTool::GetArtifact),
+            CapabilityDecision::Enabled
+        );
     }
 
     fn valid_render_request(limits: &McpInputLimits) -> RenderRequest {

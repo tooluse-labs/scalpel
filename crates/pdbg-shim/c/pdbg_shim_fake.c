@@ -568,6 +568,8 @@ pdbg_status pdbg_page_extract_text(
     text[3] = '\0';
     page->spans[0].text = text;
     page->spans[0].text_len = 3;
+    page->spans[0].x = 5.0f;
+    page->spans[0].y = 7.0f;
     page->spans[0].width = 10.0f;
     page->spans[0].height = 12.0f;
     page->spans[0].page_index = page_index;

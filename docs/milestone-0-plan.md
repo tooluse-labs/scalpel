@@ -44,6 +44,12 @@ Completed:
   text extraction operations; enum/discriminant guards; diagnostic and
   stream-summary conversion; FFI string/byte copying with interior-NUL text; and
   node-token registry tests including unknown-token fallback.
+- **T2.5** capability gating consumers: `pdbg-app` records app feature gates and
+  `pdbg-mcp` exposes tool visibility / `UNSUPPORTED` gating for structure,
+  stream, render, text, and artifact tools.
+- **T2.6** text-coordinate golden: fake text extraction fixes top-left page-space
+  coordinates and contract tests pin page index, bbox, and untrusted span
+  handling.
 - **T3.3** decode-time limit contract: a configured low
   `max_decoded_stream_bytes` returns `PDBG_ERROR_LIMIT` during fake decoded-stream
   loading before a `pdbg_buffer` is materialized.
@@ -91,12 +97,6 @@ Completed:
 - **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and TSan jobs plus a
   deterministic fake-shim fuzz-smoke job covering traversal, decode limits,
   DTO/egress contracts, callback panic mapping, and concurrency smoke.
-
-Partial:
-
-- **T2.5** capability logic exists; real app/MCP feature hiding is still pending.
-- **T2.6** text span byte copying is covered; full coordinate-normalization
-  golden coverage is still pending.
 
 Not started:
 

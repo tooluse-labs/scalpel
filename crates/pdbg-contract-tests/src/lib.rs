@@ -102,4 +102,19 @@ mod tests {
         let text = doc.extract_text(&TextRequest::page(0)).unwrap();
         assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
     }
+
+    #[test]
+    fn text_coordinate_normalization_golden_is_top_left_page_space() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+        let span = &text.spans[0];
+
+        assert_eq!(text.page_index, 0);
+        assert_eq!(span.bbox.x, 5.0);
+        assert_eq!(span.bbox.y, 7.0);
+        assert_eq!(span.bbox.width, 10.0);
+        assert_eq!(span.bbox.height, 12.0);
+        assert!(span.untrusted);
+    }
 }
