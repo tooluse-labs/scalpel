@@ -41,6 +41,10 @@ Completed:
 - **T3.2** `pdbg_document_open_fd` ownership contract: success and post-dup
   failure paths both leave the caller's original fd usable; the fake shim closes
   only the duplicated fd it owns.
+- **T4.3** MCP allowlist contract: roots and request paths are canonicalized,
+  URL-like paths and canonicalization failures are rejected, accepted paths must
+  be path-component descendants of a configured root, and symlink / `..` escapes
+  are rejected.
 
 Partial:
 
@@ -52,8 +56,8 @@ Partial:
 
 Not started:
 
-- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.6**, **T5.1–T5.4**, **T5.3**, and
-  **T6.1**.
+- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.4–T4.6**,
+  **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
