@@ -16,6 +16,7 @@ Last verified locally with:
 - `cargo fmt --check`;
 - `cargo test --workspace`;
 - `cargo clippy --workspace -- -D warnings`;
+- `cargo run -p pdbg-app --quiet`;
 - `python3 scripts/check_pdbg_shim_abi_snapshot.py`;
 - `python3 scripts/check_notices.py`;
 - `sh scripts/test_fz_try_gate.sh`;
@@ -97,10 +98,14 @@ Completed:
 - **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and TSan jobs plus a
   deterministic fake-shim fuzz-smoke job covering traversal, decode limits,
   DTO/egress contracts, callback panic mapping, and concurrency smoke.
+- **T6.1** M0 exit gate: local `scripts/run_m0_local_gate.sh` exercises the full
+  fake-shim contract baseline without libmupdf, `pdbg-app` launches headlessly,
+  CI jobs are checked in, and `docs/ci/required-jobs.md` lists the jobs to mark
+  required on `main`.
 
 Not started:
 
-- **T6.1**.
+- None.
 
 ## Two load-bearing principles (they decide the whole order)
 
