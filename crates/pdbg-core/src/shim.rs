@@ -829,7 +829,20 @@ mod tests {
         let shim = FakeShim::new().unwrap();
         let summary = shim.open_document_summary("fake.pdf").unwrap();
         assert_eq!(summary.file_path, "fake.pdf");
+        assert_eq!(summary.file_hash.as_deref(), Some("fake-hash"));
+        assert_eq!(summary.pdf_version.as_deref(), Some("1.7"));
+        assert_eq!(summary.page_count, 1);
+        assert_eq!(summary.xref_size, 3);
+        assert_eq!(summary.parsed_object_count, Some(3));
+        assert!(!summary.encrypted);
+        assert!(!summary.needs_password);
+        assert!(summary.permissions.print);
+        assert!(summary.permissions.copy);
+        assert!(!summary.permissions.modify);
+        assert!(summary.metadata_summary.is_empty());
+        assert!(summary.safety.safe_mode);
         assert!(summary.safety.javascript_disabled);
+        assert!(!summary.safety.ocr_enabled);
         assert_eq!(
             summary.diagnostics[0].code.as_public_str(),
             "repair_warning"
@@ -857,7 +870,13 @@ mod tests {
         assert!(matches!(children.items[0].id, NodeId::DictEntry { .. }));
 
         let detail = doc.object_detail(&children.items[0].id, range).unwrap();
-        assert_eq!(detail.stream.unwrap().filters, vec!["FlateDecode"]);
+        let stream_summary = detail.stream.as_ref().unwrap();
+        assert_eq!(stream_summary.object, ObjectId { num: 1, gen: 0 });
+        assert_eq!(stream_summary.filters, vec!["FlateDecode"]);
+        assert_eq!(stream_summary.raw_size_hint, Some(32));
+        assert_eq!(stream_summary.decoded_size_hint, Some(64));
+        assert!(stream_summary.can_decode);
+        assert!(!stream_summary.image_preview_available);
         assert!(!detail.diagnostics.is_empty());
         assert!(detail.dictionary_entries.unwrap().total.is_some());
 

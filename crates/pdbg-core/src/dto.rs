@@ -599,6 +599,53 @@ impl DiagnosticCode {
     }
 }
 
+pub fn diagnostics_payload_to_json_string(diagnostics: &[DiagnosticSummary]) -> String {
+    let mut out = String::new();
+    out.push('{');
+    push_json_field_u32(
+        &mut out,
+        "diagnostic_schema_version",
+        DIAGNOSTIC_SCHEMA_VERSION,
+    );
+    out.push_str(",\"diagnostics\":[");
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        push_diagnostic_json(&mut out, diagnostic);
+    }
+    out.push_str("]}");
+    out
+}
+
+fn push_diagnostic_json(out: &mut String, diagnostic: &DiagnosticSummary) {
+    out.push('{');
+    push_json_field_str(out, "severity", diagnostic.severity.as_public_str());
+    out.push(',');
+    push_json_field_str(out, "code", diagnostic.code.as_public_str());
+    out.push(',');
+    push_json_field_str(out, "message", &diagnostic.message);
+    out.push_str(",\"node\":");
+    if let Some(node) = &diagnostic.node {
+        out.push_str(&node.to_serialized().to_json_string());
+    } else {
+        out.push_str("null");
+    }
+    out.push_str(",\"page_index\":");
+    if let Some(page_index) = diagnostic.page_index {
+        out.push_str(&page_index.to_string());
+    } else {
+        out.push_str("null");
+    }
+    out.push_str(",\"object\":");
+    if let Some(object) = diagnostic.object {
+        push_object_id_json(out, object);
+    } else {
+        out.push_str("null");
+    }
+    out.push('}');
+}
+
 fn push_json_field_u32(out: &mut String, name: &str, value: u32) {
     push_json_string(out, name);
     out.push(':');
@@ -682,8 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_schema_and_public_strings_are_pinned() {
-        assert_eq!(DIAGNOSTIC_SCHEMA_VERSION, 1);
+    fn diagnostic_schema_payload_and_public_strings_are_pinned() {
         assert_eq!(DiagnosticSeverity::Info.as_public_str(), "info");
         assert_eq!(DiagnosticSeverity::Warning.as_public_str(), "warning");
         assert_eq!(DiagnosticSeverity::Error.as_public_str(), "error");
@@ -714,5 +760,21 @@ mod tests {
         for (code, expected) in codes {
             assert_eq!(code.as_public_str(), expected);
         }
+
+        let diagnostics = [DiagnosticSummary {
+            severity: DiagnosticSeverity::Warning,
+            code: DiagnosticCode::RepairWarning,
+            message: "xref repaired\nwith fallback".to_string(),
+            node: Some(NodeId::Page {
+                doc: DocumentId(9),
+                index: 2,
+            }),
+            page_index: Some(2),
+            object: Some(ObjectId { num: 4, gen: 0 }),
+        }];
+        assert_eq!(
+            diagnostics_payload_to_json_string(&diagnostics),
+            "{\"diagnostic_schema_version\":1,\"diagnostics\":[{\"severity\":\"warning\",\"code\":\"repair_warning\",\"message\":\"xref repaired\\nwith fallback\",\"node\":{\"schema_version\":1,\"doc\":9,\"segments\":[{\"tag\":\"page\",\"index\":2}],\"object\":null},\"page_index\":2,\"object\":{\"num\":4,\"gen\":0}}]}"
+        );
     }
 }

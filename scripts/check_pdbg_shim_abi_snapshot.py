@@ -20,7 +20,11 @@ HEADER_ENUM = re.compile(r"typedef\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}\s*\1\s*;",
 RUST_ENUM = re.compile(r"pub\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}", re.S)
 VARIANT = re.compile(r"\b([A-Z][A-Z0-9_]+)\s*=\s*([0-9]+)")
 HEADER_STRUCT = re.compile(r"typedef\s+struct\s+(\w+)\s*\{(?P<body>.*?)\}\s*\1\s*;", re.S)
+HEADER_OPAQUE_STRUCT = re.compile(r"typedef\s+struct\s+(\w+)\s+\1\s*;")
 RUST_STRUCT = re.compile(r"pub\s+struct\s+(\w+)\s*\{(?P<body>.*?)\n\}", re.S)
+RUST_REPR_ITEM = re.compile(
+    r"(?P<attrs>(?:#\[[^\]]+\]\s*)*)pub\s+(?P<kind>struct|enum)\s+(?P<name>\w+)"
+)
 HEADER_FN = re.compile(r"(?P<ret>[A-Za-z_][\w\s\*]*?)\s*(?P<name>pdbg_\w+)\s*\((?P<args>.*?)\)\s*;", re.S)
 RUST_FN = re.compile(r"pub\s+fn\s+(?P<name>pdbg_\w+)\s*\((?P<args>.*?)\)\s*(?:->\s*(?P<ret>[^;]+))?;", re.S)
 HEADER_CALLBACK = re.compile(
@@ -49,18 +53,30 @@ def c_structs(text: str) -> dict[str, list[tuple[str, str]]]:
     return structs
 
 
+def c_opaque_structs(text: str) -> set[str]:
+    return set(HEADER_OPAQUE_STRUCT.findall(text))
+
+
 def rust_structs(text: str) -> dict[str, list[tuple[str, str]]]:
     structs: dict[str, list[tuple[str, str]]] = {}
     for match in RUST_STRUCT.finditer(text):
         fields: list[tuple[str, str]] = []
         for line in match.group("body").splitlines():
             line = line.strip().rstrip(",")
-            if not line.startswith("pub "):
+            if not line or line.startswith("#") or ":" not in line:
                 continue
             name, raw_type = line.removeprefix("pub ").split(":", 1)
             fields.append((name.strip(), normalize_rust_type(raw_type.strip())))
         structs[match.group(1)] = fields
     return structs
+
+
+def rust_repr_c_items(text: str) -> set[str]:
+    items: set[str] = set()
+    for match in RUST_REPR_ITEM.finditer(text):
+        if "#[repr(C)]" in match.group("attrs"):
+            items.add(match.group("name"))
+    return items
 
 
 def c_functions(text: str) -> dict[str, tuple[str, list[str]]]:
@@ -207,10 +223,33 @@ def main() -> int:
     raw = RAW.read_text(encoding="utf-8")
 
     errors: list[str] = []
-    compare_mapping("enum", enum_map(header, HEADER_ENUM), enum_map(raw, RUST_ENUM), errors)
-    compare_mapping("struct", c_structs(header), rust_structs(raw), errors, allow_extra=True)
+    header_enums = enum_map(header, HEADER_ENUM)
+    header_structs = c_structs(header)
+    header_opaque_structs = c_opaque_structs(header)
+    rust_struct_map = rust_structs(raw)
+    rust_concrete_structs = {
+        name: fields
+        for name, fields in rust_struct_map.items()
+        if name not in header_opaque_structs
+    }
+    expected_opaque_structs = {
+        name: [("_private", "[u8; 0]")] for name in header_opaque_structs
+    }
+
+    compare_mapping("enum", header_enums, enum_map(raw, RUST_ENUM), errors)
+    compare_mapping("struct", header_structs, rust_concrete_structs, errors)
+    compare_mapping(
+        "opaque struct",
+        expected_opaque_structs,
+        {name: rust_struct_map[name] for name in header_opaque_structs if name in rust_struct_map},
+        errors,
+    )
     compare_mapping("callback typedef", c_callbacks(header), rust_callbacks(raw), errors)
     compare_mapping("extern fn", c_functions(header), rust_functions(raw), errors)
+    expected_repr_c = set(header_enums) | set(header_structs) | header_opaque_structs
+    missing_repr_c = sorted(expected_repr_c - rust_repr_c_items(raw))
+    if missing_repr_c:
+        errors.append(f"missing #[repr(C)] on Rust ABI items: {', '.join(missing_repr_c)}")
 
     for error in errors:
         print(error)

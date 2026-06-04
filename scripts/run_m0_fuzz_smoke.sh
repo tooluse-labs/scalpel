@@ -6,7 +6,10 @@ cargo test -p pdbg-contract-tests serialized_node_id_contract_is_stable_and_toke
 cargo test -p pdbg-contract-tests egress_contract_escapes_pdf_controlled_text
 cargo test -p pdbg-core decoded_stream_limit_returns_limit_error_before_buffer_materialization
 cargo test -p pdbg-core raw_enum_discriminants_are_append_only_guarded
-cargo test -p pdbg-core diagnostic_schema_and_public_strings_are_pinned
+cargo test -p pdbg-core diagnostic_schema_payload_and_public_strings_are_pinned
+cargo test -p pdbg-core object_value_string_bytes_preserve_raw_bytes_as_authority
+cargo test -p pdbg-core stream_summary_converts_filters_sizes_and_capability_flags
+cargo test -p pdbg-core diagnostic_conversion_resolves_node_page_and_object_fields
 cargo test -p pdbg-core c_invoked_rust_callback_catches_panic_before_returning_to_c
 cargo test -p pdbg-core multiple_sessions_drive_shared_store_from_worker_threads
 cargo test -p pdbg-core cloned_document_session_serializes_concurrent_tasks

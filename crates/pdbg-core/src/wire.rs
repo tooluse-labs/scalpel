@@ -243,6 +243,7 @@ pub(crate) unsafe fn diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
     use std::os::raw::c_char;
 
     #[test]
@@ -377,5 +378,116 @@ mod tests {
         let bytes = [b'A' as c_char, 0, b'B' as c_char];
         let copied = unsafe { copy_text_bytes(bytes.as_ptr(), bytes.len()) };
         assert_eq!(copied.as_bytes(), b"A\0B");
+    }
+
+    #[test]
+    fn object_value_string_bytes_preserve_raw_bytes_as_authority() {
+        let mut bytes = [b'A', 0, b'B'];
+        let decoded_text = CString::new("convenience").unwrap();
+        let raw_value = raw::pdbg_object_value {
+            kind: raw::pdbg_object_value_kind::PDBG_VALUE_STRING_BYTES,
+            bool_value: 0,
+            int_value: 0,
+            real_value: 0.0,
+            name_value: std::ptr::null_mut(),
+            bytes: bytes.as_mut_ptr(),
+            byte_len: bytes.len(),
+            string_kind: raw::pdbg_pdf_string_kind::PDBG_STRING_HEX,
+            is_text_string: 1,
+            decoded_text: decoded_text.as_ptr().cast_mut(),
+            ref_value: raw::pdbg_object_id { num: 0, gen: 0 },
+        };
+
+        match unsafe { object_value(&raw_value) } {
+            ObjectValue::StringBytes {
+                bytes,
+                string_kind,
+                is_text_string,
+                decoded_text,
+            } => {
+                assert_eq!(bytes, b"A\0B");
+                assert_eq!(string_kind, PdfStringKind::Hex);
+                assert!(is_text_string);
+                assert_eq!(decoded_text.as_deref(), Some("convenience"));
+            }
+            other => panic!("expected StringBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_summary_converts_filters_sizes_and_capability_flags() {
+        let filter_a = CString::new("FlateDecode").unwrap();
+        let filter_b = CString::new("ASCIIHexDecode").unwrap();
+        let mut filters = [filter_a.as_ptr().cast_mut(), filter_b.as_ptr().cast_mut()];
+        let raw_stream = raw::pdbg_stream_summary {
+            object: raw::pdbg_object_id { num: 12, gen: 3 },
+            filters: filters.as_mut_ptr(),
+            filter_count: filters.len(),
+            raw_size_hint: 100,
+            has_raw_size_hint: 1,
+            decoded_size_hint: 240,
+            has_decoded_size_hint: 1,
+            can_decode: 1,
+            image_preview_available: 1,
+        };
+
+        let converted = unsafe { stream_summary(&raw_stream) };
+        assert_eq!(converted.object, ObjectId { num: 12, gen: 3 });
+        assert_eq!(
+            converted.filters,
+            vec!["FlateDecode".to_string(), "ASCIIHexDecode".to_string()]
+        );
+        assert_eq!(converted.raw_size_hint, Some(100));
+        assert_eq!(converted.decoded_size_hint, Some(240));
+        assert!(converted.can_decode);
+        assert!(converted.image_preview_available);
+    }
+
+    #[test]
+    fn diagnostic_conversion_resolves_node_page_and_object_fields() {
+        let message = CString::new("page resource repaired").unwrap();
+        let raw_node = raw::pdbg_node_id {
+            document_id: 5,
+            kind: raw::pdbg_node_kind::PDBG_NODE_PAGE,
+            object: raw::pdbg_object_id { num: 0, gen: 0 },
+            has_object: 0,
+            page_index: 7,
+            path_token: 0,
+            decoded: 0,
+            resource_group: raw::pdbg_resource_group::PDBG_RESOURCE_FONTS,
+        };
+        let raw_diag = raw::pdbg_diagnostic {
+            severity: raw::pdbg_diagnostic_severity::PDBG_DIAG_ERROR,
+            code: raw::pdbg_diagnostic_code::PDBG_DIAG_RESOURCE_MISSING,
+            message: message.as_ptr().cast_mut(),
+            node: raw_node,
+            has_node: 1,
+            page_index: 7,
+            has_page_index: 1,
+            object: raw::pdbg_object_id { num: 44, gen: 0 },
+            has_object: 1,
+        };
+
+        let converted = unsafe {
+            diagnostic(&raw_diag, &|node| {
+                (node.kind == raw::pdbg_node_kind::PDBG_NODE_PAGE).then_some(NodeId::Page {
+                    doc: DocumentId(node.document_id),
+                    index: node.page_index as usize,
+                })
+            })
+        };
+
+        assert_eq!(converted.severity, DiagnosticSeverity::Error);
+        assert_eq!(converted.code, DiagnosticCode::ResourceMissing);
+        assert_eq!(converted.message, "page resource repaired");
+        assert_eq!(
+            converted.node,
+            Some(NodeId::Page {
+                doc: DocumentId(5),
+                index: 7
+            })
+        );
+        assert_eq!(converted.page_index, Some(7));
+        assert_eq!(converted.object, Some(ObjectId { num: 44, gen: 0 }));
     }
 }

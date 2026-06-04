@@ -27,9 +27,10 @@ Completed:
 
 - **T0.1–T0.5** scaffold/core ABI substrate: workspace crates, frozen
   `pdbg_shim.h`, fake C shim, checked-in raw bindings, structural ABI drift
-  script covering enum values, struct field order/types, callback typedefs, and
-  extern function signatures, plus Rust RAII wrappers/accessors for context,
-  document, buffer, image, node-list, and text-page handles.
+  script covering enum values, concrete and opaque struct field order/types,
+  required `#[repr(C)]`, callback typedefs, and extern function signatures, plus
+  Rust RAII wrappers/accessors for context, document, buffer, image, node-list,
+  and text-page handles.
 - **T0.7** scaffold-level `fz_try` static gate with good/bad fixtures.
 - **T0.8** checked-in CI skeleton: `.github/workflows/m0.yml` defines contract,
   C ASAN/UBSan, TSan, and fuzz-smoke jobs; `scripts/run_m0_local_gate.sh` runs
@@ -40,13 +41,15 @@ Completed:
   maps them to `PDBG_ERROR_GENERIC`, and fills `pdbg_error`.
 - **T1.1–T1.6** pure-Rust DTO/config contract surface: core identifiers,
   `RenderRequest`, `TextRequest`, schema constants, stable `SerializedNodeId`
-  JSON, stable diagnostic/resource strings, egress escaping, capability gating,
-  and safe-mode defaults.
+  JSON, stable diagnostic/resource strings, diagnostic payload JSON including
+  `diagnostic_schema_version`, egress escaping, capability gating, and safe-mode
+  defaults.
 - **T2.0–T2.4, T2.7** fake-shim-backed wire conversion surface: `Shim` /
   `ShimDocument`, document summary, children, object detail, stream, render, and
-  text extraction operations; enum/discriminant guards; diagnostic and
-  stream-summary conversion; FFI string/byte copying with interior-NUL text; and
-  node-token registry tests including unknown-token fallback.
+  text extraction operations; enum/discriminant guards; document-summary field
+  coverage; diagnostic, `StringBytes`, and stream-summary conversion; FFI
+  string/byte copying with interior-NUL text; and node-token registry tests
+  including unknown-token fallback.
 - **T2.5** capability gating consumers: `pdbg-app` records app feature gates and
   `pdbg-mcp` exposes tool visibility / `UNSUPPORTED` gating for structure,
   stream, render, text, and artifact tools.
@@ -101,8 +104,9 @@ Completed:
 - **T5.4** fixture policy: synthetic-only fixture README plus a tiny
   license-clean minimal PDF seed under `fixtures/synthetic/`.
 - **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and C/Rust TSan jobs plus a
-  deterministic fake-shim fuzz-smoke job covering traversal, decode limits,
-  DTO/egress contracts, callback panic mapping, and concurrency smoke.
+  deterministic fake-shim contract-smoke job (kept under the historical
+  `fuzz-smoke` name) covering traversal, decode limits, DTO/egress contracts,
+  wire conversions, callback panic mapping, and concurrency smoke.
 - **T6.1** M0 exit gate: local `scripts/run_m0_local_gate.sh` exercises the full
   fake-shim contract baseline without libmupdf, `pdbg-app` launches headlessly,
   CI jobs are checked in, and `docs/ci/required-jobs.md` lists the jobs to mark
@@ -111,6 +115,15 @@ Completed:
 Not started:
 
 - None.
+
+Deferred to Milestone 1:
+
+- Real MuPDF malformed-PDF loop tests for `fz_try`/`fz_catch` stack integrity.
+- Real `fz_locks_context` callback wiring and a genuinely racy MuPDF shared-store
+  target under TSan.
+- Native egui window/GPU smoke beyond the M0 headless app-state check.
+- True coverage-guided fuzzing; M0's `fuzz-smoke` job is deterministic contract
+  smoke, not a fuzzer.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -248,7 +261,8 @@ All tasks are `needs_real_mupdf: false`.
 - **T1.2** `SerializedNodeId` public JSON encode + golden tests (lowercase segment
   tags, `{num,gen}`, `schema_version`, never exposes `path_token`). — deps: T1.1
 - **T1.3** `DiagnosticCode`/severity stable lowercase-string serialization +
-  golden tests (incl. `javascript_disabled`) + `DIAGNOSTIC_SCHEMA_VERSION`.
+  golden tests (incl. `javascript_disabled`) + diagnostic payload JSON emitting
+  `diagnostic_schema_version`.
   — deps: T1.1
 - **T1.4** Egress escaping (plaintext/Markdown/HTML/JSON) + unit tests per §9.
   — deps: T1.1
@@ -314,8 +328,10 @@ All tasks are `needs_real_mupdf: false`.
   FakeShim has a shared fake store modeling cross-context global state. — deps:
   T1.1, T0.5
 - **T4.2** Concurrency smoke over the shared fake store (multiple sessions +
-  worker threads through the scheduler; no race on lock/callback path; executed
-  under TSan by T5.3). — deps: T4.1, T3.4
+  worker threads through the scheduler for shared-store accounting) plus
+  same-session cloned-handle serialization (load-bearing max-active assertion);
+  executed under TSan by T5.3. Real MuPDF lock-callback races are deferred to
+  M1. — deps: T4.1, T3.4
 - **T4.3** MCP allowlist (Blocker B3): canonicalize roots at load + request path,
   **path-component-descendant (not `starts_with`)**, reject canonicalization
   failures, reject `..` + symlink escape, no-URL. *(`pdbg-mcp`)* — deps: T1.1
@@ -408,9 +424,9 @@ Everything else fans out from this spine. Real MuPDF is not on it.
 - Safe-mode defaults config-represented + unit-tested.
 - Capability gating drives panels / MCP tools (logic + real consumer).
 - `SerializedNodeId` golden JSON; **node-token registry** tests (incl.
-  unknown-token fallback); diagnostic-code golden strings; enum conversions +
-  discriminant guard; diagnostic/stream wire conversions; FFI string/interior-NUL;
-  text-coordinate goldens.
+  unknown-token fallback); diagnostic-code golden strings and diagnostic payload
+  schema version; enum conversions + discriminant guard; diagnostic/StringBytes/
+  stream wire conversions; FFI string/interior-NUL; text-coordinate goldens.
 - Boundary safety over the fake shim: accessor valid/invalid-after-cleanup under
   ASAN/UBSan; `open_fd` ownership; decode-time `PDBG_ERROR_LIMIT`; callback panic
   policy.
