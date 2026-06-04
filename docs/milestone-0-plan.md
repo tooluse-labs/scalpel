@@ -26,6 +26,10 @@ Completed:
   Rust RAII wrappers/accessors for context, document, buffer, image, node-list,
   and text-page handles.
 - **T0.7** scaffold-level `fz_try` static gate with good/bad fixtures.
+- **T0.6** panic-into-C policy: workspace profiles explicitly use
+  `panic = "unwind"` and `pdbg-core` exposes a single `catch_ffi_callback`
+  boundary helper that catches Rust panics from future `extern "C"` callbacks,
+  maps them to `PDBG_ERROR_GENERIC`, and fills `pdbg_error`.
 - **T1.1–T1.6** pure-Rust DTO/config contract surface: core identifiers,
   `RenderRequest`, `TextRequest`, schema constants, stable `SerializedNodeId`
   JSON, stable diagnostic/resource strings, egress escaping, capability gating,
@@ -63,8 +67,8 @@ Partial:
 
 Not started:
 
-- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.6**, **T5.1–T5.4**,
-  **T5.3**, and **T6.1**.
+- **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**,
+  and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
