@@ -1,0 +1,9 @@
+SPDX-License-Identifier: AGPL-3.0-only
+
+xreflab / pdbg is licensed under the GNU Affero General Public License version 3
+only.
+
+Milestone 0 is a source-only contract baseline and does not bundle MuPDF. Before
+any binary or network-service distribution, replace or accompany this scaffold
+with the full AGPL-3.0-only license text and the corresponding-source offer
+described in `docs/compliance/agpl-source-offer.md`.

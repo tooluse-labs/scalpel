@@ -1,0 +1,27 @@
+# Notices
+
+Project: xreflab / pdbg
+License: AGPL-3.0-only
+
+## Workspace Packages
+
+- pdbg-app: AGPL-3.0-only
+- pdbg-contract-tests: AGPL-3.0-only
+- pdbg-core: AGPL-3.0-only
+- pdbg-mcp: AGPL-3.0-only
+- pdbg-shim: AGPL-3.0-only
+
+## MuPDF
+
+MuPDF is not bundled, linked, downloaded, or required by the Milestone 0 default
+build. The real MuPDF integration is deferred to Milestone 1.
+
+When `real-mupdf` is enabled in a future build, this file must be regenerated to
+include the exact MuPDF version, source location, license choice, bundled
+notices, local patches, and corresponding-source instructions.
+
+## Rust Toolchain
+
+The Milestone 0 workspace currently depends only on the Rust standard library
+and local workspace crates. No third-party Rust crates are listed in
+`Cargo.lock`.

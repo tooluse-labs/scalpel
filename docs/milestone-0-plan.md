@@ -17,6 +17,7 @@ Last verified locally with:
 - `cargo test --workspace`;
 - `cargo clippy --workspace -- -D warnings`;
 - `python3 scripts/check_pdbg_shim_abi_snapshot.py`;
+- `python3 scripts/check_notices.py`;
 - `sh scripts/test_fz_try_gate.sh`.
 
 Completed:
@@ -75,6 +76,14 @@ Completed:
   /output panel state over `FakeShim` + `DocumentSession`, wires safe-mode
   defaults, capability gates, Markdown egress escaping, and runs a command-loop
   smoke without opening a real window/GPU surface.
+- **T5.1** MuPDF build/vendoring/linking ADR: M0 keeps MuPDF unbundled and
+  unlinked, `real-mupdf` off, bindgen scoped to `pdbg_shim.h`, with M1 entry and
+  upgrade criteria documented.
+- **T5.2** AGPL compliance scaffold: `LICENSE`, `NOTICES`, future network
+  source-offer path, and `scripts/check_notices.py` covering MuPDF placeholders
+  plus all Cargo.lock workspace packages.
+- **T5.4** fixture policy: synthetic-only fixture README plus a tiny
+  license-clean minimal PDF seed under `fixtures/synthetic/`.
 
 Partial:
 
@@ -86,7 +95,7 @@ Partial:
 
 Not started:
 
-- **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T5.3** and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
