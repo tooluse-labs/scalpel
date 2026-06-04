@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use pdbg_core::{
-        escape_pdf_text, CapabilityDecision, CapabilityFeature, DiagnosticCode, DocumentId,
-        EgressFormat, FakeShim, MuPdfCapabilities, NodeId, ObjectId, ResourceGroup, SafeModeConfig,
-        Shim,
+        escape_pdf_text, CapabilityDecision, CapabilityFeature, ChildRange, DiagnosticCode,
+        DocumentId, EgressFormat, FakeShim, MuPdfCapabilities, NodeId, ObjectId, RenderRequest,
+        ResourceGroup, SafeModeConfig, Shim, ShimDocument, StreamMode, TextRequest,
     };
 
     #[test]
@@ -65,5 +65,41 @@ mod tests {
                 reason: "OCR is disabled or unavailable"
             }
         );
+    }
+
+    #[test]
+    fn fake_shim_operation_surface_uses_c_accessors_and_registry() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let summary = doc.summary().unwrap();
+        let root = NodeId::DocumentRoot {
+            doc: summary.doc.clone(),
+        };
+        let range = ChildRange {
+            offset: 0,
+            limit: 2,
+        };
+
+        let children = doc
+            .children(&root, range, pdbg_core::ChildContainer::Dictionary)
+            .unwrap();
+        assert_eq!(children.total, Some(3));
+        assert_eq!(children.items[0].object, Some(ObjectId { num: 1, gen: 0 }));
+
+        let detail = doc.object_detail(&children.items[0].id, range).unwrap();
+        assert_eq!(detail.stream.unwrap().filters, vec!["FlateDecode"]);
+        assert_eq!(detail.dictionary_entries.unwrap().items.len(), 2);
+
+        let stream = doc
+            .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 4)
+            .unwrap();
+        assert_eq!(stream.bytes, b"fake");
+        assert!(stream.truncated);
+
+        let render = doc.render_page(&RenderRequest::page(0)).unwrap();
+        assert_eq!(render.pixels_rgba, vec![255, 255, 255, 255]);
+
+        let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+        assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
     }
 }

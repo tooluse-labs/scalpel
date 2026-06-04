@@ -401,7 +401,7 @@ pub struct DocumentPermissions {
     pub high_quality_print: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildRange {
     pub offset: usize,
     pub limit: usize,
@@ -437,6 +437,35 @@ pub enum RenderColorMode {
 }
 
 #[derive(Clone, Debug)]
+pub struct RenderRequest {
+    pub page_index: usize,
+    pub zoom: f32,
+    pub rotation_degrees: i32,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_pixels: u64,
+    pub max_output_bytes: u64,
+    pub color_mode: RenderColorMode,
+    pub layer_config_token: Option<u64>,
+}
+
+impl RenderRequest {
+    pub fn page(page_index: usize) -> Self {
+        Self {
+            page_index,
+            zoom: 1.0,
+            rotation_degrees: 0,
+            max_width: 4096,
+            max_height: 4096,
+            max_pixels: 16_777_216,
+            max_output_bytes: 128 * 1024 * 1024,
+            color_mode: RenderColorMode::Rgba,
+            layer_config_token: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct RenderResult {
     pub page_index: usize,
     pub width: u32,
@@ -445,6 +474,27 @@ pub struct RenderResult {
     pub pixels_rgba: Vec<u8>,
     pub duration_ms: u64,
     pub diagnostics: Vec<DiagnosticSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextRequest {
+    pub page_index: usize,
+    pub sort_by_position: bool,
+    pub include_coordinates: bool,
+    pub max_chars: usize,
+    pub max_blocks: usize,
+}
+
+impl TextRequest {
+    pub fn page(page_index: usize) -> Self {
+        Self {
+            page_index,
+            sort_by_position: true,
+            include_coordinates: true,
+            max_chars: 1_000_000,
+            max_blocks: 100_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

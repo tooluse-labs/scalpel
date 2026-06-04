@@ -9,6 +9,45 @@
 - **MuPDF-only**, **AGPL-3.0**, **hand-written C shim over bindgen-generated raw
   bindings** (no `mupdf-rs`/`mupdf-sys`), **egui** desktop UI.
 
+## Current Status (2026-06-04)
+
+Last verified locally with:
+
+- `cargo fmt --check`;
+- `cargo test --workspace`;
+- `cargo clippy --workspace -- -D warnings`;
+- `python3 scripts/check_pdbg_shim_abi_snapshot.py`;
+- `sh scripts/test_fz_try_gate.sh`.
+
+Completed:
+
+- **T0.1–T0.5** scaffold/core ABI substrate: workspace crates, frozen
+  `pdbg_shim.h`, fake C shim, checked-in raw bindings, ABI drift script, and
+  Rust RAII wrappers/accessors for context, document, buffer, image, node-list,
+  and text-page handles.
+- **T0.7** scaffold-level `fz_try` static gate with good/bad fixtures.
+- **T1.1–T1.6** pure-Rust DTO/config contract surface: core identifiers,
+  `RenderRequest`, `TextRequest`, schema constants, stable `SerializedNodeId`
+  JSON, stable diagnostic/resource strings, egress escaping, capability gating,
+  and safe-mode defaults.
+- **T2.0–T2.4, T2.7** fake-shim-backed wire conversion surface: `Shim` /
+  `ShimDocument`, document summary, children, object detail, stream, render, and
+  text extraction operations; enum/discriminant guards; diagnostic and
+  stream-summary conversion; FFI string/byte copying with interior-NUL text; and
+  node-token registry tests including unknown-token fallback.
+
+Partial:
+
+- **T0.8** local green gate exists, but no checked-in CI workflow marks jobs
+  required yet.
+- **T2.5** capability logic exists; real app/MCP feature hiding is still pending.
+- **T2.6** text span byte copying is covered; full coordinate-normalization
+  golden coverage is still pending.
+
+Not started:
+
+- **T0.6**, **T3.1–T3.4**, **T4.1–T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+
 ## Two load-bearing principles (they decide the whole order)
 
 1. **M0 runs entirely on a fake shim; real MuPDF is deferred to Milestone 1.**

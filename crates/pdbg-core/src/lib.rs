@@ -11,4 +11,4 @@ pub use config::{RepairPolicy, SafeModeConfig};
 pub use dto::*;
 pub use egress::{escape_pdf_text, EgressFormat, EscapedText};
 pub use registry::{ChildContainer, NodeTokenRegistry};
-pub use shim::{FakeShim, Shim, ShimError};
+pub use shim::{FakeShim, OpenDocument, Shim, ShimDocument, ShimError};
