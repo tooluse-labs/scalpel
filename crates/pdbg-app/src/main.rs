@@ -2,6 +2,7 @@ fn main() {
     match pdbg_app::AppState::new_headless() {
         Ok(state) => {
             let file = state
+                .panels
                 .summary
                 .as_ref()
                 .map(|summary| summary.file_path.as_str())

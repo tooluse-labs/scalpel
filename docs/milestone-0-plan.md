@@ -67,6 +67,10 @@ Completed:
   random ids, are scoped by session/client, preserve media type and image
   dimensions, honor per-read byte-limit truncation, expire by TTL, and evict by
   LRU under the configured byte cap.
+- **T4.6** headless app-state smoke: `pdbg-app` constructs the summary/tree/detail
+  /output panel state over `FakeShim` + `DocumentSession`, wires safe-mode
+  defaults, capability gates, Markdown egress escaping, and runs a command-loop
+  smoke without opening a real window/GPU surface.
 
 Partial:
 
@@ -78,7 +82,7 @@ Partial:
 
 Not started:
 
-- **T3.1**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T3.1**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
