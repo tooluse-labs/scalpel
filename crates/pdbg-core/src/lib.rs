@@ -4,6 +4,7 @@ pub mod dto;
 pub mod egress;
 pub mod panic_boundary;
 pub mod registry;
+pub mod session;
 pub mod shim;
 mod wire;
 
@@ -13,4 +14,5 @@ pub use dto::*;
 pub use egress::{escape_pdf_text, EgressFormat, EscapedText};
 pub use panic_boundary::{catch_ffi_callback, CALLBACK_PANIC_MESSAGE};
 pub use registry::{ChildContainer, NodeTokenRegistry};
+pub use session::{DocumentSession, FakeSharedStore, FakeSharedStoreSnapshot, TaskQueueStats};
 pub use shim::{FakeShim, OpenDocument, Shim, ShimDocument, ShimError};

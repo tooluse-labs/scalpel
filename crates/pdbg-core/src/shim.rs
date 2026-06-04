@@ -1,4 +1,5 @@
 use crate::dto::*;
+use crate::session::FakeSharedStore;
 use crate::{wire, ChildContainer, NodeTokenRegistry, SafeModeConfig};
 use pdbg_shim::raw;
 use std::ffi::{CStr, CString};
@@ -49,13 +50,25 @@ pub trait ShimDocument {
 
 pub struct FakeShim {
     ctx: PdbgContext,
+    shared_store: FakeSharedStore,
 }
 
 impl FakeShim {
     pub fn new() -> Result<Self, ShimError> {
+        let shared_store = FakeSharedStore::new();
+        shared_store.record_root_lock_context();
         Ok(Self {
             ctx: PdbgContext::new()?,
+            shared_store,
         })
+    }
+
+    pub fn shared_store(&self) -> FakeSharedStore {
+        self.shared_store.clone()
+    }
+
+    pub fn shared_store_snapshot(&self) -> crate::FakeSharedStoreSnapshot {
+        self.shared_store.snapshot()
     }
 
     pub fn open_document_with_config(
@@ -63,8 +76,10 @@ impl FakeShim {
         path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
+        let doc = self.ctx.open_raw_document_with_config(path, config)?;
+        self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc: self.ctx.open_raw_document_with_config(path, config)?,
+            doc,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -76,8 +91,10 @@ impl FakeShim {
         display_path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
+        let doc = self.ctx.open_raw_document_fd(fd, display_path, config)?;
+        self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc: self.ctx.open_raw_document_fd(fd, display_path, config)?,
+            doc,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -87,8 +104,10 @@ impl Shim for FakeShim {
     type Document = OpenDocument;
 
     fn open_document(&self, path: &str) -> Result<Self::Document, ShimError> {
+        let doc = self.ctx.open_raw_document(path)?;
+        self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc: self.ctx.open_raw_document(path)?,
+            doc,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -255,6 +274,11 @@ impl Drop for PdbgContext {
 struct PdbgDoc {
     raw: NonNull<raw::pdbg_doc>,
 }
+
+// Safety: `PdbgDoc` may be moved to a worker thread, but it is not `Sync`.
+// Concurrent access must go through `DocumentSession`, which serializes all
+// mutable document operations with a per-document mutex.
+unsafe impl Send for PdbgDoc {}
 
 impl PdbgDoc {
     fn summary(&self, registry: &NodeTokenRegistry) -> Result<DocumentSummary, ShimError> {

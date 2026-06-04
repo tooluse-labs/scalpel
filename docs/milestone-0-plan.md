@@ -49,6 +49,10 @@ Completed:
   test-only callback invoker, Rust `extern "C"` callbacks route through
   `catch_ffi_callback`, caught panics return `PDBG_ERROR_GENERIC`, and `pdbg_error`
   is filled before control returns to C.
+- **T4.1** `DocumentSession` and fake lock/store wiring: sessions serialize
+  document tasks through a per-document `std::sync::Mutex`, cache owned summary
+  output, `PdbgDoc` is documented `Send`/not `Sync`, and `FakeShim` installs a
+  root fake lock context before opening documents.
 - **T4.3** MCP allowlist contract: roots and request paths are canonicalized,
   URL-like paths and canonicalization failures are rejected, accepted paths must
   be path-component descendants of a configured root, and symlink / `..` escapes
@@ -71,7 +75,7 @@ Partial:
 
 Not started:
 
-- **T3.1**, **T4.1–T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T3.1**, **T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -265,9 +269,10 @@ All tasks are `needs_real_mupdf: false`.
 
 - **T4.1** `DocumentSession` + per-doc task queue + **`fz_locks`-equivalent
   lock-callback wiring** installed at `context_new` (root lock context exists
-  before any cloned context); `parking_lot::Mutex<NonNull<PdbgDoc>>`,
-  cache-of-owned-outputs, documented unsafe `Send`/`!Sync`. FakeShim with a
-  shared fake store modeling cross-context global state. — deps: T1.1, T0.5
+  before any cloned context); M0 uses dependency-free `std::sync::Mutex` around
+  the open document, cache-of-owned-outputs, documented unsafe `Send`/`!Sync`.
+  FakeShim has a shared fake store modeling cross-context global state. — deps:
+  T1.1, T0.5
 - **T4.2** Concurrency smoke over the shared fake store, **TSan-clean** (multiple
   sessions + worker threads through the scheduler; no race on lock/callback
   path). — deps: T4.1, T3.4
