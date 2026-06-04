@@ -38,6 +38,9 @@ Completed:
 - **T3.3** decode-time limit contract: a configured low
   `max_decoded_stream_bytes` returns `PDBG_ERROR_LIMIT` during fake decoded-stream
   loading before a `pdbg_buffer` is materialized.
+- **T3.2** `pdbg_document_open_fd` ownership contract: success and post-dup
+  failure paths both leave the caller's original fd usable; the fake shim closes
+  only the duplicated fd it owns.
 
 Partial:
 
@@ -46,9 +49,6 @@ Partial:
 - **T2.5** capability logic exists; real app/MCP feature hiding is still pending.
 - **T2.6** text span byte copying is covered; full coordinate-normalization
   golden coverage is still pending.
-- **T3.2** `pdbg_document_open_fd` success-path ownership is covered: dropping the
-  document does not consume or close the caller's fd. Failure-path ownership is
-  still pending.
 
 Not started:
 

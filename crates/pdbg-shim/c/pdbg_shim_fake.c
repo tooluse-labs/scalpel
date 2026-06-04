@@ -283,6 +283,10 @@ pdbg_status pdbg_document_open(
         set_error(err, PDBG_ERROR_GENERIC, "invalid open arguments");
         return PDBG_ERROR_GENERIC;
     }
+    if (path && strcmp(path, "fail-open") == 0) {
+        set_error(err, PDBG_ERROR_GENERIC, "fake open failure");
+        return PDBG_ERROR_GENERIC;
+    }
 
     pdbg_doc *doc = (pdbg_doc *)calloc(1, sizeof(pdbg_doc));
     if (!doc) {

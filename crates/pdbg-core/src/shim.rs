@@ -871,9 +871,67 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_fd_keeps_caller_fd_usable_after_document_drop() {
-        use std::fs::{self, OpenOptions};
+        use std::fs;
         use std::io::{Read, Seek, SeekFrom, Write};
         use std::os::fd::AsFd;
+
+        let (path, mut file) = temp_pdf_file();
+
+        let shim = FakeShim::new().unwrap();
+        {
+            let mut doc = shim
+                .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
+                .unwrap();
+            assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
+        }
+
+        file.write_all(b"\ncaller fd still open").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert!(contents.contains("caller fd still open"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fd_failure_keeps_caller_fd_usable() {
+        use std::fs;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::fd::AsFd;
+
+        let (path, mut file) = temp_pdf_file();
+
+        let shim = FakeShim::new().unwrap();
+        let err = match shim.open_document_fd(file.as_fd(), "fail-open", &SafeModeConfig::default())
+        {
+            Ok(_) => panic!("expected fake open failure"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+        assert!(err.message.contains("fake open failure"));
+
+        file.write_all(b"\ncaller fd survived failed open").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert!(contents.contains("caller fd survived failed open"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stable_public_strings_are_pinned() {
+        assert_eq!(
+            DiagnosticCode::JavaScriptDisabled.as_public_str(),
+            "javascript_disabled"
+        );
+        assert_eq!(ResourceGroup::XObjects.as_public_str(), "xobjects");
+    }
+
+    #[cfg(unix)]
+    fn temp_pdf_file() -> (std::path::PathBuf, std::fs::File) {
+        use std::fs::OpenOptions;
+        use std::io::{Seek, SeekFrom, Write};
 
         let path = std::env::temp_dir().join(format!(
             "pdbg-open-fd-{}-{}.pdf",
@@ -892,30 +950,6 @@ mod tests {
 
         file.write_all(b"%PDF fake").unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
-
-        let shim = FakeShim::new().unwrap();
-        {
-            let mut doc = shim
-                .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
-                .unwrap();
-            assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
-        }
-
-        file.write_all(b"\ncaller fd still open").unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        assert!(contents.contains("caller fd still open"));
-
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn stable_public_strings_are_pinned() {
-        assert_eq!(
-            DiagnosticCode::JavaScriptDisabled.as_public_str(),
-            "javascript_disabled"
-        );
-        assert_eq!(ResourceGroup::XObjects.as_public_str(), "xobjects");
+        (path, file)
     }
 }
