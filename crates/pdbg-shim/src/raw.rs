@@ -526,4 +526,7 @@ unsafe extern "C" {
         user: *mut c_void,
         err: *mut pdbg_error,
     ) -> pdbg_status;
+
+    pub fn pdbg_test_document_owned_fd(doc: *const pdbg_doc) -> c_int;
+    pub fn pdbg_test_fd_is_open(fd: c_int) -> c_int;
 }

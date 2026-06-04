@@ -6,8 +6,9 @@
 
 ## Committed decisions (do not re-litigate)
 
-- **MuPDF-only**, **AGPL-3.0**, **hand-written C shim over bindgen-generated raw
-  bindings** (no `mupdf-rs`/`mupdf-sys`), **egui** desktop UI.
+- **MuPDF-only**, **AGPL-3.0**, **hand-written C shim over checked-in raw Rust
+  ABI bindings** guarded against `pdbg_shim.h` (no `mupdf-rs`/`mupdf-sys`),
+  **egui** desktop UI.
 
 ## Current Status (2026-06-04)
 
@@ -25,9 +26,10 @@ Last verified locally with:
 Completed:
 
 - **T0.1–T0.5** scaffold/core ABI substrate: workspace crates, frozen
-  `pdbg_shim.h`, fake C shim, checked-in raw bindings, ABI drift script, and
-  Rust RAII wrappers/accessors for context, document, buffer, image, node-list,
-  and text-page handles.
+  `pdbg_shim.h`, fake C shim, checked-in raw bindings, structural ABI drift
+  script covering enum values, struct field order/types, callback typedefs, and
+  extern function signatures, plus Rust RAII wrappers/accessors for context,
+  document, buffer, image, node-list, and text-page handles.
 - **T0.7** scaffold-level `fz_try` static gate with good/bad fixtures.
 - **T0.8** checked-in CI skeleton: `.github/workflows/m0.yml` defines contract,
   C ASAN/UBSan, TSan, and fuzz-smoke jobs; `scripts/run_m0_local_gate.sh` runs
@@ -71,7 +73,9 @@ Completed:
   root fake lock context before opening documents.
 - **T4.2** concurrency smoke: multiple `DocumentSession`s are driven from worker
   threads through `run_task`, sharing the fake lock/store and asserting task
-  entry/completion counts; the actual TSan job remains part of **T5.3**.
+  entry/completion counts; cloned handles to the same `DocumentSession` also
+  prove only one task enters the document critical section at a time; the actual
+  TSan job remains part of **T5.3**.
 - **T4.3** MCP allowlist contract: roots and request paths are canonicalized,
   URL-like paths and canonicalization failures are rejected, accepted paths must
   be path-component descendants of a configured root, and symlink / `..` escapes
@@ -87,15 +91,16 @@ Completed:
   /output panel state over `FakeShim` + `DocumentSession`, wires safe-mode
   defaults, capability gates, Markdown egress escaping, and runs a command-loop
   smoke without opening a real window/GPU surface.
-- **T5.1** MuPDF build/vendoring/linking ADR: M0 keeps MuPDF unbundled and
-  unlinked, `real-mupdf` off, bindgen scoped to `pdbg_shim.h`, with M1 entry and
-  upgrade criteria documented.
+- **T5.1** MuPDF build/vendoring/linking ADR: M0 keeps MuPDF unbundled,
+  unlinked, and un-bindgened; `real-mupdf` is off, and any future generated
+  binding path must target `pdbg_shim.h` only, with M1 entry and upgrade
+  criteria documented.
 - **T5.2** AGPL compliance scaffold: `LICENSE`, `NOTICES`, future network
   source-offer path, and `scripts/check_notices.py` covering MuPDF placeholders
   plus all Cargo.lock workspace packages.
 - **T5.4** fixture policy: synthetic-only fixture README plus a tiny
   license-clean minimal PDF seed under `fixtures/synthetic/`.
-- **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and TSan jobs plus a
+- **T5.3** heavy CI scaffold: checked-in C ASAN/UBSan and C/Rust TSan jobs plus a
   deterministic fake-shim fuzz-smoke job covering traversal, decode limits,
   DTO/egress contracts, callback panic mapping, and concurrency smoke.
 - **T6.1** M0 exit gate: local `scripts/run_m0_local_gate.sh` exercises the full
@@ -115,18 +120,21 @@ Not started:
    store, egress, capability gating). Every one is exercisable behind a
    `FakeShim`. The default CI matrix keeps the `real-mupdf` cargo feature **OFF**.
 2. **The only thing on the critical path that must be "real" is the frozen
-   `pdbg_shim.h` ABI header, and bindgen runs over *that header only* — never the
-   MuPDF `fz_*`/`pdf_*` headers.** Pointing bindgen at MuPDF headers silently
-   drags the entire MuPDF source tree + toolchain onto the critical path and
-   breaks the deferral. **This is the #1 trap.**
+   `pdbg_shim.h` ABI header.** M0 uses checked-in raw Rust ABI declarations and a
+   structural drift check against that header; it does **not** run bindgen. If M1
+   later adopts generated bindings, they must target `pdbg_shim.h` only — never
+   the MuPDF `fz_*`/`pdf_*` headers. Pointing any generator at MuPDF headers
+   silently drags the entire MuPDF source tree + toolchain onto the critical path
+   and breaks the deferral. **This is the #1 trap.**
 
 ## Crate layout (revised per review)
 
 ```
 xreflab/  (cargo virtual workspace)
 ├─ crates/pdbg-shim            RAW ABI ONLY: frozen pdbg_shim.h, fake C impl,
-│                             build.rs (cc + bindgen), checked-in raw bindings
-│                             + drift check. No Rust safe types, no DTO logic.
+│                             build.rs (cc), checked-in raw bindings +
+│                             structural drift check. No Rust safe types, no
+│                             DTO logic.
 ├─ crates/pdbg-core           Safe newtypes over raw handles (Drop), Shim trait
 │                             + FakeShim, wire↔DTO conversions, node-token
 │                             registry, decode-time limits, egress escaping,
@@ -155,9 +163,10 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
 2. **`pdbg-shim` = raw sys/ABI only; safe newtypes + conversions live in
    `pdbg-core`** — keeps the `*-sys`/safe split clean so the M1 real-MuPDF swap
    stays a drop-in and the sys boundary doesn't get muddied by conversion logic.
-3. **bindgen output is checked-in + drift-checked** — CI regenerates and diffs
-   the committed `bindings.rs`; contributors don't need an identical local
-   bindgen/clang to hold the ABI line.
+3. **raw ABI declarations are checked-in + structurally drift-checked** — CI
+   compares `pdbg_shim.h` against committed `raw.rs` for enum values, struct
+   layouts, callback typedefs, and function signatures; contributors do not need
+   bindgen/clang to hold the ABI line in M0.
 4. **The `fz_try` static gate is scaffold-level at M0** — the fake shim has no
    real `fz_try`/`fz_catch` macros, so M0 ships a script + good/bad fixtures;
    Milestone 1 activates it against the real C shim and supplements it with
@@ -175,7 +184,7 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
 
 | Phase | Goal | Starts after |
 |---|---|---|
-| **P0** Trunk | Workspace → **freeze `pdbg_shim.h`** → fake C shim → build.rs (cc + bindgen + drift) → safe newtypes (in `pdbg-core`) → **panic-into-C policy decision** → **`fz_try` static gate (scaffold)** → green CI floor | start |
+| **P0** Trunk | Workspace → **freeze `pdbg_shim.h`** → fake C shim → build.rs (cc) + raw ABI drift check → safe newtypes (in `pdbg-core`) → **panic-into-C policy decision** → **`fz_try` static gate (scaffold)** → green CI floor | start |
 | **P1** Pure-Rust DTO/serialization ✅ | DTOs, schema versions, SerializedNodeId golden, diagnostic-code strings, egress escaping, capability/safe-mode types. **Zero FFI — needs only the empty workspace.** | `T0.1` |
 | **P5** Governance docs + heavy CI ✅ | MuPDF build/vendoring ADR (decision only), AGPL compliance + NOTICES + §13 stub, fixture policy, fuzz/ASAN/UBSan/**TSan** jobs | `T0.1` (docs) |
 | **P2** wire↔DTO conversions | Shim/FakeShim seam → enum conversion → **node-token registry** → diagnostic/stream/string/text-coord conversions | `T0.5` + `T1.1` |
@@ -195,8 +204,8 @@ All tasks are `needs_real_mupdf: false`.
   — deps: —
 - **T0.2** **Freeze `pdbg-shim/include/pdbg_shim.h`**: transcribe every
   type/enum/struct/function from arch §7.2–§7.4 verbatim; enum discriminants
-  explicit and marked **append-only ABI**. Single source of truth for C, bindgen,
-  and Rust. *(defines the wire surface P2 pins)* — deps: T0.1
+  explicit and marked **append-only ABI**. Single source of truth for C and Rust
+  raw declarations. *(defines the wire surface P2 pins)* — deps: T0.1
 - **T0.3** **Fake C shim** (`pdbg_shim_fake.c`): implement every §7.4 symbol as a
   fake — handle lifecycle with matching drops, bounded fake decode loop returning
   `PDBG_ERROR_LIMIT` mid-decode, fd-dup on `open_fd`, `pdbg_node_children`
@@ -204,16 +213,17 @@ All tasks are `needs_real_mupdf: false`.
   `pdbg_fill_error`/`pdbg_map_error` + no-context error path. Feature-gated `fake`
   (default) vs `real-mupdf` (off). *(C build/compile smoke; backs most contracts)*
   — deps: T0.2
-- **T0.4** **build.rs**: `cc`-compile the fake `.c` → static lib; bindgen over
-  `pdbg_shim.h` **only** → committed `bindings.rs` snapshot; `sys` re-export; a
-  CI regen-and-diff script fails on drift. *(generated-bindings drift check)*
+- **T0.4** **build.rs**: `cc`-compile the fake `.c` → static lib; committed
+  `raw.rs` exposes the C ABI; a CI drift script fails if `pdbg_shim.h` and
+  `raw.rs` disagree on enum values, struct field order/types, callback typedefs,
+  or extern function signatures. *(raw ABI drift check)*
   — deps: T0.3
 - **T0.5** **Safe newtypes over raw handles** *(in `pdbg-core`)*:
   `PdbgDoc/PdbgContext/PdbgBuffer/PdbgImage/PdbgNodeList/PdbgTextPage` over the
-  generated opaque pointers, `Drop` calling the matching `pdbg_*_drop`, accessor
+  raw opaque pointers, `Drop` calling the matching `pdbg_*_drop`, accessor
   wrappers that copy bytes/strings into owned Rust before returning; documented
-  `!Send`/`!Sync` per §6.2; compiles against the **generated** bindgen types
-  (not a hand-typed copy, so the drift check stays load-bearing). — deps: T0.4
+  `!Send`/`!Sync` per §6.2; compiles against the checked-in raw ABI types guarded
+  by T0.4. — deps: T0.4
 - **T0.6** **Panic-into-C policy decision** + crate attribute: workspace
   `panic="abort"` *or* a documented `catch_unwind` wrapper shape at every
   `extern "C"` callback entry. Workspace-wide profile — fix it **before** the
@@ -224,7 +234,7 @@ All tasks are `needs_real_mupdf: false`.
   conservative scaffolding** (fake shim has no real `fz_try`); M1 activates it on
   the real shim + adds MuPDF-backed malformed-PDF loop tests. — deps: T0.3
 - **T0.8** **CI skeleton**: `cargo fmt --check`, `clippy -D warnings`,
-  `cargo test` (workspace), C build/compile smoke, bindings drift check (T0.4),
+  `cargo test` (workspace), C build/compile smoke, raw ABI drift check (T0.4),
   `fz_try` gate (T0.7); green on the wired-but-mostly-empty tree. — deps: T0.4, T0.7
 
 ### P1 — Pure-Rust DTO + serialization (✅ parallel, zero FFI; `pdbg-core`)
@@ -348,7 +358,7 @@ All tasks are `needs_real_mupdf: false`.
 ## Critical path (longest chain → M0 exit)
 
 ```
-T0.1 workspace → T0.2 freeze ABI header → T0.3 fake C → T0.4 bindgen+drift
+T0.1 workspace → T0.2 freeze ABI header → T0.3 fake C → T0.4 raw ABI drift
   → T0.5 safe newtypes → T2.0 Shim/FakeShim seam → T2.1 enum conversion
   → T2.7 node-token registry → T2.2 diagnostic wire → T6.1 green gate
 ```
@@ -358,13 +368,14 @@ Everything else fans out from this spine. Real MuPDF is not on it.
 ## Sequencing traps (do NOT get these wrong)
 
 1. **Freeze `pdbg_shim.h` (T0.2) before any conversion or fake C.** It's the
-   single source of truth for C/bindgen/Rust; writing conversions first forces a
+   single source of truth for C and Rust raw ABI declarations; writing conversions first forces a
    rewrite of every P2/P3 golden. Lock enum discriminants up front + add the
    renumber-detecting guard (T2.1).
-2. **Point bindgen at `pdbg_shim.h` only, never MuPDF headers** — else the whole
-   MuPDF tree + toolchain lands on the critical path.
+2. **Do not run bindgen in M0; if generated bindings are introduced in M1, point
+   them at `pdbg_shim.h` only, never MuPDF headers** — else the whole MuPDF tree
+   + toolchain lands on the critical path.
 3. **The Shim/FakeShim trait (T2.0) is the single swap point** — if anything
-   reaches past it into bindgen types, M1's real-MuPDF swap stops being a drop-in.
+   reaches past it into raw ABI types, M1's real-MuPDF swap stops being a drop-in.
 4. **Decide the panic-into-C policy (T0.6) early** — a workspace-wide profile
    that retroactively invalidates the other family of tests if flipped late; must
    precede T3.4 and the T5.3 sanitizer profile.
@@ -389,7 +400,7 @@ Everything else fans out from this spine. Real MuPDF is not on it.
 - `cargo build` + `cargo test` green across the workspace against the fake shim
   (no libmupdf linked); `real-mupdf` OFF in default CI.
 - CI baseline green: fmt, clippy `-D warnings`, workspace tests, C build/compile
-  smoke, **generated-bindings drift check**.
+  smoke, **raw ABI drift check**.
 - `fz_try` static gate fires on the bad fixture, passes the fake sources, wired
   as a required gate.
 - Governance landed + CI-asserted: MuPDF build ADR, AGPL `LICENSE` +

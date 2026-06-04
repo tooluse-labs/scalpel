@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: M0 local gate
         run: sh scripts/run_m0_local_gate.sh
 
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: C shim sanitizer tests
         run: cargo test --workspace
 
@@ -38,6 +38,8 @@ jobs:
     name: tsan
     runs-on: ubuntu-latest
     env:
+      CC: clang
+      CFLAGS: -fsanitize=thread -fno-omit-frame-pointer
       RUSTFLAGS: -Zsanitizer=thread
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +52,7 @@ jobs:
           cargo +nightly test -Zbuild-std
           --target x86_64-unknown-linux-gnu
           -p pdbg-core
-          multiple_sessions_drive_shared_store_from_worker_threads
+          session::tests
 
   fuzz-smoke:
     name: fuzz-smoke
@@ -58,6 +60,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: Deterministic M0 fuzz smoke
         run: sh scripts/run_m0_fuzz_smoke.sh

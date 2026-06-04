@@ -5,6 +5,9 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=include/pdbg_shim.h");
     println!("cargo:rerun-if-changed=c/pdbg_shim_fake.c");
+    println!("cargo:rerun-if-env-changed=AR");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=CFLAGS");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     let obj = out_dir.join("pdbg_shim_fake.o");

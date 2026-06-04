@@ -1,9 +1,11 @@
 #include "pdbg_shim.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <unistd.h>
 
 struct pdbg_context {
@@ -54,8 +56,8 @@ struct pdbg_text_page {
     pdbg_text_span *spans;
 };
 
-static uint64_t next_context_id = 1;
-static uint64_t next_document_id = 1;
+static atomic_uint_fast64_t next_context_id = 1;
+static atomic_uint_fast64_t next_document_id = 1;
 
 static void set_error(pdbg_error *err, pdbg_status status, const char *message)
 {
@@ -230,7 +232,7 @@ pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
         return PDBG_ERROR_OOM;
     }
 
-    ctx->id = next_context_id++;
+    ctx->id = (uint64_t)atomic_fetch_add_explicit(&next_context_id, 1, memory_order_relaxed);
     *out = ctx;
     set_error(err, PDBG_OK, "");
     return PDBG_OK;
@@ -294,7 +296,7 @@ pdbg_status pdbg_document_open(
         return PDBG_ERROR_OOM;
     }
 
-    doc->document_id = next_document_id++;
+    doc->document_id = (uint64_t)atomic_fetch_add_explicit(&next_document_id, 1, memory_order_relaxed);
     doc->fd_dup = -1;
     doc->max_decoded_stream_bytes =
         options && options->max_decoded_stream_bytes ? options->max_decoded_stream_bytes : 1024 * 1024;
@@ -445,13 +447,27 @@ pdbg_status pdbg_stream_load(
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }
-    if (decoded && limit > doc->max_decoded_stream_bytes) {
-        set_error(err, PDBG_ERROR_LIMIT, "decoded stream limit exceeded during decode");
-        return PDBG_ERROR_LIMIT;
+    static const uint8_t raw_bytes[] = "fake stream bytes";
+    static const uint8_t decoded_bytes[] =
+        "fake decoded stream expands beyond the configured cap";
+    const uint8_t *bytes = decoded ? decoded_bytes : raw_bytes;
+    size_t total_len = decoded ? sizeof(decoded_bytes) - 1 : sizeof(raw_bytes) - 1;
+
+    if (decoded) {
+        size_t decoded_so_far = 0;
+        while (decoded_so_far < total_len) {
+            size_t step = total_len - decoded_so_far;
+            if (step > 4)
+                step = 4;
+            decoded_so_far += step;
+            if (decoded_so_far > doc->max_decoded_stream_bytes) {
+                set_error(err, PDBG_ERROR_LIMIT, "decoded stream limit exceeded during decode");
+                return PDBG_ERROR_LIMIT;
+            }
+        }
     }
 
-    static const uint8_t bytes[] = "fake stream bytes";
-    size_t data_len = sizeof(bytes) - 1;
+    size_t data_len = total_len;
     if (limit < data_len)
         data_len = limit;
 
@@ -471,12 +487,24 @@ pdbg_status pdbg_stream_load(
         memcpy(buffer->data, bytes, data_len);
     }
     buffer->len = data_len;
-    buffer->total_size = sizeof(bytes) - 1;
-    buffer->truncated = data_len < sizeof(bytes) - 1;
+    buffer->total_size = total_len;
+    buffer->truncated = data_len < total_len;
     buffer->diagnostics = make_diag_list(PDBG_DIAG_STREAM_DECODE_FAILURE, "fake stream diagnostic");
     *out = buffer;
     set_error(err, PDBG_OK, "");
     return PDBG_OK;
+}
+
+int pdbg_test_document_owned_fd(const pdbg_doc *doc)
+{
+    return doc ? doc->fd_dup : -1;
+}
+
+int pdbg_test_fd_is_open(int fd)
+{
+    if (fd < 0)
+        return 0;
+    return fcntl(fd, F_GETFD) == -1 ? 0 : 1;
 }
 
 pdbg_status pdbg_page_render(

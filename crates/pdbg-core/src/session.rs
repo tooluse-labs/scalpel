@@ -260,4 +260,55 @@ mod tests {
             expected_tasks
         );
     }
+
+    #[test]
+    fn cloned_document_session_serializes_concurrent_tasks() {
+        let shim = FakeShim::new().unwrap();
+        let session = DocumentSession::with_shared_store(
+            shim.open_document("fake.pdf").unwrap(),
+            shim.shared_store(),
+        );
+        let worker_count = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(worker_count));
+        let active_tasks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active_tasks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut workers = Vec::new();
+
+        for _ in 0..worker_count {
+            let session = session.clone();
+            let barrier = barrier.clone();
+            let active_tasks = active_tasks.clone();
+            let max_active_tasks = max_active_tasks.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                session
+                    .run_task(|document| {
+                        let active =
+                            active_tasks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        max_active_tasks.fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        let summary = document.summary();
+                        active_tasks.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        summary
+                    })
+                    .unwrap();
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(
+            max_active_tasks.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            session.task_queue_stats(),
+            TaskQueueStats {
+                submitted: worker_count as u64,
+                completed: worker_count as u64,
+            }
+        );
+    }
 }

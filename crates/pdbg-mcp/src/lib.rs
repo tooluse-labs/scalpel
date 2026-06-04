@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::ffi::OsStr;
 use std::fmt;
+#[cfg(unix)]
 use std::fs::File;
 use std::io;
+#[cfg(unix)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -118,15 +119,17 @@ fn path_component_descendant(path: &Path, root: &Path) -> bool {
 }
 
 fn reject_url_like(path: &Path) -> Result<(), AllowlistError> {
-    if os_str_contains(path.as_os_str(), "://") {
+    let text = path.as_os_str().to_string_lossy();
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("://")
+        || lower.starts_with("file:")
+        || text.starts_with("//")
+        || text.starts_with("\\\\")
+    {
         Err(AllowlistError::UrlLikePath(path.to_path_buf()))
     } else {
         Ok(())
     }
-}
-
-fn os_str_contains(value: &OsStr, needle: &str) -> bool {
-    value.to_string_lossy().contains(needle)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -681,7 +684,25 @@ fn fill_secure_random(bytes: &mut [u8]) -> Result<(), ArtifactStoreError> {
         .map_err(|_| ArtifactStoreError::EntropyUnavailable)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn fill_secure_random(bytes: &mut [u8]) -> Result<(), ArtifactStoreError> {
+    use std::ffi::c_void;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn SystemFunction036(random_buffer: *mut c_void, random_buffer_length: u32) -> u8;
+    }
+
+    let len = u32::try_from(bytes.len()).map_err(|_| ArtifactStoreError::EntropyUnavailable)?;
+    let ok = unsafe { SystemFunction036(bytes.as_mut_ptr().cast::<c_void>(), len) };
+    if ok == 0 {
+        Err(ArtifactStoreError::EntropyUnavailable)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn fill_secure_random(_bytes: &mut [u8]) -> Result<(), ArtifactStoreError> {
     Err(ArtifactStoreError::EntropyUnavailable)
 }
@@ -729,6 +750,18 @@ mod tests {
         ));
         assert!(matches!(
             allowlist.validate_request_path(Path::new("https://example.test/a.pdf")),
+            Err(AllowlistError::UrlLikePath(_))
+        ));
+        assert!(matches!(
+            allowlist.validate_request_path(Path::new("file:/tmp/a.pdf")),
+            Err(AllowlistError::UrlLikePath(_))
+        ));
+        assert!(matches!(
+            allowlist.validate_request_path(Path::new("//server/share/a.pdf")),
+            Err(AllowlistError::UrlLikePath(_))
+        ));
+        assert!(matches!(
+            allowlist.validate_request_path(Path::new("\\\\server\\share\\a.pdf")),
             Err(AllowlistError::UrlLikePath(_))
         ));
         assert!(matches!(

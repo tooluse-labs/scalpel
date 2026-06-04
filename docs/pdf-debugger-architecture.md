@@ -669,7 +669,8 @@ pub struct DocumentSession {
 
 This shape is illustrative; helper types such as `DocumentTaskQueue`,
 `DocumentCache`, and the crate-local `Result<T>` alias are omitted. `PdbgDoc` is
-the Rust-side alias for the bindgen-generated opaque C `pdbg_doc` type.
+the Rust-side alias for the opaque C `pdbg_doc` type exposed through the checked
+raw ABI bindings.
 
 Default trait policy:
 
@@ -1778,7 +1779,7 @@ contract.
 Acceptance checklist:
 
 - [ ] Workspace CI runs the agreed baseline commands for formatting, Rust unit
-  tests, C shim build or compile smoke tests, and generated bindings checks.
+  tests, C shim build or compile smoke tests, and raw ABI drift checks.
 - [ ] C shim static gate rejects `return`, `goto`, or `longjmp` inside
   `fz_try`/`fz_always` blocks. M0 may implement this as a conservative script or
   code-review lint; Milestone 1 must replace or supplement it with MuPDF-backed
@@ -1916,8 +1917,8 @@ Acceptance checklist:
 
 This project ships under AGPL-3.0. MuPDF is used under its AGPL license, not a
 commercial Artifex license, so the entire distributed work (the Rust app, the
-hand-written C shim and its bindgen-generated bindings, and MuPDF with its
-bundled third-party libraries) is AGPL-3.0. A commercial Artifex license is not
+hand-written C shim and its raw ABI bindings, and MuPDF with its bundled
+third-party libraries) is AGPL-3.0. A commercial Artifex license is not
 purchased, and closed-source editions are out of scope.
 
 AGPL compliance obligations:

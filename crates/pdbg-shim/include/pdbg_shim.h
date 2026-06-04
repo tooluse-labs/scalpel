@@ -425,6 +425,9 @@ pdbg_status pdbg_test_invoke_callback(
     void *user,
     pdbg_error *err);
 
+int pdbg_test_document_owned_fd(const pdbg_doc *doc);
+int pdbg_test_fd_is_open(int fd);
+
 #ifdef __cplusplus
 }
 #endif

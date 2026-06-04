@@ -247,14 +247,129 @@ mod tests {
 
     #[test]
     fn raw_enum_discriminants_are_append_only_guarded() {
-        assert_eq!(raw::pdbg_object_kind::PDBG_OBJECT_XREF_ENTRY as i32, 11);
-        assert_eq!(raw::pdbg_resource_group::PDBG_RESOURCE_XOBJECTS as i32, 2);
-        assert_eq!(
-            raw::pdbg_diagnostic_code::PDBG_DIAG_JAVASCRIPT_DISABLED as i32,
-            5
-        );
-        assert_eq!(raw::pdbg_color_mode::PDBG_COLOR_INVERTED as i32, 2);
-        assert_eq!(raw::pdbg_repair_policy::PDBG_REPAIR_ALLOW as i32, 2);
+        let values = [
+            (raw::pdbg_status::PDBG_OK as i32, 0),
+            (raw::pdbg_status::PDBG_ERROR_GENERIC as i32, 1),
+            (raw::pdbg_status::PDBG_ERROR_PASSWORD as i32, 2),
+            (raw::pdbg_status::PDBG_ERROR_FORMAT as i32, 3),
+            (raw::pdbg_status::PDBG_ERROR_UNSUPPORTED as i32, 4),
+            (raw::pdbg_status::PDBG_ERROR_CANCELLED as i32, 5),
+            (raw::pdbg_status::PDBG_ERROR_OOM as i32, 6),
+            (raw::pdbg_status::PDBG_ERROR_SECURITY as i32, 7),
+            (raw::pdbg_status::PDBG_ERROR_LIMIT as i32, 8),
+            (raw::pdbg_node_kind::PDBG_NODE_DOCUMENT_ROOT as i32, 0),
+            (raw::pdbg_node_kind::PDBG_NODE_TRAILER as i32, 1),
+            (raw::pdbg_node_kind::PDBG_NODE_CATALOG as i32, 2),
+            (raw::pdbg_node_kind::PDBG_NODE_XREF_ROOT as i32, 3),
+            (raw::pdbg_node_kind::PDBG_NODE_XREF_OBJECT as i32, 4),
+            (raw::pdbg_node_kind::PDBG_NODE_PAGE_ROOT as i32, 5),
+            (raw::pdbg_node_kind::PDBG_NODE_PAGE as i32, 6),
+            (raw::pdbg_node_kind::PDBG_NODE_PATH_TOKEN as i32, 7),
+            (raw::pdbg_node_kind::PDBG_NODE_INDIRECT_REF as i32, 8),
+            (raw::pdbg_node_kind::PDBG_NODE_STREAM as i32, 9),
+            (raw::pdbg_node_kind::PDBG_NODE_RESOURCE_GROUP as i32, 10),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_FONTS as i32, 0),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_IMAGES as i32, 1),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_XOBJECTS as i32, 2),
+            (
+                raw::pdbg_resource_group::PDBG_RESOURCE_COLOR_SPACES as i32,
+                3,
+            ),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_PATTERNS as i32, 4),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_SHADINGS as i32, 5),
+            (
+                raw::pdbg_resource_group::PDBG_RESOURCE_ANNOTATIONS as i32,
+                6,
+            ),
+            (raw::pdbg_resource_group::PDBG_RESOURCE_WIDGETS as i32, 7),
+            (raw::pdbg_object_kind::PDBG_OBJECT_NULL as i32, 0),
+            (raw::pdbg_object_kind::PDBG_OBJECT_BOOL as i32, 1),
+            (raw::pdbg_object_kind::PDBG_OBJECT_INT as i32, 2),
+            (raw::pdbg_object_kind::PDBG_OBJECT_REAL as i32, 3),
+            (raw::pdbg_object_kind::PDBG_OBJECT_NAME as i32, 4),
+            (raw::pdbg_object_kind::PDBG_OBJECT_STRING as i32, 5),
+            (raw::pdbg_object_kind::PDBG_OBJECT_ARRAY as i32, 6),
+            (raw::pdbg_object_kind::PDBG_OBJECT_DICT as i32, 7),
+            (raw::pdbg_object_kind::PDBG_OBJECT_INDIRECT_REF as i32, 8),
+            (raw::pdbg_object_kind::PDBG_OBJECT_STREAM as i32, 9),
+            (raw::pdbg_object_kind::PDBG_OBJECT_PAGE as i32, 10),
+            (raw::pdbg_object_kind::PDBG_OBJECT_XREF_ENTRY as i32, 11),
+            (raw::pdbg_object_kind::PDBG_OBJECT_TRAILER as i32, 12),
+            (raw::pdbg_object_kind::PDBG_OBJECT_METADATA as i32, 13),
+            (raw::pdbg_object_kind::PDBG_OBJECT_UNKNOWN as i32, 14),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_NULL as i32, 0),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_BOOL as i32, 1),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_INT as i32, 2),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_REAL as i32, 3),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_NAME as i32, 4),
+            (
+                raw::pdbg_object_value_kind::PDBG_VALUE_STRING_BYTES as i32,
+                5,
+            ),
+            (
+                raw::pdbg_object_value_kind::PDBG_VALUE_INDIRECT_REF as i32,
+                6,
+            ),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_CONTAINER as i32, 7),
+            (raw::pdbg_object_value_kind::PDBG_VALUE_UNKNOWN as i32, 8),
+            (raw::pdbg_pdf_string_kind::PDBG_STRING_LITERAL as i32, 0),
+            (raw::pdbg_pdf_string_kind::PDBG_STRING_HEX as i32, 1),
+            (raw::pdbg_pdf_string_kind::PDBG_STRING_UNKNOWN as i32, 2),
+            (raw::pdbg_diagnostic_severity::PDBG_DIAG_INFO as i32, 0),
+            (raw::pdbg_diagnostic_severity::PDBG_DIAG_WARNING as i32, 1),
+            (raw::pdbg_diagnostic_severity::PDBG_DIAG_ERROR as i32, 2),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_MISSING_OBJECT as i32,
+                0,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_BROKEN_XREF_ENTRY as i32,
+                1,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_STREAM_DECODE_FAILURE as i32,
+                2,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_ENCRYPTION_PASSWORD_FAILURE as i32,
+                3,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_REPAIR_WARNING as i32,
+                4,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_JAVASCRIPT_DISABLED as i32,
+                5,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_EMBEDDED_FILE_DETECTED as i32,
+                6,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_EXTERNAL_REFERENCE_DETECTED as i32,
+                7,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_RESOURCE_MISSING as i32,
+                8,
+            ),
+            (
+                raw::pdbg_diagnostic_code::PDBG_DIAG_RENDER_WARNING as i32,
+                9,
+            ),
+            (raw::pdbg_diagnostic_code::PDBG_DIAG_UNKNOWN as i32, 10),
+            (raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT as i32, 0),
+            (raw::pdbg_repair_policy::PDBG_REPAIR_NEVER as i32, 1),
+            (raw::pdbg_repair_policy::PDBG_REPAIR_ALLOW as i32, 2),
+            (raw::pdbg_color_mode::PDBG_COLOR_RGBA as i32, 0),
+            (raw::pdbg_color_mode::PDBG_COLOR_GRAYSCALE as i32, 1),
+            (raw::pdbg_color_mode::PDBG_COLOR_INVERTED as i32, 2),
+        ];
+
+        for (actual, expected) in values {
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

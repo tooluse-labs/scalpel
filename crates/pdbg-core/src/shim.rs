@@ -276,8 +276,9 @@ struct PdbgDoc {
 }
 
 // Safety: `PdbgDoc` may be moved to a worker thread, but it is not `Sync`.
-// Concurrent access must go through `DocumentSession`, which serializes all
-// mutable document operations with a per-document mutex.
+// The C shim contract requires document handles to remain valid after open
+// without borrowing unsynchronized root-context state. Concurrent access must
+// go through `DocumentSession`, which serializes mutable document operations.
 unsafe impl Send for PdbgDoc {}
 
 impl PdbgDoc {
@@ -912,13 +913,20 @@ mod tests {
     fn decoded_stream_limit_returns_limit_error_before_buffer_materialization() {
         let shim = FakeShim::new().unwrap();
         let config = SafeModeConfig {
-            max_decoded_stream_bytes: 3,
+            max_decoded_stream_bytes: 8,
             ..SafeModeConfig::default()
         };
         let mut doc = shim.open_document_with_config("fake.pdf", &config).unwrap();
+        let requested_output_limit = 4;
+        assert!(requested_output_limit <= config.max_decoded_stream_bytes as usize);
 
         let err = doc
-            .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Decoded, 0, 4)
+            .stream_load(
+                ObjectId { num: 1, gen: 0 },
+                StreamMode::Decoded,
+                0,
+                requested_output_limit,
+            )
             .unwrap_err();
 
         assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
@@ -930,17 +938,23 @@ mod tests {
     fn open_fd_keeps_caller_fd_usable_after_document_drop() {
         use std::fs;
         use std::io::{Read, Seek, SeekFrom, Write};
-        use std::os::fd::AsFd;
+        use std::os::fd::{AsFd, AsRawFd};
 
         let (path, mut file) = temp_pdf_file();
 
         let shim = FakeShim::new().unwrap();
+        let owned_fd;
         {
             let mut doc = shim
                 .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
                 .unwrap();
+            owned_fd = unsafe { raw::pdbg_test_document_owned_fd(doc.doc.raw.as_ptr()) };
+            assert!(owned_fd >= 0);
+            assert_ne!(owned_fd, file.as_raw_fd());
+            assert_eq!(unsafe { raw::pdbg_test_fd_is_open(owned_fd) }, 1);
             assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
         }
+        assert_eq!(unsafe { raw::pdbg_test_fd_is_open(owned_fd) }, 0);
 
         file.write_all(b"\ncaller fd still open").unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();

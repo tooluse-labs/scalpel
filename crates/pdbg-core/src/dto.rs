@@ -556,6 +556,16 @@ pub enum DiagnosticSeverity {
     Error,
 }
 
+impl DiagnosticSeverity {
+    pub fn as_public_str(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum DiagnosticCode {
     MissingObject,
@@ -669,5 +679,40 @@ mod tests {
 
         assert!(json.contains("\"key\":\"A\\\"B\\nC\""));
         assert!(!json.contains("path_token"));
+    }
+
+    #[test]
+    fn diagnostic_schema_and_public_strings_are_pinned() {
+        assert_eq!(DIAGNOSTIC_SCHEMA_VERSION, 1);
+        assert_eq!(DiagnosticSeverity::Info.as_public_str(), "info");
+        assert_eq!(DiagnosticSeverity::Warning.as_public_str(), "warning");
+        assert_eq!(DiagnosticSeverity::Error.as_public_str(), "error");
+
+        let codes = [
+            (DiagnosticCode::MissingObject, "missing_object"),
+            (DiagnosticCode::BrokenXrefEntry, "broken_xref_entry"),
+            (DiagnosticCode::StreamDecodeFailure, "stream_decode_failure"),
+            (
+                DiagnosticCode::EncryptionPasswordFailure,
+                "encryption_password_failure",
+            ),
+            (DiagnosticCode::RepairWarning, "repair_warning"),
+            (DiagnosticCode::JavaScriptDisabled, "javascript_disabled"),
+            (
+                DiagnosticCode::EmbeddedFileDetected,
+                "embedded_file_detected",
+            ),
+            (
+                DiagnosticCode::ExternalReferenceDetected,
+                "external_reference_detected",
+            ),
+            (DiagnosticCode::ResourceMissing, "resource_missing"),
+            (DiagnosticCode::RenderWarning, "render_warning"),
+            (DiagnosticCode::Unknown, "unknown"),
+        ];
+
+        for (code, expected) in codes {
+            assert_eq!(code.as_public_str(), expected);
+        }
     }
 }

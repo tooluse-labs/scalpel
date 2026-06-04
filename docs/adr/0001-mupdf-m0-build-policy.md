@@ -8,9 +8,10 @@ Date: 2026-06-04
 Milestone 0 does not vendor, link, download, or bindgen against MuPDF.
 
 The default workspace builds only the frozen `pdbg_shim.h` ABI, the fake C shim,
-and the Rust contract surface. The `real-mupdf` path stays disabled until
-Milestone 1, and bindgen must continue to target only `pdbg_shim.h`, never
-MuPDF's `fz_*` or `pdf_*` headers.
+checked-in raw Rust ABI declarations, and the Rust contract surface. The
+`real-mupdf` path stays disabled until Milestone 1. M0 does not run bindgen; if
+Milestone 1 introduces generated bindings, they must target only
+`pdbg_shim.h`, never MuPDF's `fz_*` or `pdf_*` headers.
 
 ## Rationale
 
@@ -20,7 +21,8 @@ decisions that M0 is not meant to settle.
 
 Keeping MuPDF outside M0 makes the boundary explicit:
 
-- `pdbg-shim` owns the C ABI shape.
+- `pdbg-shim` owns the C ABI shape and the checked-in raw Rust declarations that
+  are structurally drift-checked against it.
 - `pdbg-core` owns safe Rust DTO conversion and scheduler contracts.
 - The fake shim proves the ABI and lifecycle contracts without libmupdf.
 
@@ -33,8 +35,8 @@ Before enabling `real-mupdf`, the project must decide:
 - link mode: static or dynamic, with the corresponding license obligations;
 - platform matrix: macOS, Linux, and any Windows support target;
 - upgrade cadence and owner for MuPDF security releases;
-- generated binding policy: still bind only `pdbg_shim.h`; no direct generated
-  Rust bindings to MuPDF internals.
+- generated binding policy, if bindgen is introduced: still bind only
+  `pdbg_shim.h`; no direct generated Rust bindings to MuPDF internals.
 
 ## Upgrade Policy
 
