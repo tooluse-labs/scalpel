@@ -798,3 +798,15 @@ pdbg_status pdbg_text_page_span_get(
     set_error(err, PDBG_OK, "");
     return PDBG_OK;
 }
+
+pdbg_status pdbg_test_invoke_callback(
+    pdbg_test_callback callback,
+    void *user,
+    pdbg_error *err)
+{
+    if (!callback) {
+        set_error(err, PDBG_ERROR_GENERIC, "callback is null");
+        return PDBG_ERROR_GENERIC;
+    }
+    return callback(user, err);
+}

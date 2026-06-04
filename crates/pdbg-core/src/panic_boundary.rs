@@ -55,6 +55,7 @@ fn fill_error(err: *mut raw::pdbg_error, status: raw::pdbg_status, message: &str
 mod tests {
     use super::*;
     use std::ffi::CStr;
+    use std::os::raw::c_void;
 
     #[test]
     fn ffi_callback_boundary_passes_through_status() {
@@ -93,6 +94,42 @@ mod tests {
         };
 
         assert_eq!(status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+    }
+
+    #[test]
+    fn c_invoked_rust_callback_catches_panic_before_returning_to_c() {
+        let mut err = raw::pdbg_error::default();
+
+        let status = unsafe {
+            raw::pdbg_test_invoke_callback(Some(panicking_callback), std::ptr::null_mut(), &mut err)
+        };
+
+        assert_eq!(status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+        assert_eq!(error_message(&err), CALLBACK_PANIC_MESSAGE);
+    }
+
+    #[test]
+    fn c_callback_hook_rejects_null_callback() {
+        let mut err = raw::pdbg_error::default();
+
+        let status =
+            unsafe { raw::pdbg_test_invoke_callback(None, std::ptr::null_mut(), &mut err) };
+
+        assert_eq!(status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_GENERIC);
+        assert_eq!(error_message(&err), "callback is null");
+    }
+
+    unsafe extern "C" fn panicking_callback(
+        _user: *mut c_void,
+        err: *mut raw::pdbg_error,
+    ) -> raw::pdbg_status {
+        unsafe {
+            catch_ffi_callback(err, || {
+                panic!("callback bug");
+            })
+        }
     }
 
     fn error_message(err: &raw::pdbg_error) -> String {

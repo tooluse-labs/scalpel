@@ -26,6 +26,8 @@ typedef struct pdbg_error {
     char message[1024];
 } pdbg_error;
 
+typedef pdbg_status (*pdbg_test_callback)(void *user, pdbg_error *err);
+
 typedef struct pdbg_context pdbg_context;
 typedef struct pdbg_doc pdbg_doc;
 typedef struct pdbg_buffer pdbg_buffer;
@@ -418,9 +420,13 @@ pdbg_status pdbg_text_page_span_get(
     pdbg_text_span *out,
     pdbg_error *err);
 
+pdbg_status pdbg_test_invoke_callback(
+    pdbg_test_callback callback,
+    void *user,
+    pdbg_error *err);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-

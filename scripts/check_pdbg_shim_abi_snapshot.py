@@ -48,7 +48,8 @@ def main() -> int:
         elif actual != expected:
             errors.append(f"enum drift for {name}: header={expected} raw={actual}")
 
-    header_fns = set(HEADER_FN.findall(header))
+    header_without_typedefs = re.sub(r"typedef\s+.*?;", "", header, flags=re.S)
+    header_fns = set(HEADER_FN.findall(header_without_typedefs))
     rust_fns = set(RUST_FN.findall(raw))
     missing = sorted(header_fns - rust_fns)
     extra = sorted(rust_fns - header_fns)
@@ -64,4 +65,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

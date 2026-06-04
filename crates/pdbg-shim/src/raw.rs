@@ -1,4 +1,4 @@
-use std::os::raw::{c_char, c_double, c_float, c_int};
+use std::os::raw::{c_char, c_double, c_float, c_int, c_void};
 
 #[repr(C)]
 pub struct pdbg_context {
@@ -71,6 +71,9 @@ impl Default for pdbg_error {
         }
     }
 }
+
+pub type pdbg_test_callback =
+    Option<unsafe extern "C" fn(user: *mut c_void, err: *mut pdbg_error) -> pdbg_status>;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -515,6 +518,12 @@ unsafe extern "C" {
         text: *const pdbg_text_page,
         index: usize,
         out: *mut pdbg_text_span,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+
+    pub fn pdbg_test_invoke_callback(
+        callback: pdbg_test_callback,
+        user: *mut c_void,
         err: *mut pdbg_error,
     ) -> pdbg_status;
 }

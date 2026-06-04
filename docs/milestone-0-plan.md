@@ -45,6 +45,10 @@ Completed:
 - **T3.2** `pdbg_document_open_fd` ownership contract: success and post-dup
   failure paths both leave the caller's original fd usable; the fake shim closes
   only the duplicated fd it owns.
+- **T3.4** Rust-to-C callback panic boundary: the fake C shim exposes a
+  test-only callback invoker, Rust `extern "C"` callbacks route through
+  `catch_ffi_callback`, caught panics return `PDBG_ERROR_GENERIC`, and `pdbg_error`
+  is filled before control returns to C.
 - **T4.3** MCP allowlist contract: roots and request paths are canonicalized,
   URL-like paths and canonicalization failures are rejected, accepted paths must
   be path-component descendants of a configured root, and symlink / `..` escapes
@@ -67,8 +71,7 @@ Partial:
 
 Not started:
 
-- **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**,
-  and **T6.1**.
+- **T3.1**, **T4.1–T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
