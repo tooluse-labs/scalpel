@@ -1,0 +1,16 @@
+[package]
+name = "pdbg-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdbg-core = { path = "../pdbg-core" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pdbg-app"
+path = "src/main.rs"
+

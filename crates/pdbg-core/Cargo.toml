@@ -1,0 +1,12 @@
+[package]
+name = "pdbg-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdbg-shim = { path = "../pdbg-shim" }
+
+[lib]
+path = "src/lib.rs"
+

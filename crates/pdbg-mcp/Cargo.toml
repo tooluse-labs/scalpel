@@ -1,0 +1,12 @@
+[package]
+name = "pdbg-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdbg-core = { path = "../pdbg-core" }
+
+[lib]
+path = "src/lib.rs"
+

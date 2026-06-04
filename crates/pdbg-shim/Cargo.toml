@@ -1,0 +1,16 @@
+[package]
+name = "pdbg-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+links = "pdbg_shim_fake"
+
+[features]
+default = ["fake"]
+fake = []
+real-mupdf = []
+
+[lib]
+path = "src/lib.rs"
+

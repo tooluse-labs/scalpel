@@ -1,0 +1,15 @@
+[package]
+name = "pdbg-contract-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdbg-app = { path = "../pdbg-app" }
+pdbg-core = { path = "../pdbg-core" }
+pdbg-mcp = { path = "../pdbg-mcp" }
+pdbg-shim = { path = "../pdbg-shim" }
+
+[lib]
+path = "src/lib.rs"
+
