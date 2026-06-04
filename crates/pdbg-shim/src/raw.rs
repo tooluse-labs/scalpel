@@ -382,8 +382,10 @@ unsafe extern "C" {
     pub fn pdbg_context_new(out: *mut *mut pdbg_context, err: *mut pdbg_error) -> pdbg_status;
     pub fn pdbg_context_drop(ctx: *mut pdbg_context);
 
-    pub fn pdbg_cancel_token_new(out: *mut *mut pdbg_cancel_token, err: *mut pdbg_error)
-        -> pdbg_status;
+    pub fn pdbg_cancel_token_new(
+        out: *mut *mut pdbg_cancel_token,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
     pub fn pdbg_cancel_token_cancel(token: *mut pdbg_cancel_token);
     pub fn pdbg_cancel_token_drop(token: *mut pdbg_cancel_token);
 

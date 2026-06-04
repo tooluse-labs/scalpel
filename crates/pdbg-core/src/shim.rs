@@ -1,4 +1,5 @@
 use crate::dto::*;
+use crate::{wire, SafeModeConfig};
 use pdbg_shim::raw;
 use std::ffi::{CStr, CString};
 use std::ptr::{self, NonNull};
@@ -56,16 +57,7 @@ impl PdbgContext {
             status: raw::pdbg_status::PDBG_ERROR_GENERIC,
             message: "path contains interior NUL".to_string(),
         })?;
-        let options = raw::pdbg_open_options {
-            safe_mode: 1,
-            disable_javascript: 1,
-            enable_ocr: 0,
-            max_store_bytes: 0,
-            max_decoded_stream_bytes: 0,
-            max_filter_expansion_ratio: 0,
-            max_object_depth: 0,
-            repair_policy: raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT,
-        };
+        let options = SafeModeConfig::default().to_raw_open_options();
 
         unsafe {
             let mut doc = ptr::null_mut();
@@ -134,28 +126,12 @@ fn c_char_array_to_string(bytes: &[std::os::raw::c_char]) -> String {
         .into_owned()
 }
 
-unsafe fn c_string(ptr: *const std::os::raw::c_char) -> String {
-    if ptr.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
-    }
-}
-
-unsafe fn optional_c_string(ptr: *const std::os::raw::c_char) -> Option<String> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
-    }
-}
-
 unsafe fn convert_document_summary(out: &raw::pdbg_document_summary_out) -> DocumentSummary {
     DocumentSummary {
         doc: DocumentId(out.document_id),
-        file_path: c_string(out.file_path),
-        file_hash: optional_c_string(out.file_hash),
-        pdf_version: optional_c_string(out.pdf_version),
+        file_path: wire::copy_c_string(out.file_path),
+        file_hash: wire::copy_optional_c_string(out.file_hash),
+        pdf_version: wire::copy_optional_c_string(out.pdf_version),
         page_count: out.page_count,
         xref_size: out.xref_size,
         parsed_object_count: (out.has_parsed_object_count != 0).then_some(out.parsed_object_count),
@@ -171,7 +147,7 @@ unsafe fn convert_document_summary(out: &raw::pdbg_document_summary_out) -> Docu
             assemble: out.permissions.assemble != 0,
             high_quality_print: out.permissions.high_quality_print != 0,
         },
-        metadata_summary: Vec::new(),
+        metadata_summary: wire::copy_string_pairs(out.metadata, out.metadata_len),
         safety: DocumentSafetyState {
             safe_mode: out.safe_mode != 0,
             javascript_disabled: out.javascript_disabled != 0,
@@ -180,65 +156,7 @@ unsafe fn convert_document_summary(out: &raw::pdbg_document_summary_out) -> Docu
             external_references_detected: out.external_references_detected != 0,
             ocr_enabled: out.ocr_enabled != 0,
         },
-        diagnostics: convert_diagnostic_list(out.diagnostics),
-    }
-}
-
-unsafe fn convert_diagnostic_list(list: *const raw::pdbg_diagnostic_list) -> Vec<DiagnosticSummary> {
-    if list.is_null() {
-        return Vec::new();
-    }
-
-    let len = raw::pdbg_diagnostic_list_len(list);
-    let mut diagnostics = Vec::with_capacity(len);
-    for index in 0..len {
-        let mut diag = std::mem::zeroed::<raw::pdbg_diagnostic>();
-        let mut err = raw::pdbg_error::default();
-        if raw::pdbg_diagnostic_list_get(list, index, &mut diag, &mut err) == raw::pdbg_status::PDBG_OK
-        {
-            diagnostics.push(convert_diagnostic(&diag));
-        }
-    }
-    diagnostics
-}
-
-unsafe fn convert_diagnostic(diag: &raw::pdbg_diagnostic) -> DiagnosticSummary {
-    DiagnosticSummary {
-        severity: match diag.severity {
-            raw::pdbg_diagnostic_severity::PDBG_DIAG_INFO => DiagnosticSeverity::Info,
-            raw::pdbg_diagnostic_severity::PDBG_DIAG_WARNING => DiagnosticSeverity::Warning,
-            raw::pdbg_diagnostic_severity::PDBG_DIAG_ERROR => DiagnosticSeverity::Error,
-        },
-        code: match diag.code {
-            raw::pdbg_diagnostic_code::PDBG_DIAG_MISSING_OBJECT => DiagnosticCode::MissingObject,
-            raw::pdbg_diagnostic_code::PDBG_DIAG_BROKEN_XREF_ENTRY => DiagnosticCode::BrokenXrefEntry,
-            raw::pdbg_diagnostic_code::PDBG_DIAG_STREAM_DECODE_FAILURE => {
-                DiagnosticCode::StreamDecodeFailure
-            }
-            raw::pdbg_diagnostic_code::PDBG_DIAG_ENCRYPTION_PASSWORD_FAILURE => {
-                DiagnosticCode::EncryptionPasswordFailure
-            }
-            raw::pdbg_diagnostic_code::PDBG_DIAG_REPAIR_WARNING => DiagnosticCode::RepairWarning,
-            raw::pdbg_diagnostic_code::PDBG_DIAG_JAVASCRIPT_DISABLED => {
-                DiagnosticCode::JavaScriptDisabled
-            }
-            raw::pdbg_diagnostic_code::PDBG_DIAG_EMBEDDED_FILE_DETECTED => {
-                DiagnosticCode::EmbeddedFileDetected
-            }
-            raw::pdbg_diagnostic_code::PDBG_DIAG_EXTERNAL_REFERENCE_DETECTED => {
-                DiagnosticCode::ExternalReferenceDetected
-            }
-            raw::pdbg_diagnostic_code::PDBG_DIAG_RESOURCE_MISSING => DiagnosticCode::ResourceMissing,
-            raw::pdbg_diagnostic_code::PDBG_DIAG_RENDER_WARNING => DiagnosticCode::RenderWarning,
-            raw::pdbg_diagnostic_code::PDBG_DIAG_UNKNOWN => DiagnosticCode::Unknown,
-        },
-        message: c_string(diag.message),
-        node: None,
-        page_index: (diag.has_page_index != 0).then_some(diag.page_index as usize),
-        object: (diag.has_object != 0).then_some(ObjectId {
-            num: diag.object.num,
-            gen: diag.object.gen,
-        }),
+        diagnostics: wire::diagnostic_list(out.diagnostics, &|_| None),
     }
 }
 

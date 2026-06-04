@@ -93,6 +93,160 @@ pub enum NodeId {
     },
 }
 
+impl NodeId {
+    pub fn document_id(&self) -> DocumentId {
+        match self {
+            Self::DocumentRoot { doc }
+            | Self::Trailer { doc }
+            | Self::Catalog { doc }
+            | Self::XrefRoot { doc }
+            | Self::XrefObject { doc, .. }
+            | Self::PageRoot { doc }
+            | Self::Page { doc, .. }
+            | Self::DictEntry { doc, .. }
+            | Self::ArrayEntry { doc, .. }
+            | Self::IndirectRef { doc, .. }
+            | Self::Stream { doc, .. }
+            | Self::ResourceGroup { doc, .. } => doc.clone(),
+        }
+    }
+
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            Self::XrefObject { object, .. }
+            | Self::IndirectRef { object, .. }
+            | Self::Stream { object, .. } => Some(*object),
+            Self::DictEntry { parent, .. } | Self::ArrayEntry { parent, .. } => parent.object_id(),
+            _ => None,
+        }
+    }
+
+    pub fn to_serialized(&self) -> SerializedNodeId {
+        let mut segments = Vec::new();
+        self.push_segments(&mut segments);
+        SerializedNodeId {
+            schema_version: PUBLIC_SCHEMA_VERSION,
+            doc: self.document_id(),
+            segments,
+            object: self.object_id(),
+        }
+    }
+
+    fn push_segments(&self, segments: &mut Vec<NodePathSegment>) {
+        match self {
+            Self::DocumentRoot { .. } => segments.push(NodePathSegment::DocumentRoot),
+            Self::Trailer { .. } => segments.push(NodePathSegment::Trailer),
+            Self::Catalog { .. } => segments.push(NodePathSegment::Catalog),
+            Self::XrefRoot { .. } => segments.push(NodePathSegment::XrefRoot),
+            Self::XrefObject { object, .. } => segments.push(NodePathSegment::XrefObject(*object)),
+            Self::PageRoot { .. } => segments.push(NodePathSegment::PageRoot),
+            Self::Page { index, .. } => segments.push(NodePathSegment::Page { index: *index }),
+            Self::DictEntry { parent, key, .. } => {
+                parent.push_segments(segments);
+                segments.push(NodePathSegment::DictKey(key.clone()));
+            }
+            Self::ArrayEntry { parent, index, .. } => {
+                parent.push_segments(segments);
+                segments.push(NodePathSegment::ArrayIndex(*index));
+            }
+            Self::IndirectRef { object, .. } => {
+                segments.push(NodePathSegment::IndirectRef(*object))
+            }
+            Self::Stream {
+                object, decoded, ..
+            } => segments.push(NodePathSegment::Stream {
+                object: *object,
+                decoded: *decoded,
+            }),
+            Self::ResourceGroup {
+                page_index, group, ..
+            } => segments.push(NodePathSegment::ResourceGroup {
+                page_index: *page_index,
+                group: group.clone(),
+            }),
+        }
+    }
+}
+
+impl SerializedNodeId {
+    pub fn to_json_string(&self) -> String {
+        let mut out = String::new();
+        out.push('{');
+        push_json_field_u32(&mut out, "schema_version", self.schema_version);
+        out.push(',');
+        push_json_field_u64(&mut out, "doc", self.doc.0);
+        out.push_str(",\"segments\":[");
+        for (index, segment) in self.segments.iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            segment.push_json(&mut out);
+        }
+        out.push(']');
+        if let Some(object) = self.object {
+            out.push_str(",\"object\":");
+            push_object_id_json(&mut out, object);
+        } else {
+            out.push_str(",\"object\":null");
+        }
+        out.push('}');
+        out
+    }
+}
+
+impl NodePathSegment {
+    fn push_json(&self, out: &mut String) {
+        out.push('{');
+        match self {
+            Self::DocumentRoot => push_json_field_str(out, "tag", "document_root"),
+            Self::Trailer => push_json_field_str(out, "tag", "trailer"),
+            Self::Catalog => push_json_field_str(out, "tag", "catalog"),
+            Self::XrefRoot => push_json_field_str(out, "tag", "xref_root"),
+            Self::XrefObject(object) => {
+                push_json_field_str(out, "tag", "xref_object");
+                out.push_str(",\"object\":");
+                push_object_id_json(out, *object);
+            }
+            Self::PageRoot => push_json_field_str(out, "tag", "page_root"),
+            Self::Page { index } => {
+                push_json_field_str(out, "tag", "page");
+                out.push_str(",\"index\":");
+                out.push_str(&index.to_string());
+            }
+            Self::DictKey(key) => {
+                push_json_field_str(out, "tag", "dict_key");
+                out.push_str(",\"key\":");
+                push_json_string(out, key);
+            }
+            Self::ArrayIndex(index) => {
+                push_json_field_str(out, "tag", "array_index");
+                out.push_str(",\"index\":");
+                out.push_str(&index.to_string());
+            }
+            Self::IndirectRef(object) => {
+                push_json_field_str(out, "tag", "indirect_ref");
+                out.push_str(",\"object\":");
+                push_object_id_json(out, *object);
+            }
+            Self::Stream { object, decoded } => {
+                push_json_field_str(out, "tag", "stream");
+                out.push_str(",\"object\":");
+                push_object_id_json(out, *object);
+                out.push_str(",\"decoded\":");
+                out.push_str(if *decoded { "true" } else { "false" });
+            }
+            Self::ResourceGroup { page_index, group } => {
+                push_json_field_str(out, "tag", "resource_group");
+                out.push_str(",\"page_index\":");
+                out.push_str(&page_index.to_string());
+                out.push_str(",\"group\":");
+                push_json_string(out, group.as_public_str());
+            }
+        }
+        out.push('}');
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ResourceGroup {
     Fonts,
@@ -382,5 +536,88 @@ impl DiagnosticCode {
             Self::RenderWarning => "render_warning",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+fn push_json_field_u32(out: &mut String, name: &str, value: u32) {
+    push_json_string(out, name);
+    out.push(':');
+    out.push_str(&value.to_string());
+}
+
+fn push_json_field_u64(out: &mut String, name: &str, value: u64) {
+    push_json_string(out, name);
+    out.push(':');
+    out.push_str(&value.to_string());
+}
+
+fn push_json_field_str(out: &mut String, name: &str, value: &str) {
+    push_json_string(out, name);
+    out.push(':');
+    push_json_string(out, value);
+}
+
+fn push_object_id_json(out: &mut String, object: ObjectId) {
+    out.push_str("{\"num\":");
+    out.push_str(&object.num.to_string());
+    out.push_str(",\"gen\":");
+    out.push_str(&object.gen.to_string());
+    out.push('}');
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch < ' ' => {
+                out.push_str("\\u");
+                out.push_str(&format!("{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialized_node_id_uses_stable_json_shape() {
+        let doc = DocumentId(42);
+        let object = ObjectId { num: 12, gen: 0 };
+        let node = NodeId::DictEntry {
+            doc: doc.clone(),
+            parent: Box::new(NodeId::DictEntry {
+                doc: doc.clone(),
+                parent: Box::new(NodeId::XrefObject { doc, object }),
+                key: "Resources".to_string(),
+            }),
+            key: "Font".to_string(),
+        };
+
+        assert_eq!(
+            node.to_serialized().to_json_string(),
+            "{\"schema_version\":1,\"doc\":42,\"segments\":[{\"tag\":\"xref_object\",\"object\":{\"num\":12,\"gen\":0}},{\"tag\":\"dict_key\",\"key\":\"Resources\"},{\"tag\":\"dict_key\",\"key\":\"Font\"}],\"object\":{\"num\":12,\"gen\":0}}"
+        );
+    }
+
+    #[test]
+    fn serialized_node_id_escapes_keys_and_never_mentions_path_tokens() {
+        let node = NodeId::DictEntry {
+            doc: DocumentId(7),
+            parent: Box::new(NodeId::Trailer { doc: DocumentId(7) }),
+            key: "A\"B\nC".to_string(),
+        };
+        let json = node.to_serialized().to_json_string();
+
+        assert!(json.contains("\"key\":\"A\\\"B\\nC\""));
+        assert!(!json.contains("path_token"));
     }
 }
