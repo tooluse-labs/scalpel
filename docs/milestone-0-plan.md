@@ -45,6 +45,9 @@ Completed:
   URL-like paths and canonicalization failures are rejected, accepted paths must
   be path-component descendants of a configured root, and symlink / `..` escapes
   are rejected.
+- **T4.4** MCP input validation contract: document ids, object ids, child ranges,
+  stream limits, output byte limits, page indexes, render dimensions, pixel caps,
+  and rotations are bounded by explicit `McpInputLimits`.
 
 Partial:
 
@@ -56,7 +59,7 @@ Partial:
 
 Not started:
 
-- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.4–T4.6**,
+- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.2**, **T4.5–T4.6**,
   **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
