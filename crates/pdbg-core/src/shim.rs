@@ -2,6 +2,8 @@ use crate::dto::*;
 use crate::{wire, ChildContainer, NodeTokenRegistry, SafeModeConfig};
 use pdbg_shim::raw;
 use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
 
 #[derive(Debug)]
@@ -53,6 +55,30 @@ impl FakeShim {
     pub fn new() -> Result<Self, ShimError> {
         Ok(Self {
             ctx: PdbgContext::new()?,
+        })
+    }
+
+    pub fn open_document_with_config(
+        &self,
+        path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        Ok(OpenDocument {
+            doc: self.ctx.open_raw_document_with_config(path, config)?,
+            registry: NodeTokenRegistry::default(),
+        })
+    }
+
+    #[cfg(unix)]
+    pub fn open_document_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        display_path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        Ok(OpenDocument {
+            doc: self.ctx.open_raw_document_fd(fd, display_path, config)?,
+            registry: NodeTokenRegistry::default(),
         })
     }
 }
@@ -151,11 +177,19 @@ impl PdbgContext {
     }
 
     fn open_raw_document(&self, path: &str) -> Result<PdbgDoc, ShimError> {
+        self.open_raw_document_with_config(path, &SafeModeConfig::default())
+    }
+
+    fn open_raw_document_with_config(
+        &self,
+        path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<PdbgDoc, ShimError> {
         let path = CString::new(path).map_err(|_| ShimError {
             status: raw::pdbg_status::PDBG_ERROR_GENERIC,
             message: "path contains interior NUL".to_string(),
         })?;
-        let options = SafeModeConfig::default().to_raw_open_options();
+        let options = config.to_raw_open_options();
 
         unsafe {
             let mut doc = ptr::null_mut();
@@ -172,6 +206,40 @@ impl PdbgContext {
             let raw = NonNull::new(doc).ok_or_else(|| ShimError {
                 status: raw::pdbg_status::PDBG_ERROR_GENERIC,
                 message: "pdbg_document_open returned null".to_string(),
+            })?;
+            Ok(PdbgDoc { raw })
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_raw_document_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        display_path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<PdbgDoc, ShimError> {
+        let display_path = CString::new(display_path).map_err(|_| ShimError {
+            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
+            message: "display path contains interior NUL".to_string(),
+        })?;
+        let options = config.to_raw_open_options();
+
+        unsafe {
+            let mut doc = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_document_open_fd(
+                self.raw.as_ptr(),
+                fd.as_raw_fd(),
+                display_path.as_ptr(),
+                ptr::null(),
+                &options,
+                &mut doc,
+                &mut err,
+            );
+            check_status(status, &err)?;
+            let raw = NonNull::new(doc).ok_or_else(|| ShimError {
+                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
+                message: "pdbg_document_open_fd returned null".to_string(),
             })?;
             Ok(PdbgDoc { raw })
         }
@@ -781,6 +849,65 @@ mod tests {
         let text = doc.extract_text(&TextRequest::page(0)).unwrap();
         assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
         assert!(text.spans[0].untrusted);
+    }
+
+    #[test]
+    fn decoded_stream_limit_returns_limit_error_before_buffer_materialization() {
+        let shim = FakeShim::new().unwrap();
+        let config = SafeModeConfig {
+            max_decoded_stream_bytes: 3,
+            ..SafeModeConfig::default()
+        };
+        let mut doc = shim.open_document_with_config("fake.pdf", &config).unwrap();
+
+        let err = doc
+            .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Decoded, 0, 4)
+            .unwrap_err();
+
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("during decode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fd_keeps_caller_fd_usable_after_document_drop() {
+        use std::fs::{self, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::fd::AsFd;
+
+        let path = std::env::temp_dir().join(format!(
+            "pdbg-open-fd-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        file.write_all(b"%PDF fake").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+
+        let shim = FakeShim::new().unwrap();
+        {
+            let mut doc = shim
+                .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
+                .unwrap();
+            assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
+        }
+
+        file.write_all(b"\ncaller fd still open").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert!(contents.contains("caller fd still open"));
+
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

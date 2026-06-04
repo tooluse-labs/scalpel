@@ -35,6 +35,9 @@ Completed:
   text extraction operations; enum/discriminant guards; diagnostic and
   stream-summary conversion; FFI string/byte copying with interior-NUL text; and
   node-token registry tests including unknown-token fallback.
+- **T3.3** decode-time limit contract: a configured low
+  `max_decoded_stream_bytes` returns `PDBG_ERROR_LIMIT` during fake decoded-stream
+  loading before a `pdbg_buffer` is materialized.
 
 Partial:
 
@@ -43,10 +46,14 @@ Partial:
 - **T2.5** capability logic exists; real app/MCP feature hiding is still pending.
 - **T2.6** text span byte copying is covered; full coordinate-normalization
   golden coverage is still pending.
+- **T3.2** `pdbg_document_open_fd` success-path ownership is covered: dropping the
+  document does not consume or close the caller's fd. Failure-path ownership is
+  still pending.
 
 Not started:
 
-- **T0.6**, **T3.1–T3.4**, **T4.1–T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T0.6**, **T3.1**, **T3.4**, **T4.1–T4.6**, **T5.1–T5.4**, **T5.3**, and
+  **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
