@@ -210,4 +210,54 @@ mod tests {
         assert_eq!(session.shared_store_snapshot().tasks_entered, 1);
         assert_eq!(session.shared_store_snapshot().tasks_completed, 1);
     }
+
+    #[test]
+    fn multiple_sessions_drive_shared_store_from_worker_threads() {
+        let shim = FakeShim::new().unwrap();
+        let shared_store = shim.shared_store();
+        let sessions = [
+            DocumentSession::with_shared_store(
+                shim.open_document("fake-a.pdf").unwrap(),
+                shared_store.clone(),
+            ),
+            DocumentSession::with_shared_store(
+                shim.open_document("fake-b.pdf").unwrap(),
+                shared_store.clone(),
+            ),
+        ];
+        let worker_count = 6;
+        let tasks_per_worker = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(worker_count));
+        let mut workers = Vec::new();
+
+        for worker_index in 0..worker_count {
+            let session = sessions[worker_index % sessions.len()].clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..tasks_per_worker {
+                    let summary = session.run_task(|document| document.summary()).unwrap();
+                    assert_eq!(summary.file_path, "fake.pdf");
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let expected_tasks = (worker_count * tasks_per_worker) as u64;
+        let snapshot = shared_store.snapshot();
+        assert_eq!(snapshot.root_lock_contexts, 1);
+        assert_eq!(snapshot.documents_opened, 2);
+        assert_eq!(snapshot.tasks_entered, expected_tasks);
+        assert_eq!(snapshot.tasks_completed, expected_tasks);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.task_queue_stats().submitted)
+                .sum::<u64>(),
+            expected_tasks
+        );
+    }
 }

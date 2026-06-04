@@ -53,6 +53,9 @@ Completed:
   document tasks through a per-document `std::sync::Mutex`, cache owned summary
   output, `PdbgDoc` is documented `Send`/not `Sync`, and `FakeShim` installs a
   root fake lock context before opening documents.
+- **T4.2** concurrency smoke: multiple `DocumentSession`s are driven from worker
+  threads through `run_task`, sharing the fake lock/store and asserting task
+  entry/completion counts; the actual TSan job remains part of **T5.3**.
 - **T4.3** MCP allowlist contract: roots and request paths are canonicalized,
   URL-like paths and canonicalization failures are rejected, accepted paths must
   be path-component descendants of a configured root, and symlink / `..` escapes
@@ -75,7 +78,7 @@ Partial:
 
 Not started:
 
-- **T3.1**, **T4.2**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
+- **T3.1**, **T4.6**, **T5.1–T5.4**, **T5.3**, and **T6.1**.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -273,9 +276,9 @@ All tasks are `needs_real_mupdf: false`.
   the open document, cache-of-owned-outputs, documented unsafe `Send`/`!Sync`.
   FakeShim has a shared fake store modeling cross-context global state. — deps:
   T1.1, T0.5
-- **T4.2** Concurrency smoke over the shared fake store, **TSan-clean** (multiple
-  sessions + worker threads through the scheduler; no race on lock/callback
-  path). — deps: T4.1, T3.4
+- **T4.2** Concurrency smoke over the shared fake store (multiple sessions +
+  worker threads through the scheduler; no race on lock/callback path; executed
+  under TSan by T5.3). — deps: T4.1, T3.4
 - **T4.3** MCP allowlist (Blocker B3): canonicalize roots at load + request path,
   **path-component-descendant (not `starts_with`)**, reject canonicalization
   failures, reject `..` + symlink escape, no-URL. *(`pdbg-mcp`)* — deps: T1.1
