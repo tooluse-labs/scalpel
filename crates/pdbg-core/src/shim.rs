@@ -136,6 +136,19 @@ impl RealMuPdfShim {
             registry: NodeTokenRegistry::default(),
         })
     }
+
+    #[cfg(unix)]
+    pub fn open_document_fd(
+        &self,
+        fd: BorrowedFd<'_>,
+        display_path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        Ok(OpenDocument {
+            doc: self.ctx.open_raw_document_fd(fd, display_path, config)?,
+            registry: NodeTokenRegistry::default(),
+        })
+    }
 }
 
 #[cfg(feature = "real-mupdf")]
@@ -1103,6 +1116,27 @@ mod tests {
             .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 16)
             .unwrap_err();
         assert_eq!(unsupported.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+    }
+
+    #[cfg(all(feature = "real-mupdf", unix))]
+    #[test]
+    fn real_mupdf_shim_opens_fd_without_consuming_caller_fd() {
+        use std::os::fd::AsFd;
+
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let file = std::fs::File::open(fixture).unwrap();
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document_fd(file.as_fd(), "minimal-fd.pdf", &SafeModeConfig::default())
+            .unwrap();
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.file_path, "minimal-fd.pdf");
+        assert_eq!(summary.page_count, 1);
+        drop(doc);
+        assert!(file.metadata().is_ok());
     }
 
     #[cfg(all(unix, feature = "fake"))]
