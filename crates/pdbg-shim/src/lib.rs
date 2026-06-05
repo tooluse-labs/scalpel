@@ -74,8 +74,76 @@ mod tests {
             assert!(!summary.pdf_version.is_null());
             let version = CStr::from_ptr(summary.pdf_version).to_string_lossy();
             assert!(version.starts_with("1."));
+            let document_id = summary.document_id;
 
             raw::pdbg_document_summary_out_drop(&mut summary);
+
+            let root = raw::pdbg_node_id {
+                document_id,
+                kind: raw::pdbg_node_kind::PDBG_NODE_DOCUMENT_ROOT,
+                object: raw::pdbg_object_id { num: 0, gen: 0 },
+                has_object: 0,
+                page_index: 0,
+                path_token: 0,
+                decoded: 0,
+                resource_group: raw::pdbg_resource_group::PDBG_RESOURCE_FONTS,
+            };
+            let mut children: *mut raw::pdbg_node_list = ptr::null_mut();
+            let status = raw::pdbg_node_children(doc, &root, 0, 16, &mut children, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(raw::pdbg_node_list_has_total_count(children), 1);
+            assert_eq!(raw::pdbg_node_list_total_count(children), 4);
+            assert_eq!(raw::pdbg_node_list_len(children), 4);
+
+            let mut first = std::mem::zeroed::<raw::pdbg_dict_entry>();
+            let status = raw::pdbg_node_list_get(children, 0, &mut first, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(first.node.kind, raw::pdbg_node_kind::PDBG_NODE_TRAILER);
+            assert_eq!(CStr::from_ptr(first.label).to_string_lossy(), "Trailer");
+
+            let mut detail = std::mem::zeroed::<raw::pdbg_object_detail_out>();
+            let status = raw::pdbg_object_detail(doc, &first.node, &mut detail, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(detail.kind, raw::pdbg_object_kind::PDBG_OBJECT_TRAILER);
+            assert!(!detail.preview.is_null());
+            assert!(!detail.dictionary_entries.is_null());
+
+            raw::pdbg_object_detail_out_drop(&mut detail);
+
+            let mut pages = std::mem::zeroed::<raw::pdbg_dict_entry>();
+            let status = raw::pdbg_node_list_get(children, 2, &mut pages, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(pages.node.kind, raw::pdbg_node_kind::PDBG_NODE_PAGE_ROOT);
+            let mut page_children: *mut raw::pdbg_node_list = ptr::null_mut();
+            let status =
+                raw::pdbg_node_children(doc, &pages.node, 0, 16, &mut page_children, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(raw::pdbg_node_list_total_count(page_children), 1);
+            let mut first_page = std::mem::zeroed::<raw::pdbg_dict_entry>();
+            let status = raw::pdbg_node_list_get(page_children, 0, &mut first_page, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(first_page.node.kind, raw::pdbg_node_kind::PDBG_NODE_PAGE);
+            raw::pdbg_node_list_drop(page_children);
+
+            let mut xref = std::mem::zeroed::<raw::pdbg_dict_entry>();
+            let status = raw::pdbg_node_list_get(children, 3, &mut xref, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(xref.node.kind, raw::pdbg_node_kind::PDBG_NODE_XREF_ROOT);
+            let mut xref_children: *mut raw::pdbg_node_list = ptr::null_mut();
+            let status =
+                raw::pdbg_node_children(doc, &xref.node, 0, 2, &mut xref_children, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert!(raw::pdbg_node_list_len(xref_children) > 0);
+            let mut first_xref = std::mem::zeroed::<raw::pdbg_dict_entry>();
+            let status = raw::pdbg_node_list_get(xref_children, 0, &mut first_xref, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(
+                first_xref.node.kind,
+                raw::pdbg_node_kind::PDBG_NODE_XREF_OBJECT
+            );
+            raw::pdbg_node_list_drop(xref_children);
+
+            raw::pdbg_node_list_drop(children);
             raw::pdbg_document_drop(doc);
             raw::pdbg_context_drop(ctx);
         }
