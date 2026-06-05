@@ -656,6 +656,14 @@ content and must follow the egress rules in Section 9.
   back into the same document session in a reentrant way.
 - Long operations must support cancellation.
 
+M2 implementation limit: stream and render operations run on background tasks so
+the UI can keep repainting and expose cancellation, but one opened document is
+still serialized by a single `DocumentSession` mutex. Starting a tree expansion,
+object-detail load, or other MuPDF-backed operation while a long render/decode is
+in flight may wait for that operation to finish or observe cancellation. True
+browse-while-render concurrency requires a later worker model with independently
+scheduled cloned MuPDF contexts and explicit result ordering.
+
 ### 6.2 Rust Session Shape
 
 ```rust

@@ -374,6 +374,63 @@ static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out)
     return 1;
 }
 
+static pdbg_status measure_raw_stream_size(
+    pdbg_doc *doc,
+    int object_num,
+    pdbg_cancel_token *cancel,
+    uint64_t *out,
+    pdbg_error *err)
+{
+    if (!out) {
+        set_error(err, PDBG_ERROR_GENERIC, "raw stream size output is null");
+        return PDBG_ERROR_GENERIC;
+    }
+
+    *out = 0;
+    fz_context *ctx = doc->ctx;
+    fz_stream *raw_stream = NULL;
+    pdbg_status status = PDBG_OK;
+    fz_var(raw_stream);
+    fz_var(status);
+
+    fz_try(ctx)
+    {
+        raw_stream = pdf_open_raw_stream_number(ctx, doc->pdf_doc, object_num);
+        unsigned char scratch[8192];
+        uint64_t total = 0;
+        while (status == PDBG_OK) {
+            if (cancel && atomic_load(&cancel->cancelled)) {
+                status = PDBG_ERROR_CANCELLED;
+                set_error(err, status, "cancelled");
+                break;
+            }
+
+            size_t n = fz_read(ctx, raw_stream, scratch, sizeof(scratch));
+            if (n == 0)
+                break;
+            if ((uint64_t)n > UINT64_MAX - total) {
+                status = PDBG_ERROR_LIMIT;
+                set_error(err, status, "raw stream size overflow");
+                break;
+            }
+            total += (uint64_t)n;
+        }
+        if (status == PDBG_OK)
+            *out = total;
+    }
+    fz_always(ctx)
+    {
+        if (raw_stream)
+            fz_drop_stream(ctx, raw_stream);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    return status;
+}
+
 static void free_value(pdbg_object_value *value)
 {
     if (!value)
@@ -1591,11 +1648,9 @@ pdbg_status pdbg_stream_load(
 
     fz_context *ctx = doc->ctx;
     fz_stream *stream = NULL;
-    pdf_obj *stream_obj = NULL;
     pdbg_buffer *buffer = NULL;
     pdbg_status status = PDBG_OK;
     fz_var(stream);
-    fz_var(stream_obj);
     fz_var(buffer);
     fz_var(status);
 
@@ -1618,15 +1673,14 @@ pdbg_status pdbg_stream_load(
             }
 
             if (status == PDBG_OK) {
-                uint64_t raw_size_hint = 0;
-                int has_raw_size_hint = 0;
+                uint64_t measured_raw_size = 0;
                 if (decoded && doc->max_filter_expansion_ratio > 0) {
-                    stream_obj = pdf_load_object(ctx, doc->pdf_doc, object.num);
-                    has_raw_size_hint = stream_raw_size_hint(ctx, stream_obj, &raw_size_hint);
+                    status = measure_raw_stream_size(doc, object.num, cancel, &measured_raw_size, err);
                 }
 
-                stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
-                                 : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
+                if (status == PDBG_OK)
+                    stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
+                                     : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
 
                 unsigned char scratch[8192];
                 uint64_t total = 0;
@@ -1658,15 +1712,15 @@ pdbg_status pdbg_stream_load(
                         set_error(err, status, "decoded stream limit exceeded during decode");
                         break;
                     }
-                    if (decoded && has_raw_size_hint) {
-                        if (raw_size_hint == 0 && chunk_end > 0) {
+                    if (decoded && doc->max_filter_expansion_ratio > 0) {
+                        if (measured_raw_size == 0 && chunk_end > 0) {
                             status = PDBG_ERROR_LIMIT;
                             set_error(err, status, "decoded stream expansion ratio exceeded");
                             break;
                         }
-                        if (raw_size_hint > 0 &&
-                            (raw_size_hint > UINT64_MAX / (uint64_t)doc->max_filter_expansion_ratio ||
-                             chunk_end > raw_size_hint * (uint64_t)doc->max_filter_expansion_ratio)) {
+                        if (measured_raw_size > 0 &&
+                            (measured_raw_size > UINT64_MAX / (uint64_t)doc->max_filter_expansion_ratio ||
+                             chunk_end > measured_raw_size * (uint64_t)doc->max_filter_expansion_ratio)) {
                             status = PDBG_ERROR_LIMIT;
                             set_error(err, status, "decoded stream expansion ratio exceeded");
                             break;
@@ -1702,8 +1756,6 @@ pdbg_status pdbg_stream_load(
     {
         if (stream)
             fz_drop_stream(ctx, stream);
-        if (stream_obj)
-            pdf_drop_obj(ctx, stream_obj);
     }
     fz_catch(ctx)
     {

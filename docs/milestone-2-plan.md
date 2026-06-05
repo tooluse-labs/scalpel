@@ -69,7 +69,7 @@ Latest local validation after completing the required M2 exit gate:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
-sh scripts/run_m1_real_gate.sh
+sh scripts/run_real_gate.sh
 ```
 
 That gate covers the implemented M2 stream, page-list, render, preview-control,

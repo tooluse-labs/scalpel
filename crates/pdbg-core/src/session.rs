@@ -51,7 +51,10 @@ impl FakeSharedStore {
     }
 
     pub fn snapshot(&self) -> FakeSharedStoreSnapshot {
-        let state = self.inner.lock().expect("fake shared store mutex poisoned");
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         FakeSharedStoreSnapshot {
             root_lock_contexts: state.root_lock_contexts,
             documents_opened: state.documents_opened,
@@ -61,7 +64,10 @@ impl FakeSharedStore {
     }
 
     fn with_state(&self, update: impl FnOnce(&mut FakeSharedStoreState)) {
-        let mut state = self.inner.lock().expect("fake shared store mutex poisoned");
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         update(&mut state);
     }
 }
@@ -127,7 +133,7 @@ where
                 .inner
                 .document
                 .lock()
-                .expect("document session mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             task(&mut document)
         };
 
@@ -141,7 +147,7 @@ where
             .inner
             .summary_cache
             .lock()
-            .expect("summary cache mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
         {
             return Ok(summary);
@@ -152,7 +158,7 @@ where
             .inner
             .summary_cache
             .lock()
-            .expect("summary cache mutex poisoned") = Some(summary.clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(summary.clone());
         Ok(summary)
     }
 
@@ -209,6 +215,26 @@ mod tests {
         );
         assert_eq!(session.shared_store_snapshot().tasks_entered, 1);
         assert_eq!(session.shared_store_snapshot().tasks_completed, 1);
+    }
+
+    #[test]
+    fn document_session_recovers_after_worker_panic_poison() {
+        let shim = FakeShim::new().unwrap();
+        let doc = shim.open_document("fake.pdf").unwrap();
+        let session = DocumentSession::with_shared_store(doc, shim.shared_store());
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let session = session.clone();
+            move || {
+                let _ = session.run_task::<()>(|_| panic!("intentional session poison"));
+            }
+        }));
+        assert!(panic_result.is_err());
+
+        let summary = session.summary().unwrap();
+        assert_eq!(summary.file_path, "fake.pdf");
+        assert_eq!(session.task_queue_stats().submitted, 2);
+        assert_eq!(session.task_queue_stats().completed, 1);
     }
 
     #[test]

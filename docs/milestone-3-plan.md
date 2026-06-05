@@ -104,6 +104,10 @@ M3 is complete when:
   history;
 - the diagnostics panel supports severity/code filtering and emits JSON with
   `diagnostic_schema_version`;
+- the real gate includes diagnostic-emission fixtures for at least
+  `stream_decode_failure` from a malformed stream and
+  `encryption_password_failure` from a wrong-password open; missing/broken xref
+  diagnostics remain best-effort where MuPDF exposes enough repair context;
 - a bounded Markdown diagnostics report escapes untrusted PDF text;
 - the default local gate still passes without linking MuPDF, and the opt-in
   real gate plus manual `real-mupdf` workflow covers the M3 slices.

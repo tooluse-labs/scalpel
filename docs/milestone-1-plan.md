@@ -1,7 +1,7 @@
 # Milestone 1 Open And Inspect Plan
 
 Status: implemented for the macOS developer path on 2026-06-05. The opt-in
-real-MuPDF local gate is `scripts/run_m1_real_gate.sh`; the default workspace
+real-MuPDF local gate is `scripts/run_real_gate.sh`; the default workspace
 gate remains MuPDF-free.
 
 Milestone 1 replaces the fake backend for the first real debugger slice:
@@ -167,7 +167,7 @@ tree recorded in ADR 0002:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
-sh scripts/run_m1_real_gate.sh
+sh scripts/run_real_gate.sh
 ```
 
 That gate covers:

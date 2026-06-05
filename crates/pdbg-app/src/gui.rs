@@ -739,6 +739,21 @@ impl GuiShellApp {
         ));
     }
 
+    fn cancel_real_render_job(&mut self) {
+        if let Some(job) = self.real_render_job.take() {
+            job.cancel.cancel();
+            self.real_render = None;
+            self.real_render_texture = None;
+            self.real_render_error = Some("page render cancelled".to_string());
+            self.status_log.push(format!(
+                "cancelled page {} @ {:.0}% rot {} render",
+                job.key.page_index + 1,
+                job.key.zoom() * 100.0,
+                job.key.rotation_degrees
+            ));
+        }
+    }
+
     fn poll_real_render_job(&mut self) {
         let Some(polled) =
             self.real_render_job
@@ -1534,6 +1549,18 @@ impl GuiShellApp {
                 .small()
                 .color(PdbgTheme::MUTED),
             );
+            let mut page_number = self.render_page_index + 1;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut page_number)
+                        .range(1..=page_count)
+                        .speed(1),
+                )
+                .changed()
+            {
+                self.render_page_index = page_number.saturating_sub(1).min(page_count - 1);
+                rerender = true;
+            }
             if ui
                 .add_enabled(
                     self.render_page_index + 1 < page_count,
@@ -1578,6 +1605,18 @@ impl GuiShellApp {
                         }
                     }
                 });
+            if self.real_render_job.is_some() {
+                ui.separator();
+                if ui.button("Cancel render").clicked() {
+                    self.cancel_real_render_job();
+                }
+            } else {
+                ui.separator();
+                if ui.button("Render").clicked() {
+                    self.real_render_key = None;
+                    self.refresh_real_render();
+                }
+            }
         });
         if rerender {
             self.refresh_real_render();
@@ -1602,12 +1641,9 @@ impl GuiShellApp {
             let Some(pages) = &self.real_pages else {
                 return;
             };
-            let selected_page = self
-                .real_render
-                .as_ref()
-                .map(|render| render.page_index)
-                .unwrap_or(0);
-            for (index, page) in pages.items.iter().enumerate().take(12) {
+            let selected_page = self.render_page_index;
+            let visible_pages = pages.items.len().min(12);
+            for (index, page) in pages.items.iter().take(visible_pages).enumerate() {
                 let selected = index == selected_page;
                 if ui
                     .add(
@@ -1642,6 +1678,13 @@ impl GuiShellApp {
                     .small()
                     .color(PdbgTheme::MUTED),
             );
+            if let Some(total) = pages.total.filter(|total| *total > visible_pages) {
+                ui.label(
+                    RichText::new(format!("+{} more, use page control", total - visible_pages))
+                        .small()
+                        .color(PdbgTheme::MUTED),
+                );
+            }
         });
         if let Some(page_index) = clicked_page {
             self.set_render_page(page_index);
@@ -3072,6 +3115,31 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("queued page 2")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_render_job_can_be_cancelled_from_ui_state() {
+        let path = write_temp_pdf("gui-render-cancel", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        assert!(app.real_render_job.is_some());
+
+        app.cancel_real_render_job();
+        assert!(app.real_render_job.is_none());
+        assert!(app.real_render.is_none());
+        assert_eq!(
+            app.real_render_error.as_deref(),
+            Some("page render cancelled")
+        );
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("cancelled page 1")));
 
         let _ = std::fs::remove_file(path);
     }

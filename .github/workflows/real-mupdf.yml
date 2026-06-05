@@ -30,4 +30,4 @@ jobs:
       - name: Real MuPDF gate
         env:
           PDBG_MUPDF_SOURCE_DIR: ${{ runner.temp }}/mupdf/mupdf-${{ env.MUPDF_VERSION }}-source
-        run: sh scripts/run_m1_real_gate.sh
+        run: sh scripts/run_real_gate.sh

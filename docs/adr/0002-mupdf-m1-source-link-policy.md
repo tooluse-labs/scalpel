@@ -69,13 +69,13 @@ The full M1 real gate is:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/path/to/mupdf-1.27.2-source \
-sh scripts/run_m1_real_gate.sh
+sh scripts/run_real_gate.sh
 ```
 
 GitHub Actions keeps the default `m0` workflow MuPDF-free. The opt-in
 `real-mupdf` workflow is triggered manually with `workflow_dispatch`; it
 downloads the pinned MuPDF source archive, builds the static libraries plus
-`mutool`, and runs the same `scripts/run_m1_real_gate.sh` contract.
+`mutool`, and runs the same `scripts/run_real_gate.sh` contract.
 
 This gate also requires `mutool` for runtime generation of the encrypted-PDF
 fixture. By default it expects:
