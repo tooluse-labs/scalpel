@@ -58,7 +58,7 @@ M1.1 source/link/platform/binding decisions are recorded in
 - Add a local non-required command for real builds, for example:
 
 ```sh
-cargo test -p pdbg-core --features real-mupdf
+cargo test -p pdbg-shim --no-default-features --features real-mupdf
 ```
 
 ### M1.2 Minimal Real Shim

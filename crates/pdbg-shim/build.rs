@@ -76,13 +76,14 @@ fn build_real_mupdf() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
     let link_mode = env::var("PDBG_MUPDF_LINK_MODE").unwrap_or_else(|_| "static".to_string());
-    let libs = env::var("PDBG_MUPDF_LIBS").unwrap_or_else(|_| "mupdf".to_string());
+    let libs = env::var("PDBG_MUPDF_LIBS").unwrap_or_else(|_| "mupdf,mupdf-third".to_string());
     for lib_name in libs
         .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
         .filter(|name| !name.is_empty())
     {
         println!("cargo:rustc-link-lib={}={}", link_mode, lib_name);
     }
+    println!("cargo:rustc-link-lib=pthread");
 }
 
 fn compile_c_object(source: &str, obj: &Path, include_dirs: &[PathBuf]) {

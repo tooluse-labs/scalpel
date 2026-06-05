@@ -26,7 +26,8 @@ publication steps.
 
 The M1 link mode is static by default. `pdbg-shim/build.rs` accepts
 `PDBG_MUPDF_LINK_MODE` and `PDBG_MUPDF_LIBS` for local experiments, but the
-documented product path is a pinned source release plus static libmupdf.
+documented product path is a pinned source release plus MuPDF's static
+`libmupdf.a` and `libmupdf-third.a` libraries.
 
 The initial supported M1 platform is macOS for developer integration. Linux is
 the next required platform before any release build. Windows remains an explicit
@@ -50,7 +51,7 @@ The real MuPDF build is enabled explicitly:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/path/to/mupdf-1.27.2-source \
-cargo test -p pdbg-core --features real-mupdf
+cargo test -p pdbg-shim --no-default-features --features real-mupdf
 ```
 
 If MuPDF was built into a non-default location, set:
@@ -60,9 +61,9 @@ PDBG_MUPDF_INCLUDE_DIR=/path/to/mupdf/include
 PDBG_MUPDF_LIB_DIR=/path/to/mupdf/build/release
 ```
 
-`PDBG_MUPDF_LIBS` defaults to `mupdf`. Additional platform or third-party
-libraries may be added locally while M1.1/M1.2 settles the final static link
-line.
+`PDBG_MUPDF_LIBS` defaults to `mupdf,mupdf-third`. Additional platform or
+third-party libraries may be added locally while M1.1/M1.2 settles the final
+static link line.
 
 ## Rationale
 
