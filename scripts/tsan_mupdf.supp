@@ -1,0 +1,4 @@
+# MuPDF fz_cookie.abort is the library's asynchronous cancellation channel.
+# pdbg protects active-cookie lifetime with pdbg_cancel_token.mutex; this
+# suppression is only for the intentional abort-field write/read race.
+race:pdbg_cancel_token_cancel

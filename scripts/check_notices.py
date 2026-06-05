@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that NOTICES covers the default M0 resolve graph and MuPDF placeholder."""
+"""Verify NOTICES coverage for the default graph, MuPDF placeholder, and GUI fonts."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ def main() -> int:
         if package not in notices:
             missing.append(package)
 
+    for asset in gui_font_assets():
+        if not (ROOT / asset).is_file():
+            missing.append(asset)
+        if asset not in notices:
+            missing.append(asset)
+
     for item in missing:
         print(f"NOTICES missing: {item}")
     return 1 if missing else 0
@@ -43,6 +49,15 @@ def default_resolve_package_names() -> list[str]:
     packages_by_id = {package["id"]: package["name"] for package in parsed["packages"]}
     nodes = parsed.get("resolve", {}).get("nodes", [])
     return sorted({packages_by_id[node["id"]] for node in nodes})
+
+
+def gui_font_assets() -> list[str]:
+    return [
+        "crates/pdbg-app/assets/fonts/InterVariable.ttf",
+        "crates/pdbg-app/assets/fonts/JetBrainsMono-Regular.ttf",
+        "crates/pdbg-app/assets/licenses/Inter-OFL.txt",
+        "crates/pdbg-app/assets/licenses/JetBrainsMono-OFL.txt",
+    ]
 
 
 if __name__ == "__main__":

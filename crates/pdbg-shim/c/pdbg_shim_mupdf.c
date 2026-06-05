@@ -36,6 +36,7 @@ struct pdbg_doc {
     int safe_mode;
     int javascript_disabled;
     int repaired_or_damaged;
+    pdbg_repair_policy repair_policy;
     uint64_t max_store_bytes;
     uint64_t max_decoded_stream_bytes;
     uint32_t max_filter_expansion_ratio;
@@ -81,8 +82,22 @@ struct pdbg_text_page {
 
 struct pdbg_cancel_token {
     atomic_int cancelled;
-    fz_cookie cookie;
+    pthread_mutex_t mutex;
+    int mutex_initialized;
+    struct pdbg_active_cookie *active_cookies;
 };
+
+struct pdbg_active_cookie {
+    fz_cookie *cookie;
+    struct pdbg_active_cookie *next;
+};
+
+typedef struct pdbg_cancel_cookie_scope {
+    pdbg_cancel_token *token;
+    fz_cookie cookie;
+    struct pdbg_active_cookie link;
+    int registered;
+} pdbg_cancel_cookie_scope;
 
 static atomic_uint_fast64_t next_document_id = 1;
 
@@ -100,6 +115,7 @@ static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
 {
     doc->safe_mode = options ? options->safe_mode : 1;
     doc->javascript_disabled = options ? options->disable_javascript : 1;
+    doc->repair_policy = options ? options->repair_policy : PDBG_REPAIR_DEFAULT;
     doc->max_store_bytes =
         options && options->max_store_bytes ? options->max_store_bytes : PDBG_DEFAULT_MAX_STORE_BYTES;
     doc->max_decoded_stream_bytes =
@@ -111,6 +127,13 @@ static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
     doc->max_object_depth =
         options && options->max_object_depth ? options->max_object_depth : PDBG_DEFAULT_MAX_OBJECT_DEPTH;
 }
+
+static int repair_is_forbidden(const pdbg_doc *doc)
+{
+    return doc && doc->repair_policy == PDBG_REPAIR_NEVER && doc->repaired_or_damaged;
+}
+
+static void free_diag_list(pdbg_diagnostic_list *list);
 
 static void set_error(pdbg_error *err, pdbg_status status, const char *message)
 {
@@ -250,7 +273,24 @@ static pdbg_diagnostic_list *make_diag_list(pdbg_diagnostic_code code, const cha
     list->items[0].severity = PDBG_DIAG_WARNING;
     list->items[0].code = code;
     list->items[0].message = copy_string(message);
+    if (!list->items[0].message) {
+        free(list->items);
+        free(list);
+        return NULL;
+    }
     return list;
+}
+
+static int attach_single_diag(pdbg_diagnostic_list **out, pdbg_diagnostic_code code, const char *message)
+{
+    if (!out)
+        return 0;
+    pdbg_diagnostic_list *list = make_diag_list(code, message);
+    if (!list)
+        return 0;
+    free_diag_list(*out);
+    *out = list;
+    return 1;
 }
 
 static void free_diag_list(pdbg_diagnostic_list *list)
@@ -281,14 +321,55 @@ static void free_image(pdbg_image *image)
     free(image);
 }
 
-static fz_cookie *prepare_cancel_cookie(pdbg_cancel_token *cancel)
+static void cancel_cookie_scope_init(pdbg_cancel_cookie_scope *scope)
 {
-    if (!cancel)
+    if (scope)
+        memset(scope, 0, sizeof(*scope));
+}
+
+static fz_cookie *prepare_cancel_cookie(pdbg_cancel_cookie_scope *scope, pdbg_cancel_token *cancel)
+{
+    if (!scope || !cancel)
         return NULL;
-    memset(&cancel->cookie, 0, sizeof(cancel->cookie));
+    cancel_cookie_scope_init(scope);
+    scope->token = cancel;
     if (atomic_load(&cancel->cancelled))
-        cancel->cookie.abort = 1;
-    return &cancel->cookie;
+        scope->cookie.abort = 1;
+
+    if (!cancel->mutex_initialized)
+        return &scope->cookie;
+
+    pthread_mutex_lock(&cancel->mutex);
+    if (atomic_load(&cancel->cancelled))
+        scope->cookie.abort = 1;
+    scope->link.cookie = &scope->cookie;
+    scope->link.next = cancel->active_cookies;
+    cancel->active_cookies = &scope->link;
+    scope->registered = 1;
+    pthread_mutex_unlock(&cancel->mutex);
+
+    return &scope->cookie;
+}
+
+static void finish_cancel_cookie(pdbg_cancel_cookie_scope *scope)
+{
+    if (!scope || !scope->registered || !scope->token || !scope->token->mutex_initialized)
+        return;
+
+    pdbg_cancel_token *token = scope->token;
+    pthread_mutex_lock(&token->mutex);
+    struct pdbg_active_cookie **cursor = &token->active_cookies;
+    while (*cursor) {
+        if (*cursor == &scope->link) {
+            *cursor = scope->link.next;
+            break;
+        }
+        cursor = &(*cursor)->next;
+    }
+    pthread_mutex_unlock(&token->mutex);
+
+    scope->registered = 0;
+    scope->token = NULL;
 }
 
 static void free_stream_summary(pdbg_stream_summary *stream)
@@ -374,6 +455,11 @@ static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out)
     return 1;
 }
 
+static int status_can_be_stream_decode_diagnostic(pdbg_status status)
+{
+    return status == PDBG_ERROR_FORMAT || status == PDBG_ERROR_GENERIC || status == PDBG_ERROR_UNSUPPORTED;
+}
+
 static pdbg_status measure_raw_stream_size(
     pdbg_doc *doc,
     int object_num,
@@ -444,24 +530,27 @@ static void free_value(pdbg_object_value *value)
 static void add_metadata_pair(
     fz_context *ctx,
     fz_document *doc,
-    pdbg_string_pair *pairs,
-    size_t *len,
+    pdbg_document_summary_out *out,
     const char *key,
     const char *label)
 {
+    if (!out || !out->metadata)
+        return;
+
     char value[512];
     int written = fz_lookup_metadata(ctx, doc, key, value, sizeof(value));
     if (written <= 0 || value[0] == '\0')
         return;
 
-    pairs[*len].key = copy_string(label);
-    pairs[*len].value = copy_string(value);
-    if (pairs[*len].key && pairs[*len].value)
-        *len += 1;
+    size_t index = out->metadata_len;
+    out->metadata[index].key = copy_string(label);
+    out->metadata[index].value = copy_string(value);
+    if (out->metadata[index].key && out->metadata[index].value)
+        out->metadata_len += 1;
     else {
-        free(pairs[*len].key);
-        free(pairs[*len].value);
-        memset(&pairs[*len], 0, sizeof(pairs[*len]));
+        free(out->metadata[index].key);
+        free(out->metadata[index].value);
+        memset(&out->metadata[index], 0, sizeof(out->metadata[index]));
     }
 }
 
@@ -471,20 +560,20 @@ static void fill_metadata(fz_context *ctx, fz_document *doc, pdbg_document_summa
     pdbg_string_pair *pairs = (pdbg_string_pair *)calloc(capacity, sizeof(pdbg_string_pair));
     if (!pairs)
         return;
+    out->metadata = pairs;
+    out->metadata_len = 0;
 
-    size_t len = 0;
-    add_metadata_pair(ctx, doc, pairs, &len, FZ_META_INFO_TITLE, "Title");
-    add_metadata_pair(ctx, doc, pairs, &len, FZ_META_INFO_AUTHOR, "Author");
-    add_metadata_pair(ctx, doc, pairs, &len, FZ_META_INFO_CREATOR, "Creator");
-    add_metadata_pair(ctx, doc, pairs, &len, FZ_META_INFO_PRODUCER, "Producer");
-    add_metadata_pair(ctx, doc, pairs, &len, FZ_META_ENCRYPTION, "Encryption");
+    add_metadata_pair(ctx, doc, out, FZ_META_INFO_TITLE, "Title");
+    add_metadata_pair(ctx, doc, out, FZ_META_INFO_AUTHOR, "Author");
+    add_metadata_pair(ctx, doc, out, FZ_META_INFO_CREATOR, "Creator");
+    add_metadata_pair(ctx, doc, out, FZ_META_INFO_PRODUCER, "Producer");
+    add_metadata_pair(ctx, doc, out, FZ_META_ENCRYPTION, "Encryption");
 
-    if (len == 0) {
-        free(pairs);
+    if (out->metadata_len == 0) {
+        free(out->metadata);
+        out->metadata = NULL;
         return;
     }
-    out->metadata = pairs;
-    out->metadata_len = len;
 }
 
 static int document_is_encrypted(fz_context *ctx, fz_document *doc)
@@ -826,141 +915,186 @@ static pdf_obj *resolve_node_obj(fz_context *ctx, pdbg_doc *doc, const pdbg_node
 static pdbg_node_list *document_root_children(fz_context *ctx, pdbg_doc *doc, size_t offset, size_t limit)
 {
     const size_t total = 4;
-    pdbg_node_list *list = alloc_node_list(total, offset, limit);
-    if (!list)
-        return NULL;
+    pdbg_node_list *list = NULL;
+    int ok = 1;
+    fz_var(list);
+    fz_var(ok);
 
-    for (size_t i = 0; i < list->len; i++) {
-        size_t child = offset + i;
-        pdbg_dict_entry *entry = &list->items[i];
-        int ok = 0;
-        if (child == 0) {
-            pdf_obj *trailer = pdf_trailer(ctx, doc->pdf_doc);
-            ok = fill_entry_common(
-                ctx,
-                entry,
-                "Trailer",
-                direct_node(doc->document_id, PDBG_NODE_TRAILER),
-                PDBG_OBJECT_TRAILER,
-                "Trailer",
-                "PDF trailer dictionary");
-            entry->has_children = 1;
-            entry->child_count = object_child_count(ctx, trailer);
-            entry->has_child_count = 1;
-        } else if (child == 1) {
-            pdf_obj *root_ref = pdf_dict_get(ctx, pdf_trailer(ctx, doc->pdf_doc), PDF_NAME(Root));
-            pdf_obj *catalog = pdf_resolve_indirect(ctx, root_ref);
-            pdbg_node_id node = direct_node(doc->document_id, PDBG_NODE_CATALOG);
-            if (pdf_is_indirect(ctx, root_ref)) {
-                node.object = object_id_from_ref(ctx, root_ref);
-                node.has_object = 1;
+    fz_try(ctx)
+    {
+        list = alloc_node_list(total, offset, limit);
+        if (!list)
+            ok = 0;
+
+        for (size_t i = 0; ok && i < list->len; i++) {
+            size_t child = offset + i;
+            pdbg_dict_entry *entry = &list->items[i];
+            int entry_ok = 0;
+            if (child == 0) {
+                pdf_obj *trailer = pdf_trailer(ctx, doc->pdf_doc);
+                entry_ok = fill_entry_common(
+                    ctx,
+                    entry,
+                    "Trailer",
+                    direct_node(doc->document_id, PDBG_NODE_TRAILER),
+                    PDBG_OBJECT_TRAILER,
+                    "Trailer",
+                    "PDF trailer dictionary");
+                entry->has_children = 1;
+                entry->child_count = object_child_count(ctx, trailer);
+                entry->has_child_count = 1;
+            } else if (child == 1) {
+                pdf_obj *root_ref = pdf_dict_get(ctx, pdf_trailer(ctx, doc->pdf_doc), PDF_NAME(Root));
+                pdf_obj *catalog = pdf_resolve_indirect(ctx, root_ref);
+                pdbg_node_id node = direct_node(doc->document_id, PDBG_NODE_CATALOG);
+                if (pdf_is_indirect(ctx, root_ref)) {
+                    node.object = object_id_from_ref(ctx, root_ref);
+                    node.has_object = 1;
+                }
+                entry_ok = fill_entry_common(ctx, entry, "Catalog", node, PDBG_OBJECT_DICT, "Catalog", "Document catalog");
+                if (node.has_object) {
+                    entry->object = node.object;
+                    entry->has_object = 1;
+                }
+                entry->has_children = 1;
+                entry->child_count = object_child_count(ctx, catalog);
+                entry->has_child_count = 1;
+            } else if (child == 2) {
+                int page_count = fz_count_pages(ctx, doc->fz_doc);
+                entry_ok = fill_entry_common(
+                    ctx,
+                    entry,
+                    "Pages",
+                    direct_node(doc->document_id, PDBG_NODE_PAGE_ROOT),
+                    PDBG_OBJECT_ARRAY,
+                    "Pages",
+                    "Page tree");
+                entry->has_children = page_count > 0;
+                entry->child_count = (size_t)page_count;
+                entry->has_child_count = 1;
+            } else if (child == 3) {
+                int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
+                entry_ok = fill_entry_common(
+                    ctx,
+                    entry,
+                    "Xref",
+                    direct_node(doc->document_id, PDBG_NODE_XREF_ROOT),
+                    PDBG_OBJECT_XREF_ENTRY,
+                    "Xref",
+                    "Cross-reference table");
+                entry->has_children = xref_len > 1;
+                entry->child_count = xref_len > 0 ? (size_t)(xref_len - 1) : 0;
+                entry->has_child_count = 1;
             }
-            ok = fill_entry_common(ctx, entry, "Catalog", node, PDBG_OBJECT_DICT, "Catalog", "Document catalog");
-            if (node.has_object) {
-                entry->object = node.object;
-                entry->has_object = 1;
-            }
-            entry->has_children = 1;
-            entry->child_count = object_child_count(ctx, catalog);
-            entry->has_child_count = 1;
-        } else if (child == 2) {
-            int page_count = fz_count_pages(ctx, doc->fz_doc);
-            ok = fill_entry_common(
-                ctx,
-                entry,
-                "Pages",
-                direct_node(doc->document_id, PDBG_NODE_PAGE_ROOT),
-                PDBG_OBJECT_ARRAY,
-                "Pages",
-                "Page tree");
-            entry->has_children = page_count > 0;
-            entry->child_count = (size_t)page_count;
-            entry->has_child_count = 1;
-        } else if (child == 3) {
-            int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
-            ok = fill_entry_common(
-                ctx,
-                entry,
-                "Xref",
-                direct_node(doc->document_id, PDBG_NODE_XREF_ROOT),
-                PDBG_OBJECT_XREF_ENTRY,
-                "Xref",
-                "Cross-reference table");
-            entry->has_children = xref_len > 1;
-            entry->child_count = xref_len > 0 ? (size_t)(xref_len - 1) : 0;
-            entry->has_child_count = 1;
+            ok = entry_ok;
         }
-        if (!ok) {
-            pdbg_node_list_drop(list);
-            return NULL;
-        }
+    }
+    fz_catch(ctx)
+    {
+        pdbg_node_list_drop(list);
+        fz_rethrow(ctx);
+    }
+
+    if (!ok) {
+        pdbg_node_list_drop(list);
+        return NULL;
     }
     return list;
 }
 
 static pdbg_node_list *page_root_children(fz_context *ctx, pdbg_doc *doc, size_t offset, size_t limit)
 {
-    int page_count = fz_count_pages(ctx, doc->fz_doc);
-    size_t total = page_count > 0 ? (size_t)page_count : 0;
-    pdbg_node_list *list = alloc_node_list(total, offset, limit);
-    if (!list)
-        return NULL;
+    pdbg_node_list *list = NULL;
+    int ok = 1;
+    fz_var(list);
+    fz_var(ok);
 
-    for (size_t i = 0; i < list->len; i++) {
-        size_t page_index = offset + i;
-        char key[32];
-        char label[64];
-        snprintf(key, sizeof(key), "%zu", page_index);
-        snprintf(label, sizeof(label), "Page %zu", page_index + 1);
-        if (!fill_entry_common(
+    fz_try(ctx)
+    {
+        int page_count = fz_count_pages(ctx, doc->fz_doc);
+        size_t total = page_count > 0 ? (size_t)page_count : 0;
+        list = alloc_node_list(total, offset, limit);
+        if (!list)
+            ok = 0;
+
+        for (size_t i = 0; ok && i < list->len; i++) {
+            size_t page_index = offset + i;
+            char key[32];
+            char label[64];
+            snprintf(key, sizeof(key), "%zu", page_index);
+            snprintf(label, sizeof(label), "Page %zu", page_index + 1);
+            ok = fill_entry_common(
                 ctx,
                 &list->items[i],
                 key,
                 page_node(doc->document_id, (uint32_t)page_index),
                 PDBG_OBJECT_PAGE,
                 label,
-                "Page object")) {
-            pdbg_node_list_drop(list);
-            return NULL;
+                "Page object");
+            list->items[i].has_children = 1;
         }
-        list->items[i].has_children = 1;
+    }
+    fz_catch(ctx)
+    {
+        pdbg_node_list_drop(list);
+        fz_rethrow(ctx);
+    }
+
+    if (!ok) {
+        pdbg_node_list_drop(list);
+        return NULL;
     }
     return list;
 }
 
 static pdbg_node_list *xref_root_children(fz_context *ctx, pdbg_doc *doc, size_t offset, size_t limit)
 {
-    int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
-    size_t total = xref_len > 1 ? (size_t)(xref_len - 1) : 0;
-    pdbg_node_list *list = alloc_node_list(total, offset, limit);
-    if (!list)
-        return NULL;
+    pdbg_node_list *list = NULL;
+    int ok = 1;
+    fz_var(list);
+    fz_var(ok);
 
-    for (size_t i = 0; i < list->len; i++) {
-        int object_num = (int)(offset + i + 1);
-        char key[32];
-        char label[64];
-        char preview[64];
-        snprintf(key, sizeof(key), "%d", object_num);
-        snprintf(label, sizeof(label), "Object %d 0 R", object_num);
-        snprintf(preview, sizeof(preview), "%d 0 R", object_num);
-        pdbg_object_id object;
-        object.num = object_num;
-        object.gen = 0;
-        if (!fill_entry_common(
+    fz_try(ctx)
+    {
+        int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
+        size_t total = xref_len > 1 ? (size_t)(xref_len - 1) : 0;
+        list = alloc_node_list(total, offset, limit);
+        if (!list)
+            ok = 0;
+
+        for (size_t i = 0; ok && i < list->len; i++) {
+            int object_num = (int)(offset + i + 1);
+            char key[32];
+            char label[64];
+            char preview[64];
+            snprintf(key, sizeof(key), "%d", object_num);
+            snprintf(label, sizeof(label), "Object %d 0 R", object_num);
+            snprintf(preview, sizeof(preview), "%d 0 R", object_num);
+            pdbg_object_id object;
+            object.num = object_num;
+            object.gen = 0;
+            ok = fill_entry_common(
                 ctx,
                 &list->items[i],
                 key,
                 object_node(doc->document_id, PDBG_NODE_XREF_OBJECT, object),
                 PDBG_OBJECT_XREF_ENTRY,
                 label,
-                preview)) {
-            pdbg_node_list_drop(list);
-            return NULL;
+                preview);
+            list->items[i].object = object;
+            list->items[i].has_object = 1;
+            list->items[i].has_children = 1;
         }
-        list->items[i].object = object;
-        list->items[i].has_object = 1;
-        list->items[i].has_children = 1;
+    }
+    fz_catch(ctx)
+    {
+        pdbg_node_list_drop(list);
+        fz_rethrow(ctx);
+    }
+
+    if (!ok) {
+        pdbg_node_list_drop(list);
+        return NULL;
     }
     return list;
 }
@@ -975,42 +1109,53 @@ static pdbg_node_list *object_children(
     if (!obj)
         return alloc_node_list(0, offset, limit);
 
-    if (pdf_is_dict(ctx, obj)) {
-        size_t total = (size_t)pdf_dict_len(ctx, obj);
-        pdbg_node_list *list = alloc_node_list(total, offset, limit);
-        if (!list)
-            return NULL;
-        for (size_t i = 0; i < list->len; i++) {
-            int dict_index = (int)(offset + i);
-            const char *key = pdf_to_name(ctx, pdf_dict_get_key(ctx, obj, dict_index));
-            pdf_obj *val = pdf_dict_get_val(ctx, obj, dict_index);
-            if (!fill_entry_for_obj(ctx, doc, &list->items[i], key, val)) {
-                pdbg_node_list_drop(list);
-                return NULL;
+    pdbg_node_list *list = NULL;
+    int ok = 1;
+    fz_var(list);
+    fz_var(ok);
+
+    fz_try(ctx)
+    {
+        if (pdf_is_dict(ctx, obj)) {
+            size_t total = (size_t)pdf_dict_len(ctx, obj);
+            list = alloc_node_list(total, offset, limit);
+            if (!list)
+                ok = 0;
+            for (size_t i = 0; ok && i < list->len; i++) {
+                int dict_index = (int)(offset + i);
+                const char *key = pdf_to_name(ctx, pdf_dict_get_key(ctx, obj, dict_index));
+                pdf_obj *val = pdf_dict_get_val(ctx, obj, dict_index);
+                ok = fill_entry_for_obj(ctx, doc, &list->items[i], key, val);
             }
+        } else if (pdf_is_array(ctx, obj)) {
+            size_t total = (size_t)pdf_array_len(ctx, obj);
+            list = alloc_node_list(total, offset, limit);
+            if (!list)
+                ok = 0;
+            for (size_t i = 0; ok && i < list->len; i++) {
+                size_t item_index = offset + i;
+                char key[32];
+                snprintf(key, sizeof(key), "%zu", item_index);
+                pdf_obj *val = pdf_array_get(ctx, obj, (int)item_index);
+                ok = fill_entry_for_obj(ctx, doc, &list->items[i], key, val);
+            }
+        } else {
+            list = alloc_node_list(0, offset, limit);
+            if (!list)
+                ok = 0;
         }
-        return list;
+    }
+    fz_catch(ctx)
+    {
+        pdbg_node_list_drop(list);
+        fz_rethrow(ctx);
     }
 
-    if (pdf_is_array(ctx, obj)) {
-        size_t total = (size_t)pdf_array_len(ctx, obj);
-        pdbg_node_list *list = alloc_node_list(total, offset, limit);
-        if (!list)
-            return NULL;
-        for (size_t i = 0; i < list->len; i++) {
-            size_t item_index = offset + i;
-            char key[32];
-            snprintf(key, sizeof(key), "%zu", item_index);
-            pdf_obj *val = pdf_array_get(ctx, obj, (int)item_index);
-            if (!fill_entry_for_obj(ctx, doc, &list->items[i], key, val)) {
-                pdbg_node_list_drop(list);
-                return NULL;
-            }
-        }
-        return list;
+    if (!ok) {
+        pdbg_node_list_drop(list);
+        return NULL;
     }
-
-    return alloc_node_list(0, offset, limit);
+    return list;
 }
 
 pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
@@ -1101,6 +1246,12 @@ pdbg_status pdbg_cancel_token_new(pdbg_cancel_token **out, pdbg_error *err)
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
+    if (pthread_mutex_init(&token->mutex, NULL) != 0) {
+        free(token);
+        set_error(err, PDBG_ERROR_GENERIC, "failed to initialize cancel token mutex");
+        return PDBG_ERROR_GENERIC;
+    }
+    token->mutex_initialized = 1;
 
     *out = token;
     set_error(err, PDBG_OK, "");
@@ -1111,12 +1262,23 @@ void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
 {
     if (token) {
         atomic_store(&token->cancelled, 1);
-        token->cookie.abort = 1;
+        if (token->mutex_initialized) {
+            pthread_mutex_lock(&token->mutex);
+            for (struct pdbg_active_cookie *active = token->active_cookies; active; active = active->next) {
+                if (active->cookie) {
+                    /* MuPDF's fz_cookie contract uses this field for asynchronous abort. */
+                    active->cookie->abort = 1;
+                }
+            }
+            pthread_mutex_unlock(&token->mutex);
+        }
     }
 }
 
 void pdbg_cancel_token_drop(pdbg_cancel_token *token)
 {
+    if (token && token->mutex_initialized)
+        pthread_mutex_destroy(&token->mutex);
     free(token);
 }
 
@@ -1189,8 +1351,13 @@ pdbg_status pdbg_document_open(
                 }
             }
 
-            if (status == PDBG_OK && doc->authenticated)
+            if (status == PDBG_OK && doc->authenticated) {
                 doc->repaired_or_damaged = pdf_was_repaired(doc_ctx, pdf);
+                if (repair_is_forbidden(doc)) {
+                    status = PDBG_ERROR_FORMAT;
+                    set_error(err, status, "document required repair but repair policy forbids it");
+                }
+            }
         }
     }
     fz_catch(doc_ctx)
@@ -1306,8 +1473,13 @@ pdbg_status pdbg_document_open_fd(
                 }
             }
 
-            if (status == PDBG_OK && doc->authenticated)
+            if (status == PDBG_OK && doc->authenticated) {
                 doc->repaired_or_damaged = pdf_was_repaired(doc_ctx, pdf);
+                if (repair_is_forbidden(doc)) {
+                    status = PDBG_ERROR_FORMAT;
+                    set_error(err, status, "document required repair but repair policy forbids it");
+                }
+            }
         }
     }
     fz_always(doc_ctx)
@@ -1649,10 +1821,18 @@ pdbg_status pdbg_stream_load(
     fz_context *ctx = doc->ctx;
     fz_stream *stream = NULL;
     pdbg_buffer *buffer = NULL;
+    uint64_t total = 0;
+    size_t copied = 0;
+    uint64_t request_end = UINT64_MAX;
+    unsigned char scratch[8192];
     pdbg_status status = PDBG_OK;
     fz_var(stream);
     fz_var(buffer);
+    fz_var(total);
+    fz_var(copied);
     fz_var(status);
+    if ((uint64_t)limit <= UINT64_MAX - offset)
+        request_end = offset + (uint64_t)limit;
 
     fz_try(ctx)
     {
@@ -1681,13 +1861,6 @@ pdbg_status pdbg_stream_load(
                 if (status == PDBG_OK)
                     stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
                                      : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
-
-                unsigned char scratch[8192];
-                uint64_t total = 0;
-                size_t copied = 0;
-                uint64_t request_end = UINT64_MAX;
-                if ((uint64_t)limit <= UINT64_MAX - offset)
-                    request_end = offset + (uint64_t)limit;
 
                 while (status == PDBG_OK) {
                     if (cancel && atomic_load(&cancel->cancelled)) {
@@ -1759,7 +1932,25 @@ pdbg_status pdbg_stream_load(
     }
     fz_catch(ctx)
     {
-        status = set_mupdf_error(ctx, err);
+        pdbg_status caught_status = set_mupdf_error(ctx, err);
+        if (decoded && buffer && status_can_be_stream_decode_diagnostic(caught_status)) {
+            buffer->len = copied;
+            buffer->total_size = total;
+            buffer->truncated = 1;
+            if (!attach_single_diag(
+                    &buffer->diagnostics,
+                    PDBG_DIAG_STREAM_DECODE_FAILURE,
+                    fz_caught_message(ctx))) {
+                status = PDBG_ERROR_OOM;
+                set_error(err, status, "out of memory");
+            } else {
+                buffer->diagnostics->items[0].object = object;
+                buffer->diagnostics->items[0].has_object = 1;
+                status = PDBG_OK;
+            }
+        } else {
+            status = caught_status;
+        }
     }
 
     if (status != PDBG_OK) {
@@ -1812,11 +2003,14 @@ pdbg_status pdbg_page_render(
     fz_pixmap *pixmap = NULL;
     fz_device *device = NULL;
     pdbg_image *image = NULL;
+    pdbg_cancel_cookie_scope cancel_scope;
     pdbg_status status = PDBG_OK;
     fz_var(page);
     fz_var(pixmap);
     fz_var(device);
     fz_var(image);
+    cancel_cookie_scope_init(&cancel_scope);
+    fz_var(cancel_scope);
     fz_var(status);
 
     fz_try(ctx)
@@ -1848,7 +2042,7 @@ pdbg_status pdbg_page_render(
                 pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 1);
                 fz_clear_pixmap_with_value(ctx, pixmap, 0xFF);
                 device = fz_new_draw_device(ctx, transform, pixmap);
-                fz_cookie *cookie = prepare_cancel_cookie(cancel);
+                fz_cookie *cookie = prepare_cancel_cookie(&cancel_scope, cancel);
                 fz_run_page(ctx, page, device, fz_identity, cookie);
                 fz_close_device(ctx, device);
 
@@ -1913,6 +2107,7 @@ pdbg_status pdbg_page_render(
     }
     fz_always(ctx)
     {
+        finish_cancel_cookie(&cancel_scope);
         if (device)
             fz_drop_device(ctx, device);
         if (pixmap)

@@ -1642,8 +1642,20 @@ impl GuiShellApp {
                 return;
             };
             let selected_page = self.render_page_index;
-            let visible_pages = pages.items.len().min(12);
-            for (index, page) in pages.items.iter().take(visible_pages).enumerate() {
+            let loaded_pages = pages.items.len();
+            let visible_pages = loaded_pages.min(12);
+            let first_visible_page = if selected_page < loaded_pages {
+                selected_page.saturating_add(1).saturating_sub(visible_pages)
+            } else {
+                0
+            };
+            for (index, page) in pages
+                .items
+                .iter()
+                .enumerate()
+                .skip(first_visible_page)
+                .take(visible_pages)
+            {
                 let selected = index == selected_page;
                 if ui
                     .add(

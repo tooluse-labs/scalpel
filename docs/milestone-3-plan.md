@@ -76,9 +76,10 @@ content-stream operator visualization remain later milestones.
 
 - Consolidate document, object, stream, render, and text diagnostics into a
   document-level diagnostics model with severity/code filtering.
-- Extend the real MuPDF shim to emit the diagnostic codes used by that model,
-  including missing/broken xref entries where MuPDF exposes repair context,
-  stream decode failures on bounded stream loads, encryption password failures,
+- Extend the real MuPDF/Rust open-error surfaces to emit the diagnostic codes
+  used by that model, including missing/broken xref entries where MuPDF exposes
+  repair context, stream decode failures carried on bounded stream buffers,
+  Rust-synthesized encryption password failures for failed opens,
   JavaScript-disabled safety notices, and existing repair warnings.
 - Add JSON diagnostic payload export using
   `diagnostics_payload_to_json_string`.
@@ -105,9 +106,10 @@ M3 is complete when:
 - the diagnostics panel supports severity/code filtering and emits JSON with
   `diagnostic_schema_version`;
 - the real gate includes diagnostic-emission fixtures for at least
-  `stream_decode_failure` from a malformed stream and
-  `encryption_password_failure` from a wrong-password open; missing/broken xref
-  diagnostics remain best-effort where MuPDF exposes enough repair context;
+  `stream_decode_failure` from a malformed stream buffer and
+  Rust-synthesized `encryption_password_failure` from a wrong-password open;
+  missing/broken xref diagnostics remain best-effort where MuPDF exposes enough
+  repair context;
 - a bounded Markdown diagnostics report escapes untrusted PDF text;
 - the default local gate still passes without linking MuPDF, and the opt-in
   real gate plus manual `real-mupdf` workflow covers the M3 slices.

@@ -12,6 +12,29 @@ use std::sync::{Arc, Mutex};
 pub struct ShimError {
     pub status: raw::pdbg_status,
     pub message: String,
+    pub diagnostics: Vec<DiagnosticSummary>,
+}
+
+impl ShimError {
+    fn new(status: raw::pdbg_status, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn with_diagnostics(
+        status: raw::pdbg_status,
+        message: impl Into<String>,
+        diagnostics: Vec<DiagnosticSummary>,
+    ) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            diagnostics,
+        }
+    }
 }
 
 pub trait Shim {
@@ -77,7 +100,21 @@ impl FakeShim {
         path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, config)?;
+        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, None, config)?;
+        self.shared_store.record_document_open();
+        Ok(OpenDocument {
+            doc,
+            registry: NodeTokenRegistry::default(),
+        })
+    }
+
+    pub fn open_document_with_password_and_config(
+        &self,
+        path: &str,
+        password: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, Some(password), config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -92,7 +129,7 @@ impl FakeShim {
         display_path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, config)?;
+        let doc = PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, None, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -105,7 +142,12 @@ impl Shim for FakeShim {
     type Document = OpenDocument;
 
     fn open_document(&self, path: &str) -> Result<Self::Document, ShimError> {
-        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, &SafeModeConfig::default())?;
+        let doc = PdbgDoc::open_path(
+            Arc::clone(&self.ctx),
+            path,
+            None,
+            &SafeModeConfig::default(),
+        )?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -133,7 +175,19 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, config)?,
+            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, None, config)?,
+            registry: NodeTokenRegistry::default(),
+        })
+    }
+
+    pub fn open_document_with_password_and_config(
+        &self,
+        path: &str,
+        password: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        Ok(OpenDocument {
+            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, Some(password), config)?,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -146,7 +200,7 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, config)?,
+            doc: PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, None, config)?,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -217,9 +271,11 @@ impl OpenDocument {
         if let Some(raw_node) = self.registry.raw_for(node) {
             return Ok(raw_node);
         }
-        raw_node_from_public(node).ok_or_else(|| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "node is not registered in this document session".to_string(),
+        raw_node_from_public(node).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "node is not registered in this document session",
+            )
         })
     }
 
@@ -262,9 +318,11 @@ impl CancelToken {
             let mut err = raw::pdbg_error::default();
             let status = raw::pdbg_cancel_token_new(&mut token, &mut err);
             check_status(status, &err)?;
-            let raw = NonNull::new(token).ok_or_else(|| ShimError {
-                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-                message: "pdbg_cancel_token_new returned null".to_string(),
+            let raw = NonNull::new(token).ok_or_else(|| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "pdbg_cancel_token_new returned null",
+                )
             })?;
             Ok(Self { raw })
         }
@@ -279,9 +337,10 @@ impl CancelToken {
     }
 }
 
-// Safety: the C cancel token stores its cancellation flag as an atomic integer.
-// It is intentionally shared across threads so a controller can request
-// cancellation while a worker is inside a bounded stream/render operation.
+// Safety: the C cancel token stores its cancellation flag atomically and protects
+// active MuPDF cookie registration with an internal mutex. It is intentionally
+// shared so a controller can request cancellation while a worker is inside a
+// bounded stream/render operation.
 unsafe impl Send for CancelToken {}
 unsafe impl Sync for CancelToken {}
 
@@ -310,9 +369,11 @@ impl PdbgContext {
             let mut err = raw::pdbg_error::default();
             let status = raw::pdbg_context_new(&mut ctx, &mut err);
             check_status(status, &err)?;
-            let raw = NonNull::new(ctx).ok_or_else(|| ShimError {
-                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-                message: "pdbg_context_new returned null".to_string(),
+            let raw = NonNull::new(ctx).ok_or_else(|| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "pdbg_context_new returned null",
+                )
             })?;
             Ok(Self {
                 raw,
@@ -324,12 +385,24 @@ impl PdbgContext {
     fn open_raw_document_handle(
         &self,
         path: &str,
+        password: Option<&str>,
         config: &SafeModeConfig,
     ) -> Result<NonNull<raw::pdbg_doc>, ShimError> {
-        let path = CString::new(path).map_err(|_| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "path contains interior NUL".to_string(),
+        let path = CString::new(path).map_err(|_| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "path contains interior NUL",
+            )
         })?;
+        let password = password
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "password contains interior NUL",
+                )
+            })?;
         let options = config.to_raw_open_options();
         let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
@@ -339,15 +412,19 @@ impl PdbgContext {
             let status = raw::pdbg_document_open(
                 self.raw.as_ptr(),
                 path.as_ptr(),
-                ptr::null(),
+                password
+                    .as_ref()
+                    .map_or(ptr::null(), |password| password.as_ptr()),
                 &options,
                 &mut doc,
                 &mut err,
             );
-            check_status(status, &err)?;
-            let raw = NonNull::new(doc).ok_or_else(|| ShimError {
-                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-                message: "pdbg_document_open returned null".to_string(),
+            check_open_status(status, &err)?;
+            let raw = NonNull::new(doc).ok_or_else(|| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "pdbg_document_open returned null",
+                )
             })?;
             Ok(raw)
         }
@@ -358,12 +435,24 @@ impl PdbgContext {
         &self,
         fd: BorrowedFd<'_>,
         display_path: &str,
+        password: Option<&str>,
         config: &SafeModeConfig,
     ) -> Result<NonNull<raw::pdbg_doc>, ShimError> {
-        let display_path = CString::new(display_path).map_err(|_| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "display path contains interior NUL".to_string(),
+        let display_path = CString::new(display_path).map_err(|_| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "display path contains interior NUL",
+            )
         })?;
+        let password = password
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "password contains interior NUL",
+                )
+            })?;
         let options = config.to_raw_open_options();
         let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
@@ -374,15 +463,19 @@ impl PdbgContext {
                 self.raw.as_ptr(),
                 fd.as_raw_fd(),
                 display_path.as_ptr(),
-                ptr::null(),
+                password
+                    .as_ref()
+                    .map_or(ptr::null(), |password| password.as_ptr()),
                 &options,
                 &mut doc,
                 &mut err,
             );
-            check_status(status, &err)?;
-            let raw = NonNull::new(doc).ok_or_else(|| ShimError {
-                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-                message: "pdbg_document_open_fd returned null".to_string(),
+            check_open_status(status, &err)?;
+            let raw = NonNull::new(doc).ok_or_else(|| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_GENERIC,
+                    "pdbg_document_open_fd returned null",
+                )
             })?;
             Ok(raw)
         }
@@ -404,9 +497,10 @@ impl PdbgDoc {
     fn open_path(
         ctx: Arc<PdbgContext>,
         path: &str,
+        password: Option<&str>,
         config: &SafeModeConfig,
     ) -> Result<Self, ShimError> {
-        let raw = ctx.open_raw_document_handle(path, config)?;
+        let raw = ctx.open_raw_document_handle(path, password, config)?;
         Ok(Self { raw, _ctx: ctx })
     }
 
@@ -415,9 +509,10 @@ impl PdbgDoc {
         ctx: Arc<PdbgContext>,
         fd: BorrowedFd<'_>,
         display_path: &str,
+        password: Option<&str>,
         config: &SafeModeConfig,
     ) -> Result<Self, ShimError> {
-        let raw = ctx.open_raw_document_fd_handle(fd, display_path, config)?;
+        let raw = ctx.open_raw_document_fd_handle(fd, display_path, password, config)?;
         Ok(Self { raw, _ctx: ctx })
     }
 }
@@ -592,9 +687,11 @@ struct PdbgNodeList {
 
 impl PdbgNodeList {
     fn new(raw: *mut raw::pdbg_node_list) -> Result<Self, ShimError> {
-        let raw = NonNull::new(raw).ok_or_else(|| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "node list accessor returned null".to_string(),
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "node list accessor returned null",
+            )
         })?;
         Ok(Self { raw })
     }
@@ -622,9 +719,11 @@ struct PdbgBuffer {
 
 impl PdbgBuffer {
     fn new(raw: *mut raw::pdbg_buffer) -> Result<Self, ShimError> {
-        let raw = NonNull::new(raw).ok_or_else(|| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "buffer accessor returned null".to_string(),
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "buffer accessor returned null",
+            )
         })?;
         Ok(Self { raw })
     }
@@ -674,9 +773,11 @@ struct PdbgImage {
 
 impl PdbgImage {
     fn new(raw: *mut raw::pdbg_image) -> Result<Self, ShimError> {
-        let raw = NonNull::new(raw).ok_or_else(|| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "image accessor returned null".to_string(),
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "image accessor returned null",
+            )
         })?;
         Ok(Self { raw })
     }
@@ -691,9 +792,11 @@ impl PdbgImage {
         let stride = raw::pdbg_image_stride(self.raw.as_ptr());
         let byte_len = stride
             .checked_mul(height as usize)
-            .ok_or_else(|| ShimError {
-                status: raw::pdbg_status::PDBG_ERROR_LIMIT,
-                message: "render output byte size overflow".to_string(),
+            .ok_or_else(|| {
+                ShimError::new(
+                    raw::pdbg_status::PDBG_ERROR_LIMIT,
+                    "render output byte size overflow",
+                )
             })?;
         let pixels_rgba =
             wire::copy_bytes(raw::pdbg_image_rgba_pixels(self.raw.as_ptr()), byte_len);
@@ -735,9 +838,11 @@ struct PdbgTextPage {
 
 impl PdbgTextPage {
     fn new(raw: *mut raw::pdbg_text_page) -> Result<Self, ShimError> {
-        let raw = NonNull::new(raw).ok_or_else(|| ShimError {
-            status: raw::pdbg_status::PDBG_ERROR_GENERIC,
-            message: "text page accessor returned null".to_string(),
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "text page accessor returned null",
+            )
         })?;
         Ok(Self { raw })
     }
@@ -768,10 +873,29 @@ fn check_status(status: raw::pdbg_status, err: &raw::pdbg_error) -> Result<(), S
     if status == raw::pdbg_status::PDBG_OK {
         return Ok(());
     }
-    Err(ShimError {
-        status,
-        message: c_char_array_to_string(&err.message),
-    })
+    Err(ShimError::new(status, c_char_array_to_string(&err.message)))
+}
+
+fn check_open_status(status: raw::pdbg_status, err: &raw::pdbg_error) -> Result<(), ShimError> {
+    if status == raw::pdbg_status::PDBG_OK {
+        return Ok(());
+    }
+
+    let message = c_char_array_to_string(&err.message);
+    let diagnostics = if status == raw::pdbg_status::PDBG_ERROR_PASSWORD {
+        vec![DiagnosticSummary {
+            severity: DiagnosticSeverity::Error,
+            code: DiagnosticCode::EncryptionPasswordFailure,
+            message: message.clone(),
+            node: None,
+            page_index: None,
+            object: None,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    Err(ShimError::with_diagnostics(status, message, diagnostics))
 }
 
 fn c_char_array_to_string(bytes: &[std::os::raw::c_char]) -> String {
@@ -784,6 +908,22 @@ unsafe fn convert_document_summary(
     out: &raw::pdbg_document_summary_out,
     registry: &NodeTokenRegistry,
 ) -> DocumentSummary {
+    let mut diagnostics = wire::diagnostic_list(out.diagnostics, &|node| registry.resolve_node(node));
+    if out.javascript_disabled != 0
+        && !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::JavaScriptDisabled)
+    {
+        diagnostics.push(DiagnosticSummary {
+            severity: DiagnosticSeverity::Info,
+            code: DiagnosticCode::JavaScriptDisabled,
+            message: "JavaScript execution is disabled".to_string(),
+            node: None,
+            page_index: None,
+            object: None,
+        });
+    }
+
     DocumentSummary {
         doc: DocumentId(out.document_id),
         file_path: wire::copy_c_string(out.file_path),
@@ -813,7 +953,7 @@ unsafe fn convert_document_summary(
             external_references_detected: out.external_references_detected != 0,
             ocr_enabled: out.ocr_enabled != 0,
         },
-        diagnostics: wire::diagnostic_list(out.diagnostics, &|node| registry.resolve_node(node)),
+        diagnostics,
     }
 }
 
@@ -982,9 +1122,11 @@ fn raw_render_options(request: &RenderRequest) -> raw::pdbg_render_options {
 }
 
 fn page_index_to_u32(page_index: usize) -> Result<u32, ShimError> {
-    page_index.try_into().map_err(|_| ShimError {
-        status: raw::pdbg_status::PDBG_ERROR_LIMIT,
-        message: "page index exceeds C ABI range".to_string(),
+    page_index.try_into().map_err(|_| {
+        ShimError::new(
+            raw::pdbg_status::PDBG_ERROR_LIMIT,
+            "page index exceeds C ABI range",
+        )
     })
 }
 
@@ -1016,6 +1158,10 @@ mod tests {
             summary.diagnostics[0].code.as_public_str(),
             "repair_warning"
         );
+        assert!(summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::JavaScriptDisabled
+                && diagnostic.severity == DiagnosticSeverity::Info
+        }));
     }
 
     #[cfg(feature = "fake")]
@@ -1282,6 +1428,18 @@ mod tests {
             "mutool failed to create encrypted fixture"
         );
         output
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn repairable_minimal_pdf_bytes() -> Vec<u8> {
+        let mut bytes = include_bytes!("../../../fixtures/synthetic/minimal.pdf").to_vec();
+        let needle = b"startxref\n184\n";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        bytes.splice(pos..pos + needle.len(), b"startxref\n0\n".iter().copied());
+        bytes
     }
 
     #[cfg(feature = "real-mupdf")]
@@ -1564,16 +1722,31 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
-    fn real_mupdf_shim_reports_repair_warning_on_summary() {
-        let mut bytes = include_bytes!("../../../fixtures/synthetic/minimal.pdf").to_vec();
-        let needle = b"startxref\n184\n";
-        let pos = bytes
-            .windows(needle.len())
-            .position(|window| window == needle)
-            .unwrap();
-        bytes.splice(pos..pos + needle.len(), b"startxref\n0\n".iter().copied());
+    fn real_mupdf_shim_reports_wrong_password_diagnostic_on_open_error() {
+        let path = encrypted_minimal_pdf_path();
+        let shim = RealMuPdfShim::new().unwrap();
+        let err = match shim.open_document_with_password_and_config(
+            path.to_string_lossy().as_ref(),
+            "wrong-password",
+            &SafeModeConfig::default(),
+        ) {
+            Ok(_) => panic!("expected wrong-password open to fail"),
+            Err(err) => err,
+        };
 
-        let path = write_temp_real_pdf("repairable", &bytes);
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_PASSWORD);
+        assert!(err.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::EncryptionPasswordFailure
+                && diagnostic.severity == DiagnosticSeverity::Error
+        }));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_repair_warning_on_summary() {
+        let path = write_temp_real_pdf("repairable", &repairable_minimal_pdf_bytes());
         let shim = RealMuPdfShim::new().unwrap();
         let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
         let summary = doc.summary().unwrap();
@@ -1586,6 +1759,26 @@ mod tests {
         }));
 
         drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_rejects_repaired_pdf_when_repair_policy_is_never() {
+        let path = write_temp_real_pdf("repair-policy-never", &repairable_minimal_pdf_bytes());
+        let shim = RealMuPdfShim::new().unwrap();
+        let config = SafeModeConfig {
+            repair_policy: crate::RepairPolicy::Never,
+            ..SafeModeConfig::default()
+        };
+        let err = match shim.open_document_with_config(path.to_string_lossy().as_ref(), &config) {
+            Ok(_) => panic!("expected repair-policy rejection"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_FORMAT);
+        assert!(err.message.contains("repair policy"));
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -1619,6 +1812,28 @@ mod tests {
         assert_eq!(stream.decoded_size_hint, None);
         assert!(stream.can_decode);
         assert!(!stream.image_preview_available);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_stream_decode_failure_diagnostic() {
+        let path = write_temp_real_pdf("stream-decode-failure", &synthetic_stream_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let chunk = doc
+            .stream_load(ObjectId { num: 4, gen: 0 }, StreamMode::Decoded, 0, 64)
+            .unwrap();
+
+        assert!(chunk.truncated);
+        assert!(chunk.decode_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::StreamDecodeFailure
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.object == Some(ObjectId { num: 4, gen: 0 })
+        }));
 
         drop(doc);
         let _ = std::fs::remove_file(path);

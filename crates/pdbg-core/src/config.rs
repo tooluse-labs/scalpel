@@ -79,4 +79,17 @@ mod tests {
             raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT
         );
     }
+
+    #[test]
+    fn repair_policy_never_maps_to_raw_open_option() {
+        let config = SafeModeConfig {
+            repair_policy: RepairPolicy::Never,
+            ..SafeModeConfig::default()
+        };
+
+        assert_eq!(
+            config.to_raw_open_options().repair_policy,
+            raw::pdbg_repair_policy::PDBG_REPAIR_NEVER
+        );
+    }
 }
