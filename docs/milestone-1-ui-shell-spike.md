@@ -8,6 +8,7 @@ integration remains Milestone 1.
 
 ## Implemented
 
+- UI design reference: `docs/ui/pdbg-ui-design-v1.svg`.
 - `pdbg-app` has an optional `gui` feature. Default builds remain headless and
   keep M0 CI free of native GUI requirements.
 - `cargo run -p pdbg-app --features gui -- --gui` launches a real `eframe`
