@@ -65,6 +65,28 @@ PDBG_MUPDF_LIB_DIR=/path/to/mupdf/build/release
 third-party libraries may be added locally while M1.1/M1.2 settles the final
 static link line.
 
+The full M1 real gate is:
+
+```sh
+PDBG_MUPDF_SOURCE_DIR=/path/to/mupdf-1.27.2-source \
+sh scripts/run_m1_real_gate.sh
+```
+
+This gate also requires `mutool` for runtime generation of the encrypted-PDF
+fixture. By default it expects:
+
+```text
+$PDBG_MUPDF_SOURCE_DIR/build/release/mutool
+```
+
+Build it from the pinned MuPDF source tree with:
+
+```sh
+make build=release build/release/mutool
+```
+
+or set `PDBG_MUTOOL_PATH=/path/to/mutool`.
+
 ## Rationale
 
 This keeps the M0 green floor intact while making the real integration path
