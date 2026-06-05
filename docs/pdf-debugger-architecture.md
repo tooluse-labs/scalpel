@@ -1625,6 +1625,15 @@ Bottom panel
   Logs / task status / warnings
 ```
 
+Product-shape Section 3 describes each mode using its own panel emphasis. The
+architecture should reconcile those mode descriptions with this fixed debugger
+workbench before Milestone 1 feature panels are built. Prefer a stable chrome
+model: the top-bar segmented control switches modes, while the left/center/right
+panels swap content and toolbars for Inspect, Render, Resources, Content,
+Diagnose, and AI/MCP. Re-layout should be reserved for cases where fixed chrome
+cannot support the workflow; mode selection itself should not live in a `View`
+menu or inside right-panel inspector tabs.
+
 ### 10.2 UI State
 
 The UI state stores:

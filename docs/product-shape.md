@@ -216,6 +216,11 @@ Recommended top navigation:
 Inspect | Render | Resources | Content | Diagnose | AI/MCP
 ```
 
+Top-level modes should be exposed as a persistent top-bar segmented control,
+not hidden under a `View` menu and not mixed into inspector tabs. This keeps the
+mode switch visible while preserving the hierarchy: modes change the workbench
+context; right-panel tabs change the selected mode's local inspector view.
+
 MVP can ship with:
 
 ```text
