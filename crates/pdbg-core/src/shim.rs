@@ -1367,6 +1367,57 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_large_ascii_hex_stream_pdf(decoded_len: usize) -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut hex = String::with_capacity(decoded_len * 2 + 1);
+        for _ in 0..decoded_len {
+            hex.push_str("41");
+        }
+        hex.push('>');
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            &format!(
+                "4 0 obj\n<< /Length {} /Filter /ASCIIHexDecode >>\nstream\n{}\nendstream\nendobj\n",
+                hex.len(),
+                hex
+            ),
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_shim_opens_minimal_pdf_and_traverses_inspect_roots() {
         let fixture = concat!(
@@ -1588,6 +1639,51 @@ mod tests {
             .stream_load(ObjectId { num: 4, gen: 0 }, StreamMode::Decoded, 0, 64)
             .unwrap();
         assert_eq!(decoded.bytes, b"Hello");
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_cross_thread_cancel_stops_large_decoded_stream() {
+        const DECODED_LEN: usize = 8 * 1024 * 1024;
+        let path = write_temp_real_pdf(
+            "stream-mid-cancel",
+            &synthetic_large_ascii_hex_stream_pdf(DECODED_LEN),
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let config = SafeModeConfig {
+            max_decoded_stream_bytes: (DECODED_LEN as u64) + 1024,
+            ..SafeModeConfig::default()
+        };
+        let mut doc = shim
+            .open_document_with_config(path.to_string_lossy().as_ref(), &config)
+            .unwrap();
+
+        let cancel = std::sync::Arc::new(CancelToken::new().unwrap());
+        let canceller = {
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                cancel.cancel();
+            })
+        };
+
+        let err = doc
+            .stream_load_with_cancel_token(
+                ObjectId { num: 4, gen: 0 },
+                StreamMode::Decoded,
+                0,
+                0,
+                &cancel,
+            )
+            .unwrap_err();
+        canceller.join().unwrap();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.page_count, 1);
 
         drop(doc);
         let _ = std::fs::remove_file(path);
