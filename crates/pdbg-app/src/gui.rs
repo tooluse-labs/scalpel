@@ -4,8 +4,8 @@ use eframe::egui::{
 };
 use pdbg_core::{
     escape_pdf_text, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
-    NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary, ObjectValue, ShimDocument,
-    StreamChunk, StreamMode, StreamSummary, StreamViewMode,
+    NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary, ObjectValue, RenderRequest,
+    RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary, StreamViewMode,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -246,6 +246,9 @@ pub struct GuiShellApp {
     selected_tab: InspectorTab,
     real_detail: Option<ObjectDetail>,
     real_detail_error: Option<String>,
+    real_render: Option<RenderResult>,
+    real_render_error: Option<String>,
+    real_render_texture: Option<egui::TextureHandle>,
     copied_excerpt: Option<EscapedText>,
     status_log: Vec<String>,
 }
@@ -265,7 +268,16 @@ impl GuiShellApp {
         let state = open_app_state(options.pdf_path.as_deref());
         let tree = TreeModel::from_state(&state, options.pdf_path.is_some());
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
-        let status_log = initial_status_log(&state, &tree, options.pdf_path.as_deref());
+        let (real_render, real_render_error) = load_initial_real_render(&state, &tree);
+        let mut status_log = initial_status_log(&state, &tree, options.pdf_path.as_deref());
+        if let Some(render) = &real_render {
+            status_log.push(format!(
+                "rendered page preview {}x{}",
+                render.width, render.height
+            ));
+        } else if let Some(err) = &real_render_error {
+            status_log.push(format!("page preview render failed: {err}"));
+        }
         let smoke_exit_after = options.smoke_exit_after;
         Self {
             state,
@@ -286,6 +298,9 @@ impl GuiShellApp {
             selected_tab: InspectorTab::Object,
             real_detail,
             real_detail_error,
+            real_render,
+            real_render_error,
+            real_render_texture: None,
             copied_excerpt: None,
             status_log,
         }
@@ -521,6 +536,34 @@ fn load_initial_real_detail(
             Err(err) => (None, Some(err)),
         },
         Err(err) => (None, Some(err.clone())),
+    }
+}
+
+fn load_initial_real_render(
+    state: &Result<AppState, String>,
+    tree: &TreeModel,
+) -> (Option<RenderResult>, Option<String>) {
+    if !tree.is_real() {
+        return (None, None);
+    }
+    let Ok(state) = state else {
+        return (None, None);
+    };
+    let Some(summary) = &state.panels.summary else {
+        return (None, None);
+    };
+    if summary.page_count == 0 {
+        return (None, None);
+    }
+
+    let mut request = RenderRequest::page(0);
+    request.zoom = 2.0;
+    match state
+        .session
+        .run_task(|document| document.render_page(&request))
+    {
+        Ok(render) => (Some(render), None),
+        Err(err) => (None, Some(err.message)),
     }
 }
 
@@ -760,6 +803,29 @@ fn optional_u64(value: Option<u64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn render_result_color_image(render: &RenderResult) -> Option<egui::ColorImage> {
+    let width = render.width as usize;
+    let height = render.height as usize;
+    if width == 0 || height == 0 || render.stride < width.checked_mul(4)? {
+        return None;
+    }
+    let required = render.stride.checked_mul(height)?;
+    if render.pixels_rgba.len() < required {
+        return None;
+    }
+
+    let row_len = width * 4;
+    let mut compact = Vec::with_capacity(row_len * height);
+    for row in 0..height {
+        let start = row * render.stride;
+        compact.extend_from_slice(&render.pixels_rgba[start..start + row_len]);
+    }
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width, height],
+        &compact,
+    ))
+}
+
 fn stream_mode_label(mode: StreamMode) -> &'static str {
     match mode {
         StreamMode::Raw => "raw",
@@ -977,7 +1043,15 @@ impl GuiShellApp {
     }
 
     fn draw_page_preview(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Page Preview", Some("fake renderer surface"));
+        let preview_detail = if self.real_render.is_some() || self.real_render_error.is_some() {
+            "real MuPDF render"
+        } else {
+            "fake renderer surface"
+        };
+        section_header(ui, "Page Preview", Some(preview_detail));
+        if self.draw_real_page_preview(ui) {
+            return;
+        }
 
         let available = ui.available_size();
         let desired = egui::vec2(available.x.max(320.0), available.y.max(360.0));
@@ -1038,6 +1112,57 @@ impl GuiShellApp {
             egui::FontId::monospace(13.0),
             PdbgTheme::TEXT,
         );
+    }
+
+    fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
+        if let Some(err) = &self.real_render_error {
+            ui.colored_label(PdbgTheme::ERROR_FG, err);
+            return true;
+        }
+        let Some(render) = &self.real_render else {
+            return false;
+        };
+        if self.real_render_texture.is_none() {
+            let Some(image) = render_result_color_image(render) else {
+                ui.colored_label(PdbgTheme::ERROR_FG, "render output has invalid RGBA layout");
+                return true;
+            };
+            self.real_render_texture = Some(ui.ctx().load_texture(
+                "real-page-preview",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        let Some(texture) = &self.real_render_texture else {
+            return false;
+        };
+
+        let available = ui.available_size();
+        let texture_size = texture.size_vec2();
+        let scale = (available.x / texture_size.x)
+            .min(available.y / texture_size.y)
+            .max(0.1);
+        let display_size = texture_size * scale;
+        ui.vertical_centered(|ui| {
+            ui.add(
+                egui::Image::new((texture.id(), display_size))
+                    .bg_fill(PdbgTheme::PAGE)
+                    .corner_radius(3),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "page {} / {}x{} / stride {}",
+                    render.page_index + 1,
+                    render.width,
+                    render.height,
+                    render.stride
+                ))
+                .monospace()
+                .color(PdbgTheme::MUTED),
+            );
+        });
+        true
     }
 
     fn draw_inspector(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -2078,6 +2203,24 @@ mod tests {
     }
 
     #[test]
+    fn render_result_color_image_compacts_padded_stride() {
+        let render = RenderResult {
+            page_index: 0,
+            width: 1,
+            height: 2,
+            stride: 8,
+            pixels_rgba: vec![1, 2, 3, 4, 99, 99, 99, 99, 5, 6, 7, 8, 88, 88, 88, 88],
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        };
+
+        let image = render_result_color_image(&render).unwrap();
+        assert_eq!(image.size, [1, 2]);
+        assert_eq!(image.pixels[0], Color32::from_rgba_unmultiplied(1, 2, 3, 4));
+        assert_eq!(image.pixels[1], Color32::from_rgba_unmultiplied(5, 6, 7, 8));
+    }
+
+    #[test]
     fn selected_hex_text_is_copy_authority() {
         let mut model = LargeStreamModel {
             selection_offset: 1024,
@@ -2177,8 +2320,13 @@ mod tests {
         assert_eq!(app.tree.row_count(), 4);
         assert_eq!(app.tree.row_count_label(), "4 loaded / 4 total");
         assert!(app.real_detail.is_some());
+        assert!(app.real_render.is_some());
         assert!(app.breadcrumb_label().contains("Trailer"));
         assert!(app.status_log[0].contains("real MuPDF opened"));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("rendered page preview")));
     }
 
     #[cfg(feature = "real-mupdf")]
@@ -2297,6 +2445,18 @@ mod tests {
             pdf_path: None,
         });
         assert_eq!(app.smoke_exit_after, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn fake_shell_keeps_mock_page_preview() {
+        let app = GuiShellApp::new();
+        assert!(!app.tree.is_real());
+        assert!(app.real_render.is_none());
+        assert!(app.real_render_error.is_none());
+        assert!(!app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("rendered page preview")));
     }
 
     #[test]
