@@ -1,6 +1,6 @@
 # Milestone 1.0 UI Shell Spike
 
-Status: in progress.
+Status: in progress. Launch smoke passed; manual interaction go/no-go pending.
 
 This spike validates the UI shell before the MuPDF-backed feature milestones
 build real panels on top of it. The shell stays on `FakeShim`; real MuPDF
@@ -37,6 +37,14 @@ cargo run -p pdbg-app --features gui -- --gui
 
 The second command should fail fast with a message explaining that the GUI is
 behind the optional `gui` feature.
+
+Current automated/local smoke result:
+
+- `cargo check -p pdbg-app --features gui` passes.
+- `cargo test -p pdbg-app --features gui` passes.
+- `cargo run -p pdbg-app --features gui -- --gui` compiles, opens the native
+  window, and remained running for a 5-second launch smoke with no stderr
+  errors.
 
 ## Remaining Go/No-Go Work
 
