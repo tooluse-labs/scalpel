@@ -17,12 +17,15 @@ struct pdbg_context {
     fz_context *ctx;
     fz_locks_context lock_ctx;
     pthread_mutex_t locks[FZ_LOCK_MAX];
+    pthread_mutex_t open_mutex;
     int locks_initialized;
+    int open_mutex_initialized;
 };
 
 struct pdbg_doc {
     uint64_t document_id;
     pdbg_context *owner;
+    fz_context *ctx;
     fz_document *fz_doc;
     pdf_document *pdf_doc;
     FILE *owned_file;
@@ -177,6 +180,32 @@ static void destroy_locks(pdbg_context *ctx)
     for (int i = 0; i < ctx->locks_initialized; i++)
         pthread_mutex_destroy(&ctx->locks[i]);
     ctx->locks_initialized = 0;
+    if (ctx->open_mutex_initialized) {
+        pthread_mutex_destroy(&ctx->open_mutex);
+        ctx->open_mutex_initialized = 0;
+    }
+}
+
+static int clone_doc_context(pdbg_context *owner, pdbg_doc *doc, pdbg_error *err)
+{
+    pthread_mutex_lock(&owner->open_mutex);
+    doc->ctx = fz_clone_context(owner->ctx);
+    pthread_mutex_unlock(&owner->open_mutex);
+    if (!doc->ctx) {
+        set_error(err, PDBG_ERROR_OOM, "failed to clone MuPDF context");
+        return 0;
+    }
+    fz_set_error_callback(doc->ctx, ignore_mupdf_message, NULL);
+    fz_set_warning_callback(doc->ctx, ignore_mupdf_message, NULL);
+    return 1;
+}
+
+static void drop_doc_context(pdbg_doc *doc)
+{
+    if (!doc || !doc->ctx)
+        return;
+    fz_drop_context(doc->ctx);
+    doc->ctx = NULL;
 }
 
 static pdbg_diagnostic_list *make_diag_list(pdbg_diagnostic_code code, const char *message)
@@ -780,6 +809,13 @@ pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
         return PDBG_ERROR_OOM;
     }
 
+    if (pthread_mutex_init(&ctx->open_mutex, NULL) != 0) {
+        free(ctx);
+        set_error(err, PDBG_ERROR_GENERIC, "failed to initialize MuPDF open lock");
+        return PDBG_ERROR_GENERIC;
+    }
+    ctx->open_mutex_initialized = 1;
+
     for (int i = 0; i < FZ_LOCK_MAX; i++) {
         if (pthread_mutex_init(&ctx->locks[i], NULL) != 0) {
             destroy_locks(ctx);
@@ -886,17 +922,23 @@ pdbg_status pdbg_document_open(
     }
 
     doc->owner = ctx;
+    if (!clone_doc_context(ctx, doc, err)) {
+        free(doc);
+        return PDBG_ERROR_OOM;
+    }
     doc->document_id = (uint64_t)atomic_fetch_add_explicit(&next_document_id, 1, memory_order_relaxed);
     doc->next_path_token = 1;
     doc->file_path = copy_string(path);
     doc->safe_mode = options ? options->safe_mode : 1;
     doc->javascript_disabled = options ? options->disable_javascript : 1;
     if (!doc->file_path) {
+        drop_doc_context(doc);
         free(doc);
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
 
+    fz_context *doc_ctx = doc->ctx;
     fz_document *opened = NULL;
     pdf_document *pdf = NULL;
     pdbg_status status = PDBG_OK;
@@ -904,23 +946,23 @@ pdbg_status pdbg_document_open(
     fz_var(pdf);
     fz_var(status);
 
-    fz_try(ctx->ctx)
+    fz_try(doc_ctx)
     {
-        opened = fz_open_document(ctx->ctx, path);
-        pdf = pdf_specifics(ctx->ctx, opened);
+        opened = fz_open_document(doc_ctx, path);
+        pdf = pdf_specifics(doc_ctx, opened);
         if (!pdf) {
             status = PDBG_ERROR_UNSUPPORTED;
             set_error(err, status, "opened document is not a PDF");
         } else {
             if (doc->safe_mode || doc->javascript_disabled)
-                pdf_disable_js(ctx->ctx, pdf);
+                pdf_disable_js(doc_ctx, pdf);
 
-            doc->encrypted = document_is_encrypted(ctx->ctx, opened);
-            doc->needs_password = fz_needs_password(ctx->ctx, opened);
+            doc->encrypted = document_is_encrypted(doc_ctx, opened);
+            doc->needs_password = fz_needs_password(doc_ctx, opened);
             doc->authenticated = doc->needs_password ? 0 : 1;
 
             if (doc->needs_password && password && password[0] != '\0') {
-                if (fz_authenticate_password(ctx->ctx, opened, password)) {
+                if (fz_authenticate_password(doc_ctx, opened, password)) {
                     doc->needs_password = 0;
                     doc->authenticated = 1;
                 } else {
@@ -930,18 +972,19 @@ pdbg_status pdbg_document_open(
             }
 
             if (status == PDBG_OK && doc->authenticated)
-                doc->repaired_or_damaged = pdf_was_repaired(ctx->ctx, pdf);
+                doc->repaired_or_damaged = pdf_was_repaired(doc_ctx, pdf);
         }
     }
-    fz_catch(ctx->ctx)
+    fz_catch(doc_ctx)
     {
-        status = set_mupdf_error(ctx->ctx, err);
+        status = set_mupdf_error(doc_ctx, err);
     }
 
     if (status != PDBG_OK) {
         if (opened)
-            fz_drop_document(ctx->ctx, opened);
+            fz_drop_document(doc_ctx, opened);
         free(doc->file_path);
+        drop_doc_context(doc);
         free(doc);
         return status;
     }
@@ -991,6 +1034,11 @@ pdbg_status pdbg_document_open_fd(
 
     const char *path = display_path && display_path[0] != '\0' ? display_path : "<fd>";
     doc->owner = ctx;
+    if (!clone_doc_context(ctx, doc, err)) {
+        fclose(file);
+        free(doc);
+        return PDBG_ERROR_OOM;
+    }
     doc->owned_file = file;
     doc->document_id = (uint64_t)atomic_fetch_add_explicit(&next_document_id, 1, memory_order_relaxed);
     doc->next_path_token = 1;
@@ -998,12 +1046,14 @@ pdbg_status pdbg_document_open_fd(
     doc->safe_mode = options ? options->safe_mode : 1;
     doc->javascript_disabled = options ? options->disable_javascript : 1;
     if (!doc->file_path) {
+        drop_doc_context(doc);
         fclose(file);
         free(doc);
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
 
+    fz_context *doc_ctx = doc->ctx;
     fz_stream *stream = NULL;
     fz_document *opened = NULL;
     pdf_document *pdf = NULL;
@@ -1013,24 +1063,24 @@ pdbg_status pdbg_document_open_fd(
     fz_var(pdf);
     fz_var(status);
 
-    fz_try(ctx->ctx)
+    fz_try(doc_ctx)
     {
-        stream = fz_open_file_ptr_no_close(ctx->ctx, file);
-        opened = fz_open_document_with_stream(ctx->ctx, "application/pdf", stream);
-        pdf = pdf_specifics(ctx->ctx, opened);
+        stream = fz_open_file_ptr_no_close(doc_ctx, file);
+        opened = fz_open_document_with_stream(doc_ctx, "application/pdf", stream);
+        pdf = pdf_specifics(doc_ctx, opened);
         if (!pdf) {
             status = PDBG_ERROR_UNSUPPORTED;
             set_error(err, status, "opened fd is not a PDF");
         } else {
             if (doc->safe_mode || doc->javascript_disabled)
-                pdf_disable_js(ctx->ctx, pdf);
+                pdf_disable_js(doc_ctx, pdf);
 
-            doc->encrypted = document_is_encrypted(ctx->ctx, opened);
-            doc->needs_password = fz_needs_password(ctx->ctx, opened);
+            doc->encrypted = document_is_encrypted(doc_ctx, opened);
+            doc->needs_password = fz_needs_password(doc_ctx, opened);
             doc->authenticated = doc->needs_password ? 0 : 1;
 
             if (doc->needs_password && password && password[0] != '\0') {
-                if (fz_authenticate_password(ctx->ctx, opened, password)) {
+                if (fz_authenticate_password(doc_ctx, opened, password)) {
                     doc->needs_password = 0;
                     doc->authenticated = 1;
                 } else {
@@ -1040,23 +1090,24 @@ pdbg_status pdbg_document_open_fd(
             }
 
             if (status == PDBG_OK && doc->authenticated)
-                doc->repaired_or_damaged = pdf_was_repaired(ctx->ctx, pdf);
+                doc->repaired_or_damaged = pdf_was_repaired(doc_ctx, pdf);
         }
     }
-    fz_always(ctx->ctx)
+    fz_always(doc_ctx)
     {
         if (stream)
-            fz_drop_stream(ctx->ctx, stream);
+            fz_drop_stream(doc_ctx, stream);
     }
-    fz_catch(ctx->ctx)
+    fz_catch(doc_ctx)
     {
-        status = set_mupdf_error(ctx->ctx, err);
+        status = set_mupdf_error(doc_ctx, err);
     }
 
     if (status != PDBG_OK) {
         if (opened)
-            fz_drop_document(ctx->ctx, opened);
+            fz_drop_document(doc_ctx, opened);
         free(doc->file_path);
+        drop_doc_context(doc);
         fclose(file);
         free(doc);
         return status;
@@ -1073,13 +1124,14 @@ void pdbg_document_drop(pdbg_doc *doc)
 {
     if (!doc)
         return;
-    if (doc->owner && doc->owner->ctx)
-        registry_drop(doc->owner->ctx, doc);
-    if (doc->owner && doc->owner->ctx && doc->fz_doc)
-        fz_drop_document(doc->owner->ctx, doc->fz_doc);
+    if (doc->ctx)
+        registry_drop(doc->ctx, doc);
+    if (doc->ctx && doc->fz_doc)
+        fz_drop_document(doc->ctx, doc->fz_doc);
     if (doc->owned_file)
         fclose(doc->owned_file);
     free(doc->file_path);
+    drop_doc_context(doc);
     free(doc);
 }
 
@@ -1108,7 +1160,7 @@ pdbg_status pdbg_document_summary(pdbg_doc *doc, pdbg_document_summary_out *out,
         return PDBG_OK;
     }
 
-    fz_context *ctx = doc->owner->ctx;
+    fz_context *ctx = doc->ctx;
     pdbg_status status = PDBG_OK;
     fz_var(status);
 
@@ -1177,7 +1229,7 @@ pdbg_status pdbg_node_children(
         return PDBG_ERROR_PASSWORD;
     }
 
-    fz_context *ctx = doc->owner->ctx;
+    fz_context *ctx = doc->ctx;
     pdbg_status status = PDBG_OK;
     pdbg_node_list *list = NULL;
     int drop_after = 0;
@@ -1245,7 +1297,7 @@ pdbg_status pdbg_object_detail(
     memset(out, 0, sizeof(*out));
     out->id = *node;
 
-    fz_context *ctx = doc->owner->ctx;
+    fz_context *ctx = doc->ctx;
     pdbg_status status = PDBG_OK;
     int drop_after = 0;
     pdf_obj *obj = NULL;

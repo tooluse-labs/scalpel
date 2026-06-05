@@ -6,6 +6,7 @@ use std::ffi::{CStr, CString};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub struct ShimError {
@@ -49,7 +50,7 @@ pub trait ShimDocument {
 }
 
 pub struct FakeShim {
-    ctx: PdbgContext,
+    ctx: Arc<PdbgContext>,
     shared_store: FakeSharedStore,
 }
 
@@ -58,7 +59,7 @@ impl FakeShim {
         let shared_store = FakeSharedStore::new();
         shared_store.record_root_lock_context();
         Ok(Self {
-            ctx: PdbgContext::new()?,
+            ctx: Arc::new(PdbgContext::new()?),
             shared_store,
         })
     }
@@ -76,7 +77,7 @@ impl FakeShim {
         path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = self.ctx.open_raw_document_with_config(path, config)?;
+        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -91,7 +92,7 @@ impl FakeShim {
         display_path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = self.ctx.open_raw_document_fd(fd, display_path, config)?;
+        let doc = PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -104,7 +105,7 @@ impl Shim for FakeShim {
     type Document = OpenDocument;
 
     fn open_document(&self, path: &str) -> Result<Self::Document, ShimError> {
-        let doc = self.ctx.open_raw_document(path)?;
+        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, &SafeModeConfig::default())?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
             doc,
@@ -115,14 +116,14 @@ impl Shim for FakeShim {
 
 #[cfg(feature = "real-mupdf")]
 pub struct RealMuPdfShim {
-    ctx: PdbgContext,
+    ctx: Arc<PdbgContext>,
 }
 
 #[cfg(feature = "real-mupdf")]
 impl RealMuPdfShim {
     pub fn new() -> Result<Self, ShimError> {
         Ok(Self {
-            ctx: PdbgContext::new()?,
+            ctx: Arc::new(PdbgContext::new()?),
         })
     }
 
@@ -132,7 +133,7 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: self.ctx.open_raw_document_with_config(path, config)?,
+            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, config)?,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -145,7 +146,7 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: self.ctx.open_raw_document_fd(fd, display_path, config)?,
+            doc: PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, config)?,
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -225,7 +226,15 @@ impl OpenDocument {
 
 struct PdbgContext {
     raw: NonNull<raw::pdbg_context>,
+    open_lock: Mutex<()>,
 }
+
+// Safety: the C `pdbg_context` installs MuPDF lock callbacks before any cloned
+// document context is created. The Rust root context is shared to keep that
+// lock table alive; root-context open/clone entry points are serialized by
+// `open_lock`, while document operations use per-document C handles.
+unsafe impl Send for PdbgContext {}
+unsafe impl Sync for PdbgContext {}
 
 impl PdbgContext {
     fn new() -> Result<Self, ShimError> {
@@ -238,24 +247,24 @@ impl PdbgContext {
                 status: raw::pdbg_status::PDBG_ERROR_GENERIC,
                 message: "pdbg_context_new returned null".to_string(),
             })?;
-            Ok(Self { raw })
+            Ok(Self {
+                raw,
+                open_lock: Mutex::new(()),
+            })
         }
     }
 
-    fn open_raw_document(&self, path: &str) -> Result<PdbgDoc, ShimError> {
-        self.open_raw_document_with_config(path, &SafeModeConfig::default())
-    }
-
-    fn open_raw_document_with_config(
+    fn open_raw_document_handle(
         &self,
         path: &str,
         config: &SafeModeConfig,
-    ) -> Result<PdbgDoc, ShimError> {
+    ) -> Result<NonNull<raw::pdbg_doc>, ShimError> {
         let path = CString::new(path).map_err(|_| ShimError {
             status: raw::pdbg_status::PDBG_ERROR_GENERIC,
             message: "path contains interior NUL".to_string(),
         })?;
         let options = config.to_raw_open_options();
+        let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
         unsafe {
             let mut doc = ptr::null_mut();
@@ -273,22 +282,23 @@ impl PdbgContext {
                 status: raw::pdbg_status::PDBG_ERROR_GENERIC,
                 message: "pdbg_document_open returned null".to_string(),
             })?;
-            Ok(PdbgDoc { raw })
+            Ok(raw)
         }
     }
 
     #[cfg(unix)]
-    fn open_raw_document_fd(
+    fn open_raw_document_fd_handle(
         &self,
         fd: BorrowedFd<'_>,
         display_path: &str,
         config: &SafeModeConfig,
-    ) -> Result<PdbgDoc, ShimError> {
+    ) -> Result<NonNull<raw::pdbg_doc>, ShimError> {
         let display_path = CString::new(display_path).map_err(|_| ShimError {
             status: raw::pdbg_status::PDBG_ERROR_GENERIC,
             message: "display path contains interior NUL".to_string(),
         })?;
         let options = config.to_raw_open_options();
+        let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
         unsafe {
             let mut doc = ptr::null_mut();
@@ -307,7 +317,7 @@ impl PdbgContext {
                 status: raw::pdbg_status::PDBG_ERROR_GENERIC,
                 message: "pdbg_document_open_fd returned null".to_string(),
             })?;
-            Ok(PdbgDoc { raw })
+            Ok(raw)
         }
     }
 }
@@ -320,6 +330,29 @@ impl Drop for PdbgContext {
 
 struct PdbgDoc {
     raw: NonNull<raw::pdbg_doc>,
+    _ctx: Arc<PdbgContext>,
+}
+
+impl PdbgDoc {
+    fn open_path(
+        ctx: Arc<PdbgContext>,
+        path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<Self, ShimError> {
+        let raw = ctx.open_raw_document_handle(path, config)?;
+        Ok(Self { raw, _ctx: ctx })
+    }
+
+    #[cfg(unix)]
+    fn open_fd(
+        ctx: Arc<PdbgContext>,
+        fd: BorrowedFd<'_>,
+        display_path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<Self, ShimError> {
+        let raw = ctx.open_raw_document_fd_handle(fd, display_path, config)?;
+        Ok(Self { raw, _ctx: ctx })
+    }
 }
 
 // Safety: `PdbgDoc` may be moved to a worker thread, but it is not `Sync`.
@@ -1158,6 +1191,52 @@ mod tests {
 
         drop(doc);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_traverses_cloned_contexts_concurrently() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut docs = Vec::new();
+        for _ in 0..8 {
+            docs.push(shim.open_document(fixture).unwrap());
+        }
+
+        let barrier = Arc::new(std::sync::Barrier::new(docs.len()));
+        let workers = docs
+            .into_iter()
+            .map(|mut doc| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let summary = doc.summary().unwrap();
+                    assert_eq!(summary.page_count, 1);
+
+                    let root = NodeId::DocumentRoot {
+                        doc: summary.doc.clone(),
+                    };
+                    let range = ChildRange {
+                        offset: 0,
+                        limit: 16,
+                    };
+                    let children = doc
+                        .children(&root, range, ChildContainer::Dictionary)
+                        .unwrap();
+                    assert_eq!(children.total, Some(4));
+
+                    let trailer = doc.object_detail(&children.items[0].id, range).unwrap();
+                    assert_eq!(trailer.kind, ObjectKind::Trailer);
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     #[cfg(all(feature = "real-mupdf", unix))]
