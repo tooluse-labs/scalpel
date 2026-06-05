@@ -29,6 +29,35 @@ integration remains Milestone 1.
 - Freeform docking/reordering is explicitly outside the M1.0 gate; it can be
   evaluated later if the fixed four-panel shell is not enough.
 
+## Design Reference Scope
+
+`docs/ui/pdbg-ui-design-v1.svg` is a composite visual target for a themed pdbg
+workbench. It proves the dense debugger UI can look intentional in egui, but it
+is not a full Milestone 1.0 requirement set and should not be read as complete
+product IA.
+
+The M1.0 shell may implement this subset:
+
+- fixed four-panel workbench: document tree, page preview, inspector, and log;
+- Object / Stream / Diagnostics inspector tabs over fake data;
+- dictionary rows with indirect-reference jump affordances;
+- bounded stream / hex preview with escaped copy;
+- safe-mode and MuPDF-only state indicators.
+
+The SVG intentionally mixes later roadmap concepts into the same view. These
+items remain outside the M1.0 gate:
+
+- operator-to-page highlights, text-span boxes, layer overlays, and selected
+  content-operator visualization; these are post-MVP rendering diagnostics;
+- full Inspect / Render / Resources / Diagnose / AI-MCP mode IA; the SVG shows
+  one dense workbench composition, not the complete mode switcher;
+- Resources and MCP / AI panels;
+- a full WinHex-style stream editor/viewer with byte-grid navigation and
+  selection semantics;
+- a dark-theme variant. The current implemented theme is light-first; if the
+  product direction becomes dark-first, add a paired dark visual reference
+  before judging final fit.
+
 ## Local Checks
 
 Run these when validating the spike locally:
