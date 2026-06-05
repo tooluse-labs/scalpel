@@ -1,10 +1,8 @@
 # Milestone 2 Streams And Pages Plan
 
-Status: in progress on 2026-06-05. The stream byte slice, real page list,
-first-page render preview, and page preview controls are implemented for the
-macOS developer path behind the existing opt-in `real-mupdf` feature;
-cancellation token plumbing is implemented, while task-level mid-operation
-cancellation remains.
+Status: required exit gate complete on 2026-06-05 for the macOS developer path
+behind the existing opt-in `real-mupdf` feature. Optional stream-view polish can
+continue without blocking Milestone 2.
 
 Milestone 2 turns the M1 inspect-only debugger into a byte-and-page inspector:
 raw/decoded stream chunks, stream presentation modes, page list/render preview,
@@ -47,28 +45,27 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
   cross-thread cancellation, stream/render calls can pass it through the shim,
   and fake plus real MuPDF tests cover `PDBG_ERROR_CANCELLED` with the document
   remaining usable afterward.
+- Task-level mid-operation cancellation is covered by a real MuPDF smoke that
+  cancels a large decoded stream from another thread and then reuses the same
+  document successfully.
 
-## Remaining M2 Work
+## Optional M2 Follow-Up
 
-- Task-level mid-operation cancellation smoke for at least one long stream or
-  render operation, using the cooperative token without poisoning MuPDF state.
 - Optional stream-view polish after real PDFs are exercised:
   syntax-highlighted "nice" content-stream view, richer binary/text affordances,
   and selected-byte copy beyond visible-chunk copy.
 
 ## Validation Record
 
-Latest local validation after the stream, page-list, first-page render,
-preview-control, and cancellation-token slices:
+Latest local validation after completing the required M2 exit gate:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
 sh scripts/run_m1_real_gate.sh
 ```
 
-That gate currently covers the implemented M2 stream, page-list, render,
-preview-control, and cancellation-token slices in addition to the M1
-open/inspect baseline:
+That gate covers the implemented M2 stream, page-list, render, preview-control,
+and cancellation slices in addition to the M1 open/inspect baseline:
 
 - real shim/core stream tests for raw and decoded chunks;
 - decoded stream limit enforcement during read;
@@ -81,6 +78,7 @@ open/inspect baseline:
   texture invalidation;
 - fake and real cancellation-token clean-error paths for stream/render plus
   post-cancellation document usability checks;
+- real mid-operation stream cancellation from a controller thread;
 - the full default M0 local gate, proving the MuPDF-free floor still holds.
 
 ## M2 Exit Gate
