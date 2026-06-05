@@ -1120,6 +1120,47 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_stream_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Length 6 /Filter /FlateDecode >>\nstream\nABCDEF\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_shim_opens_minimal_pdf_and_traverses_inspect_roots() {
         let fixture = concat!(
@@ -1188,6 +1229,41 @@ mod tests {
             diagnostic.code == DiagnosticCode::RepairWarning
                 && diagnostic.severity == DiagnosticSeverity::Warning
         }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_stream_summary_metadata() {
+        let path = write_temp_real_pdf("stream-summary", &synthetic_stream_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+        let xref = NodeId::XrefRoot {
+            doc: summary.doc.clone(),
+        };
+        let range = ChildRange {
+            offset: 3,
+            limit: 1,
+        };
+
+        let xref_entries = doc.children(&xref, range, ChildContainer::Array).unwrap();
+        assert_eq!(xref_entries.items.len(), 1);
+        assert_eq!(
+            xref_entries.items[0].object,
+            Some(ObjectId { num: 4, gen: 0 })
+        );
+
+        let detail = doc.object_detail(&xref_entries.items[0].id, range).unwrap();
+        let stream = detail.stream.unwrap();
+        assert_eq!(stream.object, ObjectId { num: 4, gen: 0 });
+        assert_eq!(stream.filters, vec!["FlateDecode"]);
+        assert_eq!(stream.raw_size_hint, Some(6));
+        assert_eq!(stream.decoded_size_hint, None);
+        assert!(stream.can_decode);
+        assert!(!stream.image_preview_available);
 
         drop(doc);
         let _ = std::fs::remove_file(path);

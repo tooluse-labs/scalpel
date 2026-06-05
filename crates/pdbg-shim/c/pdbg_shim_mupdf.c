@@ -247,6 +247,62 @@ static void free_stream_summary(pdbg_stream_summary *stream)
     memset(stream, 0, sizeof(*stream));
 }
 
+static pdbg_object_id object_id_from_ref(fz_context *ctx, pdf_obj *obj);
+
+static int add_stream_filter(pdbg_stream_summary *stream, const char *name)
+{
+    char **filters = (char **)realloc(stream->filters, (stream->filter_count + 1) * sizeof(char *));
+    if (!filters)
+        return 0;
+    stream->filters = filters;
+    stream->filters[stream->filter_count] = copy_string(name ? name : "");
+    if (!stream->filters[stream->filter_count])
+        return 0;
+    stream->filter_count += 1;
+    return 1;
+}
+
+static int fill_stream_filters(fz_context *ctx, pdbg_stream_summary *stream, pdf_obj *filter)
+{
+    if (!filter)
+        return 1;
+    if (pdf_is_name(ctx, filter))
+        return add_stream_filter(stream, pdf_to_name(ctx, filter));
+    if (pdf_is_array(ctx, filter)) {
+        int len = pdf_array_len(ctx, filter);
+        for (int i = 0; i < len; i++) {
+            pdf_obj *item = pdf_array_get(ctx, filter, i);
+            if (pdf_is_name(ctx, item) && !add_stream_filter(stream, pdf_to_name(ctx, item)))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdbg_node_id *node, pdf_obj *obj)
+{
+    memset(stream, 0, sizeof(*stream));
+    if (node->has_object)
+        stream->object = node->object;
+    else if (pdf_is_indirect(ctx, obj))
+        stream->object = object_id_from_ref(ctx, obj);
+
+    pdf_obj *length = pdf_dict_get(ctx, obj, PDF_NAME(Length));
+    if (length && pdf_is_number(ctx, length)) {
+        int64_t raw_size = pdf_to_int64(ctx, length);
+        if (raw_size >= 0) {
+            stream->raw_size_hint = (uint64_t)raw_size;
+            stream->has_raw_size_hint = 1;
+        }
+    }
+
+    if (!fill_stream_filters(ctx, stream, pdf_dict_get(ctx, obj, PDF_NAME(Filter))))
+        return 0;
+
+    stream->can_decode = 1;
+    return 1;
+}
+
 static void free_value(pdbg_object_value *value)
 {
     if (!value)
@@ -557,7 +613,8 @@ static int fill_entry_for_obj(
         entry->object = object_id_from_ref(ctx, raw_obj);
         entry->has_object = 1;
     }
-    entry->has_stream = pdf_is_stream(ctx, resolved);
+    entry->has_stream = pdf_is_stream(ctx, raw_obj) ||
+        (node.has_object && pdf_obj_num_is_stream(ctx, doc->pdf_doc, node.object.num));
     entry->child_count = object_child_count(ctx, resolved);
     entry->has_child_count = entry->child_count > 0;
     entry->has_children = entry->has_child_count || entry->has_stream;
@@ -1360,11 +1417,14 @@ pdbg_status pdbg_object_detail(
                     set_error(err, status, "out of memory");
                 }
             }
-            if (pdf_is_stream(ctx, obj)) {
+            int has_stream = pdf_is_stream(ctx, obj) ||
+                (node->has_object && pdf_obj_num_is_stream(ctx, doc->pdf_doc, node->object.num));
+            if (has_stream) {
                 out->has_stream = 1;
-                if (node->has_object)
-                    out->stream.object = node->object;
-                out->stream.can_decode = 1;
+                if (!fill_stream_summary(ctx, &out->stream, &out->id, obj)) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
             }
         } else {
             out->kind = PDBG_OBJECT_UNKNOWN;
