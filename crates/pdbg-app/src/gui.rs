@@ -3,12 +3,14 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    escape_pdf_text, ChildContainer, ChildPage, ChildRange, DiagnosticSeverity, EgressFormat,
-    EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary,
-    ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary,
-    StreamViewMode,
+    escape_pdf_text, CancelToken, ChildContainer, ChildPage, ChildRange, DiagnosticSeverity,
+    EgressFormat, EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind,
+    ObjectSummary, ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode,
+    StreamSummary, StreamViewMode,
 };
 use std::collections::BTreeMap;
+use std::sync::{mpsc, Arc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const VIRTUAL_TREE_ROWS: usize = 1_000_000;
@@ -21,6 +23,51 @@ const DEFAULT_RENDER_ZOOM: f32 = 2.0;
 pub struct GuiRunOptions {
     pub smoke_exit_after: Option<Duration>,
     pub pdf_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RealRenderKey {
+    page_index: usize,
+    zoom_bits: u32,
+    rotation_degrees: i32,
+}
+
+impl RealRenderKey {
+    fn new(page_index: usize, zoom: f32, rotation_degrees: i32) -> Self {
+        Self {
+            page_index,
+            zoom_bits: zoom.to_bits(),
+            rotation_degrees,
+        }
+    }
+
+    fn zoom(self) -> f32 {
+        f32::from_bits(self.zoom_bits)
+    }
+
+    fn request(self) -> RenderRequest {
+        let mut request = RenderRequest::page(self.page_index);
+        request.zoom = self.zoom();
+        request.rotation_degrees = self.rotation_degrees;
+        request
+    }
+}
+
+struct RealRenderJob {
+    key: RealRenderKey,
+    cancel: Arc<CancelToken>,
+    receiver: mpsc::Receiver<RealRenderJobOutput>,
+}
+
+impl Drop for RealRenderJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct RealRenderJobOutput {
+    key: RealRenderKey,
+    result: Result<RenderResult, String>,
 }
 
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
@@ -253,6 +300,8 @@ pub struct GuiShellApp {
     render_page_index: usize,
     render_zoom: f32,
     render_rotation_degrees: i32,
+    real_render_key: Option<RealRenderKey>,
+    real_render_job: Option<RealRenderJob>,
     real_render: Option<RenderResult>,
     real_render_error: Option<String>,
     real_render_texture: Option<egui::TextureHandle>,
@@ -279,13 +328,6 @@ impl GuiShellApp {
         let render_page_index = 0;
         let render_zoom = DEFAULT_RENDER_ZOOM;
         let render_rotation_degrees = 0;
-        let (real_render, real_render_error) = load_initial_real_render(
-            &state,
-            &tree,
-            render_page_index,
-            render_zoom,
-            render_rotation_degrees,
-        );
         let mut status_log = initial_status_log(&state, &tree, options.pdf_path.as_deref());
         if let Some(pages) = &real_pages {
             status_log.push(format!(
@@ -295,16 +337,8 @@ impl GuiShellApp {
         } else if let Some(err) = &real_pages_error {
             status_log.push(format!("page list load failed: {err}"));
         }
-        if let Some(render) = &real_render {
-            status_log.push(format!(
-                "rendered page preview {}x{}",
-                render.width, render.height
-            ));
-        } else if let Some(err) = &real_render_error {
-            status_log.push(format!("page preview render failed: {err}"));
-        }
         let smoke_exit_after = options.smoke_exit_after;
-        Self {
+        let mut app = Self {
             state,
             launched_at: Instant::now(),
             smoke_exit_after,
@@ -328,12 +362,16 @@ impl GuiShellApp {
             render_page_index,
             render_zoom,
             render_rotation_degrees,
-            real_render,
-            real_render_error,
+            real_render_key: None,
+            real_render_job: None,
+            real_render: None,
+            real_render_error: None,
             real_render_texture: None,
             copied_excerpt: None,
             status_log,
-        }
+        };
+        app.refresh_real_render();
+        app
     }
 
     fn selected_object_label(&self) -> String {
@@ -498,6 +536,17 @@ impl GuiShellApp {
             .unwrap_or(0)
     }
 
+    fn current_render_key(&self) -> Option<RealRenderKey> {
+        if !self.tree.is_real() || self.page_count() == 0 {
+            return None;
+        }
+        Some(RealRenderKey::new(
+            self.render_page_index,
+            self.render_zoom,
+            self.render_rotation_degrees,
+        ))
+    }
+
     fn set_render_page(&mut self, page_index: usize) {
         let page_count = self.page_count();
         if page_count == 0 {
@@ -512,33 +561,111 @@ impl GuiShellApp {
     }
 
     fn refresh_real_render(&mut self) {
-        if !self.tree.is_real() || self.page_count() == 0 {
+        let Some(key) = self.current_render_key() else {
+            return;
+        };
+        if self.real_render_key == Some(key)
+            && (self.real_render.is_some() || self.real_render_job.is_some())
+        {
             return;
         }
+        if let Some(job) = self.real_render_job.take() {
+            job.cancel.cancel();
+        }
         self.real_render_texture = None;
-        let (render, error) = load_initial_real_render(
-            &self.state,
-            &self.tree,
-            self.render_page_index,
-            self.render_zoom,
-            self.render_rotation_degrees,
-        );
-        self.real_render = render;
-        self.real_render_error = error;
-        if let Some(render) = &self.real_render {
-            self.status_log.push(format!(
-                "rendered page {} @ {:.0}% rot {} -> {}x{}",
-                render.page_index + 1,
-                self.render_zoom * 100.0,
-                self.render_rotation_degrees,
-                render.width,
-                render.height
-            ));
-        } else if let Some(err) = &self.real_render_error {
-            self.status_log.push(format!(
-                "page {} render failed: {err}",
-                self.render_page_index + 1
-            ));
+        self.real_render = None;
+        self.real_render_error = None;
+        self.real_render_key = Some(key);
+
+        let Ok(state) = self.state.as_ref() else {
+            self.real_render_error = Some("document is not open".to_string());
+            return;
+        };
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
+            Err(err) => {
+                self.real_render_error = Some(err.message);
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let session = state.session.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        thread::spawn(move || {
+            let request = key.request();
+            let result = session
+                .run_task(|document| {
+                    document.render_page_with_cancel_token(&request, worker_cancel.as_ref())
+                })
+                .map_err(|err| err.message);
+            let _ = sender.send(RealRenderJobOutput { key, result });
+        });
+        self.real_render_job = Some(RealRenderJob {
+            key,
+            cancel,
+            receiver,
+        });
+        self.status_log.push(format!(
+            "queued page {} @ {:.0}% rot {} render",
+            key.page_index + 1,
+            key.zoom() * 100.0,
+            key.rotation_degrees
+        ));
+    }
+
+    fn poll_real_render_job(&mut self) {
+        let Some(polled) =
+            self.real_render_job
+                .as_ref()
+                .and_then(|job| match job.receiver.try_recv() {
+                    Ok(output) => Some(Ok(output)),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
+                })
+        else {
+            return;
+        };
+
+        self.real_render_job = None;
+        match polled {
+            Ok(output) => {
+                if self.current_render_key() != Some(output.key) {
+                    self.status_log.push(format!(
+                        "discarded stale page {} render",
+                        output.key.page_index + 1
+                    ));
+                    return;
+                }
+                match output.result {
+                    Ok(render) => {
+                        self.real_render_texture = None;
+                        self.real_render_error = None;
+                        self.status_log.push(format!(
+                            "rendered page {} @ {:.0}% rot {} -> {}x{}",
+                            render.page_index + 1,
+                            output.key.zoom() * 100.0,
+                            output.key.rotation_degrees,
+                            render.width,
+                            render.height
+                        ));
+                        self.real_render = Some(render);
+                    }
+                    Err(err) => {
+                        self.real_render = None;
+                        self.real_render_error = Some(err.clone());
+                        self.status_log.push(format!(
+                            "page {} render failed: {err}",
+                            output.key.page_index + 1
+                        ));
+                    }
+                }
+            }
+            Err(key) => {
+                if self.current_render_key() == Some(key) {
+                    self.real_render = None;
+                    self.real_render_error = Some("render worker disconnected".to_string());
+                }
+            }
         }
     }
 
@@ -648,38 +775,6 @@ fn load_initial_real_pages(
             Err(err) => (None, Some(err.message)),
         },
         Err(err) => (None, Some(err.clone())),
-    }
-}
-
-fn load_initial_real_render(
-    state: &Result<AppState, String>,
-    tree: &TreeModel,
-    page_index: usize,
-    zoom: f32,
-    rotation_degrees: i32,
-) -> (Option<RenderResult>, Option<String>) {
-    if !tree.is_real() {
-        return (None, None);
-    }
-    let Ok(state) = state else {
-        return (None, None);
-    };
-    let Some(summary) = &state.panels.summary else {
-        return (None, None);
-    };
-    if summary.page_count == 0 {
-        return (None, None);
-    }
-
-    let mut request = RenderRequest::page(page_index);
-    request.zoom = zoom;
-    request.rotation_degrees = rotation_degrees;
-    match state
-        .session
-        .run_task(|document| document.render_page(&request))
-    {
-        Ok(render) => (Some(render), None),
-        Err(err) => (None, Some(err.message)),
     }
 }
 
@@ -1055,6 +1150,10 @@ fn segment_label(segment: &NodePathSegment) -> String {
 impl eframe::App for GuiShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_real_render_job();
+        if self.real_render_job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
 
         egui::Panel::top("top_bar")
             .frame(
@@ -1159,7 +1258,7 @@ impl GuiShellApp {
     }
 
     fn draw_page_preview(&mut self, ui: &mut egui::Ui) {
-        let preview_detail = if self.real_render.is_some() || self.real_render_error.is_some() {
+        let preview_detail = if self.tree.is_real() {
             "real MuPDF render"
         } else {
             "fake renderer surface"
@@ -1233,6 +1332,21 @@ impl GuiShellApp {
     fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
         self.draw_real_render_controls(ui);
         self.draw_real_page_list(ui);
+        if self.real_render_job.is_some() {
+            let available = ui.available_size();
+            let desired = egui::vec2(available.x.max(320.0), available.y.max(320.0));
+            let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, PdbgTheme::CANVAS);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Rendering page...",
+                egui::FontId::proportional(13.0),
+                PdbgTheme::MUTED,
+            );
+            return true;
+        }
         if let Some(err) = &self.real_render_error {
             ui.colored_label(PdbgTheme::ERROR_FG, err);
             return true;
@@ -2409,6 +2523,22 @@ fn fake_stream_byte(index: usize) -> u8 {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "real-mupdf")]
+    fn wait_for_real_render(app: &mut GuiShellApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.real_render_job.is_some() && Instant::now() < deadline {
+            app.poll_real_render_job();
+            if app.real_render_job.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        app.poll_real_render_job();
+        assert!(
+            app.real_render_job.is_none(),
+            "real render job did not finish before test timeout"
+        );
+    }
+
     #[test]
     fn virtual_tree_does_not_materialize_rows() {
         let tree = VirtualObjectTree::new(1_000_000);
@@ -2578,10 +2708,12 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/synthetic/minimal.pdf"
         );
-        let app = GuiShellApp::new_with_options(GuiRunOptions {
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(fixture.to_string()),
         });
+        assert!(app.real_render_job.is_some());
+        wait_for_real_render(&mut app);
 
         assert!(app.state.is_ok());
         assert!(matches!(app.tree, TreeModel::Real(_)));
@@ -2601,7 +2733,11 @@ mod tests {
         assert!(app
             .status_log
             .iter()
-            .any(|line| line.starts_with("rendered page preview")));
+            .any(|line| line.starts_with("queued page 1")));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("rendered page 1")));
     }
 
     #[cfg(feature = "real-mupdf")]
@@ -2613,6 +2749,7 @@ mod tests {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
         });
+        wait_for_real_render(&mut app);
         let open_elapsed = open_start.elapsed();
 
         let xref_size = app
@@ -2676,6 +2813,7 @@ mod tests {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
         });
+        wait_for_real_render(&mut app);
 
         app.follow_real_reference(ObjectId { num: 4, gen: 0 });
         assert!(app
@@ -2706,6 +2844,7 @@ mod tests {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
         });
+        wait_for_real_render(&mut app);
 
         assert_eq!(app.page_count(), 2);
         assert_eq!(app.real_pages.as_ref().unwrap().total, Some(2));
@@ -2716,11 +2855,13 @@ mod tests {
 
         app.render_zoom = 1.0;
         app.refresh_real_render();
+        wait_for_real_render(&mut app);
         let zoomed = app.real_render.as_ref().unwrap();
         assert_eq!(zoomed.page_index, 0);
         assert_eq!((zoomed.width, zoomed.height), (200, 100));
 
         app.set_render_page(1);
+        wait_for_real_render(&mut app);
         let second_page = app.real_render.as_ref().unwrap();
         assert_eq!(second_page.page_index, 1);
         assert_eq!((second_page.width, second_page.height), (100, 200));
@@ -2731,6 +2872,30 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("rendered page 2 @ 100%")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_render_job_replacement_keeps_latest_page() {
+        let path = write_temp_pdf("gui-render-replace", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        assert!(app.real_render_job.is_some());
+
+        app.set_render_page(1);
+        wait_for_real_render(&mut app);
+
+        let render = app.real_render.as_ref().unwrap();
+        assert_eq!(render.page_index, 1);
+        assert_eq!((render.width, render.height), (200, 400));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("queued page 2")));
 
         let _ = std::fs::remove_file(path);
     }

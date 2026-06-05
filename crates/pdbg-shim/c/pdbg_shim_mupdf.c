@@ -79,6 +79,7 @@ struct pdbg_text_page {
 
 struct pdbg_cancel_token {
     atomic_int cancelled;
+    fz_cookie cookie;
 };
 
 static atomic_uint_fast64_t next_document_id = 1;
@@ -269,6 +270,16 @@ static void free_image(pdbg_image *image)
     free(image->pixels);
     free_diag_list(image->diagnostics);
     free(image);
+}
+
+static fz_cookie *prepare_cancel_cookie(pdbg_cancel_token *cancel)
+{
+    if (!cancel)
+        return NULL;
+    memset(&cancel->cookie, 0, sizeof(cancel->cookie));
+    if (atomic_load(&cancel->cancelled))
+        cancel->cookie.abort = 1;
+    return &cancel->cookie;
 }
 
 static void free_stream_summary(pdbg_stream_summary *stream)
@@ -983,8 +994,10 @@ pdbg_status pdbg_cancel_token_new(pdbg_cancel_token **out, pdbg_error *err)
 
 void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
 {
-    if (token)
+    if (token) {
         atomic_store(&token->cancelled, 1);
+        token->cookie.abort = 1;
+    }
 }
 
 void pdbg_cancel_token_drop(pdbg_cancel_token *token)
@@ -1700,50 +1713,58 @@ pdbg_status pdbg_page_render(
                 pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 1);
                 fz_clear_pixmap_with_value(ctx, pixmap, 0xFF);
                 device = fz_new_draw_device(ctx, transform, pixmap);
-                fz_run_page(ctx, page, device, fz_identity, NULL);
+                fz_cookie *cookie = prepare_cancel_cookie(cancel);
+                fz_run_page(ctx, page, device, fz_identity, cookie);
                 fz_close_device(ctx, device);
 
-                int stride = fz_pixmap_stride(ctx, pixmap);
-                if (stride <= 0 ||
-                    (uint64_t)stride < (uint64_t)width * 4ULL ||
-                    (uint64_t)stride > UINT64_MAX / (uint64_t)height) {
-                    status = PDBG_ERROR_LIMIT;
-                    set_error(err, status, "render output byte size overflow");
-                } else {
-                    uint64_t byte_len = (uint64_t)stride * (uint64_t)height;
-                    if (byte_len > max_output_bytes || byte_len > SIZE_MAX) {
+                if ((cancel && atomic_load(&cancel->cancelled)) || (cookie && cookie->abort)) {
+                    status = PDBG_ERROR_CANCELLED;
+                    set_error(err, status, "cancelled");
+                }
+
+                if (status == PDBG_OK) {
+                    int stride = fz_pixmap_stride(ctx, pixmap);
+                    if (stride <= 0 ||
+                        (uint64_t)stride < (uint64_t)width * 4ULL ||
+                        (uint64_t)stride > UINT64_MAX / (uint64_t)height) {
                         status = PDBG_ERROR_LIMIT;
-                        set_error(err, status, "render output exceeds configured byte limit");
+                        set_error(err, status, "render output byte size overflow");
                     } else {
-                        image = (pdbg_image *)calloc(1, sizeof(pdbg_image));
-                        if (!image) {
-                            status = PDBG_ERROR_OOM;
-                            set_error(err, status, "out of memory");
+                        uint64_t byte_len = (uint64_t)stride * (uint64_t)height;
+                        if (byte_len > max_output_bytes || byte_len > SIZE_MAX) {
+                            status = PDBG_ERROR_LIMIT;
+                            set_error(err, status, "render output exceeds configured byte limit");
                         } else {
-                            image->pixels = (uint8_t *)malloc((size_t)byte_len);
-                            if (!image->pixels) {
+                            image = (pdbg_image *)calloc(1, sizeof(pdbg_image));
+                            if (!image) {
                                 status = PDBG_ERROR_OOM;
                                 set_error(err, status, "out of memory");
                             } else {
-                                image->width = (uint32_t)width;
-                                image->height = (uint32_t)height;
-                                image->stride = (size_t)stride;
-                                memcpy(image->pixels, fz_pixmap_samples(ctx, pixmap), (size_t)byte_len);
+                                image->pixels = (uint8_t *)malloc((size_t)byte_len);
+                                if (!image->pixels) {
+                                    status = PDBG_ERROR_OOM;
+                                    set_error(err, status, "out of memory");
+                                } else {
+                                    image->width = (uint32_t)width;
+                                    image->height = (uint32_t)height;
+                                    image->stride = (size_t)stride;
+                                    memcpy(image->pixels, fz_pixmap_samples(ctx, pixmap), (size_t)byte_len);
 
-                                if (color_mode == PDBG_COLOR_GRAYSCALE || color_mode == PDBG_COLOR_INVERTED) {
-                                    for (uint32_t y = 0; y < image->height; y++) {
-                                        uint8_t *row = image->pixels + (size_t)y * image->stride;
-                                        for (uint32_t x = 0; x < image->width; x++) {
-                                            uint8_t *px = row + (size_t)x * 4;
-                                            if (color_mode == PDBG_COLOR_GRAYSCALE) {
-                                                uint8_t gray = (uint8_t)((30U * px[0] + 59U * px[1] + 11U * px[2]) / 100U);
-                                                px[0] = gray;
-                                                px[1] = gray;
-                                                px[2] = gray;
-                                            } else {
-                                                px[0] = (uint8_t)(255U - px[0]);
-                                                px[1] = (uint8_t)(255U - px[1]);
-                                                px[2] = (uint8_t)(255U - px[2]);
+                                    if (color_mode == PDBG_COLOR_GRAYSCALE || color_mode == PDBG_COLOR_INVERTED) {
+                                        for (uint32_t y = 0; y < image->height; y++) {
+                                            uint8_t *row = image->pixels + (size_t)y * image->stride;
+                                            for (uint32_t x = 0; x < image->width; x++) {
+                                                uint8_t *px = row + (size_t)x * 4;
+                                                if (color_mode == PDBG_COLOR_GRAYSCALE) {
+                                                    uint8_t gray = (uint8_t)((30U * px[0] + 59U * px[1] + 11U * px[2]) / 100U);
+                                                    px[0] = gray;
+                                                    px[1] = gray;
+                                                    px[2] = gray;
+                                                } else {
+                                                    px[0] = (uint8_t)(255U - px[0]);
+                                                    px[1] = (uint8_t)(255U - px[1]);
+                                                    px[2] = (uint8_t)(255U - px[2]);
+                                                }
                                             }
                                         }
                                     }

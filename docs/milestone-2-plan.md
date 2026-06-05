@@ -41,6 +41,9 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
   displays it as a compact page strip above the preview.
 - Page Preview controls cover page navigation, zoom, rotation, and texture
   invalidation keyed by page/render-option changes.
+- GUI render refreshes now run as cancellable background session tasks. Render
+  results carry the page/zoom/rotation key and stale results are discarded
+  instead of overwriting the current preview.
 - Cooperative cancellation has a C/Rust token surface. The token is atomic for
   cross-thread cancellation, stream/render calls can pass it through the shim,
   and fake plus real MuPDF tests cover `PDBG_ERROR_CANCELLED` with the document
@@ -75,7 +78,7 @@ and cancellation slices in addition to the M1 open/inspect baseline:
 - real GUI first-page render loading and stride-aware texture upload tests;
 - real GUI page-list loading from the MuPDF page-root node;
 - real GUI page navigation, zoom refresh, page-index clamping, and render-option
-  texture invalidation;
+  texture invalidation through the background render job;
 - fake and real cancellation-token clean-error paths for stream/render plus
   post-cancellation document usability checks;
 - real mid-operation stream cancellation from a controller thread;
