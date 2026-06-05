@@ -1,6 +1,9 @@
 use crate::AppState;
-use eframe::egui::{self, Color32, RichText, ScrollArea, TextEdit};
-use pdbg_core::{escape_pdf_text, EgressFormat, EscapedText};
+use eframe::egui::{
+    self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
+};
+use pdbg_core::{escape_pdf_text, DiagnosticSeverity, EgressFormat, EscapedText};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const VIRTUAL_TREE_ROWS: usize = 1_000_000;
@@ -11,10 +14,6 @@ const COPY_LIMIT_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GuiRunOptions {
     pub smoke_exit_after: Option<Duration>,
-}
-
-pub fn run_gui() -> eframe::Result<()> {
-    run_gui_with_options(GuiRunOptions::default())
 }
 
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
@@ -28,8 +27,117 @@ pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
     eframe::run_native(
         "pdbg UI Shell Spike",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(GuiShellApp::new_with_options(options)))),
+        Box::new(move |cc| {
+            configure_egui(&cc.egui_ctx);
+            Ok(Box::new(GuiShellApp::new_with_options(options)))
+        }),
     )
+}
+
+fn configure_egui(ctx: &egui::Context) {
+    ctx.set_fonts(pdbg_fonts());
+    ctx.set_global_style(pdbg_style());
+}
+
+fn pdbg_fonts() -> FontDefinitions {
+    let mut fonts = FontDefinitions::default();
+    fonts.families.insert(
+        FontFamily::Name("pdbg-sans".into()),
+        vec![
+            "Ubuntu-Light".to_string(),
+            "NotoEmoji-Regular".to_string(),
+            "emoji-icon-font".to_string(),
+        ],
+    );
+    fonts.families.insert(
+        FontFamily::Name("pdbg-mono".into()),
+        vec![
+            "Hack".to_string(),
+            "Ubuntu-Light".to_string(),
+            "NotoEmoji-Regular".to_string(),
+        ],
+    );
+    fonts
+}
+
+fn pdbg_style() -> egui::Style {
+    let mut style = egui::Style::default();
+    let sans = FontFamily::Name("pdbg-sans".into());
+    let mono = FontFamily::Name("pdbg-mono".into());
+
+    style.text_styles = BTreeMap::from([
+        (TextStyle::Heading, FontId::new(16.0, sans.clone())),
+        (TextStyle::Body, FontId::new(12.5, sans.clone())),
+        (TextStyle::Button, FontId::new(12.0, sans.clone())),
+        (TextStyle::Small, FontId::new(11.0, sans)),
+        (TextStyle::Monospace, FontId::new(11.0, mono)),
+    ]);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(12.0, 5.0);
+    style.spacing.interact_size = egui::vec2(28.0, 24.0);
+    style.spacing.window_margin = egui::Margin::same(10);
+
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = PdbgTheme::PANEL;
+    visuals.window_fill = PdbgTheme::SURFACE;
+    visuals.faint_bg_color = PdbgTheme::CANVAS;
+    visuals.extreme_bg_color = PdbgTheme::CODE_BG;
+    visuals.text_edit_bg_color = Some(PdbgTheme::CODE_BG);
+    visuals.code_bg_color = PdbgTheme::CODE_BG;
+    visuals.hyperlink_color = PdbgTheme::ACCENT;
+    visuals.warn_fg_color = PdbgTheme::WARN_FG;
+    visuals.error_fg_color = PdbgTheme::ERROR_FG;
+    visuals.selection.bg_fill = PdbgTheme::SELECTED_BG;
+    visuals.selection.stroke = egui::Stroke::new(1.0, PdbgTheme::ACCENT);
+    visuals.widgets.noninteractive.fg_stroke.color = PdbgTheme::TEXT;
+    visuals.widgets.inactive.weak_bg_fill = PdbgTheme::CHIP_BG;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, PdbgTheme::BORDER);
+    visuals.widgets.hovered.weak_bg_fill = PdbgTheme::SELECTED_BG;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, PdbgTheme::ACCENT);
+    visuals.widgets.active.weak_bg_fill = PdbgTheme::SELECTED_BG;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, PdbgTheme::ACCENT);
+    visuals.widgets.open.weak_bg_fill = PdbgTheme::SELECTED_BG;
+    visuals.button_frame = true;
+    visuals.striped = true;
+    style.visuals = visuals;
+    style
+}
+
+struct PdbgTheme;
+
+impl PdbgTheme {
+    const SURFACE: Color32 = Color32::from_rgb(251, 252, 253);
+    const PANEL: Color32 = Color32::from_rgb(247, 249, 251);
+    const CANVAS: Color32 = Color32::from_rgb(233, 237, 242);
+    const PAGE: Color32 = Color32::from_rgb(255, 253, 248);
+    const CODE_BG: Color32 = Color32::from_rgb(245, 247, 250);
+    const CHIP_BG: Color32 = Color32::from_rgb(238, 243, 247);
+    const SELECTED_BG: Color32 = Color32::from_rgb(232, 245, 246);
+    const TEXT: Color32 = Color32::from_rgb(31, 41, 51);
+    const MUTED: Color32 = Color32::from_rgb(104, 116, 131);
+    const BORDER: Color32 = Color32::from_rgb(207, 215, 225);
+    const ACCENT: Color32 = Color32::from_rgb(8, 127, 140);
+    const OPERATOR: Color32 = Color32::from_rgb(215, 100, 53);
+    const WARN_BG: Color32 = Color32::from_rgb(255, 244, 223);
+    const WARN_FG: Color32 = Color32::from_rgb(184, 107, 0);
+    const ERROR_BG: Color32 = Color32::from_rgb(255, 240, 238);
+    const ERROR_FG: Color32 = Color32::from_rgb(180, 35, 24);
+
+    fn severity_fg(severity: &DiagnosticSeverity) -> Color32 {
+        match severity {
+            DiagnosticSeverity::Info => Self::ACCENT,
+            DiagnosticSeverity::Warning => Self::WARN_FG,
+            DiagnosticSeverity::Error => Self::ERROR_FG,
+        }
+    }
+
+    fn severity_bg(severity: &DiagnosticSeverity) -> Color32 {
+        match severity {
+            DiagnosticSeverity::Info => Self::SELECTED_BG,
+            DiagnosticSeverity::Warning => Self::WARN_BG,
+            DiagnosticSeverity::Error => Self::ERROR_BG,
+        }
+    }
 }
 
 pub struct GuiShellApp {
@@ -221,18 +329,18 @@ impl GuiShellApp {
         let desired = egui::vec2(available.x.max(320.0), available.y.max(360.0));
         let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(42, 45, 48));
+        painter.rect_filled(rect, 0.0, PdbgTheme::CANVAS);
 
         let margin = 28.0;
         let page_rect = egui::Rect::from_min_max(
             rect.min + egui::vec2(margin, margin),
             rect.max - egui::vec2(margin, margin),
         );
-        painter.rect_filled(page_rect, 2.0, Color32::from_rgb(246, 245, 240));
+        painter.rect_filled(page_rect, 2.0, PdbgTheme::PAGE);
         painter.rect_stroke(
             page_rect,
             2.0,
-            egui::Stroke::new(1.0, Color32::from_rgb(155, 155, 150)),
+            egui::Stroke::new(1.0, PdbgTheme::BORDER),
             egui::StrokeKind::Outside,
         );
 
@@ -244,7 +352,7 @@ impl GuiShellApp {
                     egui::pos2(content.left(), y),
                     egui::pos2(content.right() - (index % 3) as f32 * 54.0, y),
                 ],
-                egui::Stroke::new(3.0, Color32::from_rgb(80, 88, 95)),
+                egui::Stroke::new(3.0, PdbgTheme::MUTED),
             );
         }
 
@@ -255,7 +363,7 @@ impl GuiShellApp {
         painter.rect_stroke(
             highlight,
             1.0,
-            egui::Stroke::new(2.0, Color32::from_rgb(210, 96, 54)),
+            egui::Stroke::new(2.0, PdbgTheme::OPERATOR),
             egui::StrokeKind::Outside,
         );
         painter.text(
@@ -263,7 +371,7 @@ impl GuiShellApp {
             egui::Align2::LEFT_TOP,
             self.selected_object_label(),
             egui::FontId::monospace(13.0),
-            Color32::from_rgb(80, 44, 32),
+            PdbgTheme::TEXT,
         );
     }
 
@@ -332,14 +440,17 @@ impl GuiShellApp {
     fn draw_stream_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Offset");
-            ui.add(
+            let offset_response = ui.add(
                 egui::DragValue::new(&mut self.stream.offset)
                     .range(0..=STREAM_TOTAL_BYTES.saturating_sub(HEX_WINDOW_BYTES))
                     .speed(64),
             );
+            if offset_response.changed() {
+                self.stream.sync_hex_window();
+            }
         });
         ui.horizontal(|ui| {
-            ui.label("Selection");
+            ui.label("Fallback byte range");
             ui.add(
                 egui::DragValue::new(&mut self.stream.selection_offset)
                     .range(0..=STREAM_TOTAL_BYTES.saturating_sub(1))
@@ -351,20 +462,31 @@ impl GuiShellApp {
                     .speed(16),
             );
         });
+        ui.label(RichText::new("Hex view is read-only; drag-select text before copying.").small());
 
-        let mut hex = self.stream.hex_window();
-        ui.add(
-            TextEdit::multiline(&mut hex)
-                .font(egui::TextStyle::Monospace)
-                .desired_rows(18)
-                .code_editor(),
-        );
+        self.stream.sync_hex_window();
+        let output = TextEdit::multiline(&mut self.stream.hex_text)
+            .font(egui::TextStyle::Monospace)
+            .desired_rows(18)
+            .code_editor()
+            .show(ui);
+
+        if let Some(cursor_range) = output.cursor_range.filter(|range| !range.is_empty()) {
+            self.stream.selected_hex_text =
+                Some(cursor_range.slice_str(&self.stream.hex_text).to_string());
+        }
+        if output.response.changed() {
+            self.stream.reset_hex_window();
+            self.status_log
+                .push("ignored edit in read-only hex view".to_string());
+        }
 
         if ui.button("Copy escaped excerpt").clicked() {
-            let escaped = self.stream.escaped_selection();
+            let source = self.stream.copy_source_label();
+            let escaped = self.stream.escaped_copy_text();
             ctx.copy_text(escaped.text.clone());
             self.status_log.push(format!(
-                "copied bounded excerpt{}",
+                "copied bounded {source} excerpt{}",
                 if escaped.truncated {
                     " (truncated)"
                 } else {
@@ -400,15 +522,27 @@ impl GuiShellApp {
                 .map(|summary| summary.diagnostics.as_slice())
                 .unwrap_or(&[]);
             if diagnostics.is_empty() {
-                ui.label("No fake diagnostics");
+                ui.label(RichText::new("No fake diagnostics").color(PdbgTheme::MUTED));
             } else {
                 for diagnostic in diagnostics {
-                    ui.monospace(format!(
-                        "{} {} {}",
-                        diagnostic.severity.as_public_str(),
-                        diagnostic.code.as_public_str(),
-                        diagnostic.message
-                    ));
+                    let color = PdbgTheme::severity_fg(&diagnostic.severity);
+                    egui::Frame::new()
+                        .fill(PdbgTheme::severity_bg(&diagnostic.severity))
+                        .stroke(egui::Stroke::new(1.0, color))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                color,
+                                RichText::new(format!(
+                                    "{} {} {}",
+                                    diagnostic.severity.as_public_str(),
+                                    diagnostic.code.as_public_str(),
+                                    diagnostic.message
+                                ))
+                                .monospace(),
+                            );
+                        });
                 }
             }
         }
@@ -476,15 +610,23 @@ pub(crate) struct LargeStreamModel {
     offset: usize,
     selection_offset: usize,
     selection_len: usize,
+    hex_text: String,
+    hex_text_offset: usize,
+    selected_hex_text: Option<String>,
 }
 
 impl Default for LargeStreamModel {
     fn default() -> Self {
-        Self {
+        let mut model = Self {
             offset: 0,
             selection_offset: 0,
             selection_len: 256,
-        }
+            hex_text: String::new(),
+            hex_text_offset: usize::MAX,
+            selected_hex_text: None,
+        };
+        model.sync_hex_window();
+        model
     }
 }
 
@@ -493,7 +635,42 @@ impl LargeStreamModel {
         self.hex_dump(self.offset, HEX_WINDOW_BYTES)
     }
 
-    pub(crate) fn escaped_selection(&self) -> EscapedText {
+    pub(crate) fn sync_hex_window(&mut self) {
+        if self.hex_text_offset != self.offset {
+            self.reset_hex_window();
+            self.selected_hex_text = None;
+        }
+    }
+
+    pub(crate) fn reset_hex_window(&mut self) {
+        self.hex_text = self.hex_window();
+        self.hex_text_offset = self.offset;
+    }
+
+    pub(crate) fn escaped_copy_text(&self) -> EscapedText {
+        if let Some(selected) = self
+            .selected_hex_text
+            .as_ref()
+            .filter(|selected| !selected.is_empty())
+        {
+            return escape_pdf_text(selected, EgressFormat::Markdown, COPY_LIMIT_BYTES);
+        }
+        self.escaped_range_selection()
+    }
+
+    pub(crate) fn copy_source_label(&self) -> &'static str {
+        if self
+            .selected_hex_text
+            .as_ref()
+            .is_some_and(|selected| !selected.is_empty())
+        {
+            "selected hex text"
+        } else {
+            "byte range"
+        }
+    }
+
+    pub(crate) fn escaped_range_selection(&self) -> EscapedText {
         let text = self.hex_dump(
             self.selection_offset,
             self.selection_len.min(COPY_LIMIT_BYTES),
@@ -551,13 +728,15 @@ mod tests {
     }
 
     #[test]
-    fn stream_excerpt_is_bounded_and_escaped() {
-        let model = LargeStreamModel {
+    fn stream_range_excerpt_is_bounded_and_escaped() {
+        let mut model = LargeStreamModel {
             offset: 0,
             selection_offset: 0,
             selection_len: 16 * 1024,
+            ..LargeStreamModel::default()
         };
-        let escaped = model.escaped_selection();
+        model.sync_hex_window();
+        let escaped = model.escaped_range_selection();
         assert!(escaped.truncated);
         assert!(escaped.text.len() < COPY_LIMIT_BYTES * 2);
         assert!(escaped.text.contains("00000000"));
@@ -569,6 +748,29 @@ mod tests {
         let window = model.hex_window();
         assert!(window.starts_with("00000000  11 30 4f 6e"));
         assert!(window.lines().count() > 1);
+    }
+
+    #[test]
+    fn selected_hex_text_is_copy_authority() {
+        let mut model = LargeStreamModel {
+            selection_offset: 1024,
+            selection_len: 16 * 1024,
+            ..LargeStreamModel::default()
+        };
+        model.selected_hex_text = Some("00000000  11 30 4f 6e".to_string());
+        let escaped = model.escaped_copy_text();
+        assert!(!escaped.truncated);
+        assert_eq!(escaped.text, "00000000  11 30 4f 6e");
+        assert_eq!(model.copy_source_label(), "selected hex text");
+    }
+
+    #[test]
+    fn read_only_hex_window_resets_to_canonical_dump() {
+        let mut model = LargeStreamModel::default();
+        let canonical = model.hex_text.clone();
+        model.hex_text.push_str("mutated");
+        model.reset_hex_window();
+        assert_eq!(model.hex_text, canonical);
     }
 
     #[test]
@@ -592,5 +794,27 @@ mod tests {
             smoke_exit_after: Some(Duration::from_millis(250)),
         });
         assert_eq!(app.smoke_exit_after, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn theme_defines_named_font_stacks_and_severity_colors() {
+        let fonts = pdbg_fonts();
+        assert!(fonts
+            .families
+            .contains_key(&FontFamily::Name("pdbg-sans".into())));
+        assert!(fonts
+            .families
+            .contains_key(&FontFamily::Name("pdbg-mono".into())));
+
+        let style = pdbg_style();
+        assert_eq!(style.visuals.panel_fill, PdbgTheme::PANEL);
+        assert_eq!(
+            PdbgTheme::severity_fg(&DiagnosticSeverity::Warning),
+            PdbgTheme::WARN_FG
+        );
+        assert_eq!(
+            PdbgTheme::severity_fg(&DiagnosticSeverity::Error),
+            PdbgTheme::ERROR_FG
+        );
     }
 }

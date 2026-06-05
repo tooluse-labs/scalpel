@@ -1895,9 +1895,12 @@ Implementation status is tracked in `docs/milestone-1-ui-shell-spike.md`.
   - indirect-reference cross-jump: clicking a reference value (e.g. `3 0 R`) in
     the inspector resolves it, then selects and expands the target node in the
     tree, with working back/forward navigation history (per Section 10.2);
-  - resizable split panes / docking and HiDPI-correct rendering.
+  - resizable fixed four-panel split panes and HiDPI-correct rendering.
 - A recorded go/no-go: egui carries these interactions, or an alternative
   (retained-mode toolkit, or Tauri/web) is chosen now.
+- Freeform docking/reordering is not a Milestone 1.0 gate. If users need
+  movable panes after the fixed debugger shell proves out, evaluate it as a
+  separate post-spike feature instead of mixing it into this toolkit decision.
 
 Exit gate: the four-panel window launches, the three risk interactions are
 demonstrably smooth on the fake corpus, and the egui-vs-alternative decision is
