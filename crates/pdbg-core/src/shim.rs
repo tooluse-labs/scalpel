@@ -1120,6 +1120,53 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn mutool_path() -> std::path::PathBuf {
+        if let Some(path) = std::env::var_os("PDBG_MUTOOL_PATH") {
+            return std::path::PathBuf::from(path);
+        }
+        let source_dir = std::env::var_os("PDBG_MUPDF_SOURCE_DIR")
+            .expect("real encrypted test requires PDBG_MUPDF_SOURCE_DIR or PDBG_MUTOOL_PATH");
+        let path = std::path::PathBuf::from(source_dir)
+            .join("build")
+            .join("release")
+            .join("mutool");
+        assert!(
+            path.is_file(),
+            "real encrypted test requires mutool at {}; build it with `make build=release build/release/mutool` or set PDBG_MUTOOL_PATH",
+            path.display()
+        );
+        path
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn encrypted_minimal_pdf_path() -> std::path::PathBuf {
+        let input = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let output = std::env::temp_dir().join(format!(
+            "pdbg-core-encrypted-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let status = std::process::Command::new(mutool_path())
+            .args([
+                "clean", "-E", "aes-128", "-O", "owner", "-U", "user", "-P", "0", input,
+            ])
+            .arg(&output)
+            .status()
+            .expect("failed to run mutool");
+        assert!(
+            status.success(),
+            "mutool failed to create encrypted fixture"
+        );
+        output
+    }
+
+    #[cfg(feature = "real-mupdf")]
     fn synthetic_stream_pdf() -> Vec<u8> {
         fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
             offsets.push(pdf.len());
@@ -1205,6 +1252,48 @@ mod tests {
             .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 16)
             .unwrap_err();
         assert_eq!(unsupported.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_encrypted_summary_before_authentication() {
+        let path = encrypted_minimal_pdf_path();
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+        assert!(summary.encrypted);
+        assert!(summary.needs_password);
+        assert_eq!(summary.page_count, 0);
+        assert_eq!(summary.xref_size, 0);
+
+        let root = NodeId::DocumentRoot {
+            doc: summary.doc.clone(),
+        };
+        let children_err = doc
+            .children(
+                &root,
+                ChildRange {
+                    offset: 0,
+                    limit: 16,
+                },
+                ChildContainer::Dictionary,
+            )
+            .unwrap_err();
+        assert_eq!(children_err.status, raw::pdbg_status::PDBG_ERROR_PASSWORD);
+
+        let detail_err = doc
+            .object_detail(
+                &root,
+                ChildRange {
+                    offset: 0,
+                    limit: 16,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(detail_err.status, raw::pdbg_status::PDBG_ERROR_PASSWORD);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "real-mupdf")]
