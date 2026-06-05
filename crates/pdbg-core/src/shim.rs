@@ -963,6 +963,7 @@ mod tests {
 
         let shim = FakeShim::new().unwrap();
         let owned_fd;
+        let owned_fd_identity;
         {
             let mut doc = shim
                 .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
@@ -971,9 +972,10 @@ mod tests {
             assert!(owned_fd >= 0);
             assert_ne!(owned_fd, file.as_raw_fd());
             assert_eq!(unsafe { raw::pdbg_test_fd_is_open(owned_fd) }, 1);
+            owned_fd_identity = fd_file_identity(owned_fd).expect("owned fd identity before drop");
             assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
         }
-        assert_eq!(unsafe { raw::pdbg_test_fd_is_open(owned_fd) }, 0);
+        assert_ne!(fd_file_identity(owned_fd), Some(owned_fd_identity));
 
         file.write_all(b"\ncaller fd still open").unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
@@ -1045,5 +1047,19 @@ mod tests {
         file.write_all(b"%PDF fake").unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         (path, file)
+    }
+
+    #[cfg(unix)]
+    fn fd_file_identity(fd: i32) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+
+        let candidates = [
+            std::path::PathBuf::from(format!("/proc/self/fd/{fd}")),
+            std::path::PathBuf::from(format!("/dev/fd/{fd}")),
+        ];
+        candidates
+            .iter()
+            .find_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| (metadata.dev(), metadata.ino()))
     }
 }
