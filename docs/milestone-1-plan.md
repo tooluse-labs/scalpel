@@ -34,6 +34,9 @@ build:
 - MuPDF upgrade owner and cadence for security releases.
 - Binding policy: keep checked-in raw ABI declarations or introduce generated
   bindings over `pdbg_shim.h` only.
+- If generated bindings are introduced, update the ABI drift guard at the same
+  time. The current script validates the checked-in raw ABI declarations against
+  `pdbg_shim.h`; it must not become a stale false-green check.
 
 Recommended first implementation path: a pinned vendored MuPDF release for
 reproducible development builds, `real-mupdf` off by default, with the default
@@ -61,15 +64,25 @@ Implement only the calls needed for Open And Inspect:
 
 - context create/drop with `fz_locks_context`;
 - document open from path and fd/stream entry points already defined by the ABI;
-- password failure / encrypted-document status mapping;
+- real open must honor `pdbg_open_options.safe_mode` and
+  `disable_javascript`: JavaScript stays disabled for GUI and MCP paths, and
+  OpenAction / additional actions must not auto-run during document open;
+- password failure / encrypted-document status mapping. When MuPDF can report
+  encryption state before authentication, expose `encrypted=true` and
+  `needs_password=true` in the summary, keep tree/object traversal gated until a
+  password is supplied, and map true authentication failures distinctly;
 - document summary;
 - root/trailer/xref/page tree children;
 - object detail for dictionaries, arrays, scalars, indirect refs, and stream
-  summary metadata;
+  summary metadata. `StreamSummary.decoded_size_hint` may remain unknown in M1;
+  do not force stream decoding only to compute it;
 - diagnostic list plumbing for repair warnings and format errors.
 
 Do not implement full stream decode, page render, text extraction, search, or
 MCP transport in this milestone unless needed as a small smoke fixture.
+Any `pdbg_*` entry point that is not implemented by the real shim in M1 must
+return `PDBG_ERROR_UNSUPPORTED` with a filled `pdbg_error`, not crash, return
+garbage, or silently route to fake data.
 
 ### M1.3 Rust Adapter Swap
 
@@ -84,11 +97,23 @@ MCP transport in this milestone unless needed as a small smoke fixture.
 - Malformed-PDF loop: repeatedly open damaged PDFs on the same context and
   verify clean `PDBG_ERROR_FORMAT` or equivalent mapped errors without crashes
   or poisoned MuPDF exception state.
+- Repair-success fixture: open a damaged-but-repairable PDF, verify it succeeds,
+  emits a `repair_warning` diagnostic, sets `repaired_or_damaged=true`, and
+  populates `parsed_object_count` consistently with the repaired object graph
+  (possibly lower than `xref_size`).
+- Damaged fixtures must follow the M0 fixture policy: license-clean synthetic
+  or redistributable files only, no private customer PDFs, and a clear note for
+  every regression fixture explaining the bug class it exercises.
 - Locks/concurrency smoke: open and traverse multiple documents across worker
   threads with cloned MuPDF contexts and the shared lock table installed before
   any clone is created.
+- Run the locks/concurrency smoke under TSan where available; this is the first
+  milestone with real MuPDF shared state for `fz_locks_context` to protect.
 - Run the real shim under ASAN/UBSan where available; keep the fake-shim local
   gate as the required baseline until real MuPDF CI is stable.
+- Any real MuPDF callback that can cross into Rust, such as progress or cancel
+  callback plumbing, must route through the existing `catch_ffi_callback` panic
+  boundary before returning to C.
 
 ### M1.5 UI Real-Data Slice
 
@@ -100,17 +125,33 @@ MCP transport in this milestone unless needed as a small smoke fixture.
 - Drive the existing Object / Stream / Diagnostics inspector tabs from real
   object detail. Stream byte viewing remains Milestone 2; M1 may show stream
   summary metadata only.
+- Add a lightweight large-real-PDF responsiveness smoke using a license-clean
+  fixture or synthetic stress generator. The smoke must open through real MuPDF,
+  request only bounded lazy child pages/object details, exercise first
+  interaction, several node expansions, and at least one indirect-reference
+  jump, and verify the model/UI path does not materialize the whole object tree.
+  Record coarse timings against the Product Success Criteria budgets in
+  `docs/product-shape.md` Section 17; a repeatable
+  cross-platform performance harness remains a later milestone.
 
 ## Exit Gate
 
 M1 is complete when:
 
-- `real-mupdf` can open ordinary and encrypted PDFs through the shim.
+- `real-mupdf` can open ordinary and encrypted PDFs through the shim, including
+  the unauthenticated encrypted summary state when MuPDF exposes it.
 - The document summary, root/trailer/xref/page tree, and object detail panel are
   populated from real MuPDF data.
 - Indirect-reference navigation works against real objects through stable
   `NodeId`s.
-- The malformed-PDF loop and MuPDF locks/concurrency smoke pass.
+- The malformed-PDF loop, damaged-but-repairable fixture, and MuPDF
+  locks/concurrency smoke pass.
+- The large-real-PDF responsiveness smoke passes without whole-tree
+  materialization or visible UI freezes. If the platform cannot provide stable
+  timing in the M1 gate, the smoke must still record timings and fail on
+  unbounded traversal or materialization.
+- The locks/concurrency smoke has TSan coverage where supported by the platform
+  toolchain.
 - The default local gate still passes without linking MuPDF.
 - `NOTICES` and source-offer documentation cover the enabled MuPDF build path.
 
@@ -122,3 +163,4 @@ M1 is complete when:
 - Resource-specific inspectors.
 - MCP transport.
 - Operator visualization and render overlays.
+- Full cross-platform performance benchmarking.
