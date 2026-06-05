@@ -43,6 +43,9 @@ reproducible development builds, `real-mupdf` off by default, with the default
 fake-shim gate unchanged. If this changes, update ADR 0001 or add a new ADR
 before code lands.
 
+M1.1 source/link/platform/binding decisions are recorded in
+`docs/adr/0002-mupdf-m1-source-link-policy.md`.
+
 ## Implementation Phases
 
 ### M1.1 Build And Source Policy

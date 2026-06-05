@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-pdbg-shim = { path = "../pdbg-shim" }
+pdbg-shim = { path = "../pdbg-shim", default-features = false }
 
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["fake"]
+fake = ["pdbg-shim/fake"]
+real-mupdf = ["pdbg-shim/real-mupdf"]

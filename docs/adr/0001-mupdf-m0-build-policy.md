@@ -3,6 +3,9 @@
 Status: Accepted for Milestone 0
 Date: 2026-06-04
 
+Milestone 1 source and link decisions are recorded in
+`docs/adr/0002-mupdf-m1-source-link-policy.md`.
+
 ## Decision
 
 Milestone 0 does not vendor, link, download, or bindgen against MuPDF.

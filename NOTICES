@@ -13,12 +13,23 @@ License: AGPL-3.0-only
 
 ## MuPDF
 
-MuPDF is not bundled, linked, downloaded, or required by the Milestone 0 default
-build. The real MuPDF integration is deferred to Milestone 1.
+MuPDF is not bundled, linked, downloaded, or required by the default workspace
+build. The fake shim remains the default backend.
 
-When `real-mupdf` is enabled in a future build, this file must be regenerated to
-include the exact MuPDF version, source location, license choice, bundled
-notices, local patches, and corresponding-source instructions.
+The opt-in `real-mupdf` Milestone 1 developer path is pinned to MuPDF 1.27.2,
+announced in the official MuPDF release history on 2026-02-20. The selected
+source archive is:
+
+<https://casper.mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz>
+
+MuPDF is used under AGPL-3.0 for this project. No local MuPDF patches are
+currently recorded.
+
+For any distributed binary or network service that enables `real-mupdf`, the
+corresponding source must include this workspace, the C shim, build scripts, the
+exact MuPDF 1.27.2 source archive above, all bundled third-party notices from
+that source tree, and any local patches. The source-offer template is
+`docs/compliance/agpl-source-offer.md`.
 
 ## Rust Toolchain
 
