@@ -1,8 +1,9 @@
 # Milestone 2 Streams And Pages Plan
 
-Status: in progress on 2026-06-05. The stream byte slice, real page list, and
-first-page render preview are implemented for the macOS developer path behind
-the existing opt-in `real-mupdf` feature; cancellation is not implemented yet.
+Status: in progress on 2026-06-05. The stream byte slice, real page list,
+first-page render preview, and page preview controls are implemented for the
+macOS developer path behind the existing opt-in `real-mupdf` feature;
+cancellation is not implemented yet.
 
 Milestone 2 turns the M1 inspect-only debugger into a byte-and-page inspector:
 raw/decoded stream chunks, stream presentation modes, page list/render preview,
@@ -39,30 +40,29 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
 - The GUI Page Preview panel also loads the first bounded page-list page from
   the real MuPDF page-root node through the existing child traversal API and
   displays it as a compact page strip above the preview.
+- Page Preview controls cover page navigation, zoom, rotation, and texture
+  invalidation keyed by page/render-option changes.
 
 ## Remaining M2 Work
 
 - Cancellation plumbing for long stream/render operations, including a clean
   `PDBG_ERROR_CANCELLED` path and no poisoned MuPDF state after cancellation.
-- Page preview controls beyond the initial bounded first-page render:
-  page navigation, zoom/rotation controls, and texture invalidation keyed by
-  page/render options.
 - Optional stream-view polish after real PDFs are exercised:
   syntax-highlighted "nice" content-stream view, richer binary/text affordances,
   and selected-byte copy beyond visible-chunk copy.
 
 ## Validation Record
 
-Latest local validation after the stream, page-list, and first-page render
-slices:
+Latest local validation after the stream, page-list, first-page render, and
+preview-control slices:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
 sh scripts/run_m1_real_gate.sh
 ```
 
-That gate currently covers the implemented M2 stream, page-list, and render
-slices in addition to the M1 open/inspect baseline:
+That gate currently covers the implemented M2 stream, page-list, render, and
+preview-control slices in addition to the M1 open/inspect baseline:
 
 - real shim/core stream tests for raw and decoded chunks;
 - decoded stream limit enforcement during read;
@@ -71,6 +71,8 @@ slices in addition to the M1 open/inspect baseline:
   enforcement;
 - real GUI first-page render loading and stride-aware texture upload tests;
 - real GUI page-list loading from the MuPDF page-root node;
+- real GUI page navigation, zoom refresh, page-index clamping, and render-option
+  texture invalidation;
 - the full default M0 local gate, proving the MuPDF-free floor still holds.
 
 ## M2 Exit Gate
@@ -84,6 +86,8 @@ M2 is complete when:
 - page list is populated from real MuPDF data;
 - first-page render preview is populated from real MuPDF data and render output
   is copied out through owned Rust buffers before C handles are dropped;
+- page preview controls can change page, zoom, and rotation without showing
+  stale textures;
 - cancellation returns cleanly for at least one long stream or render operation;
 - the default local gate still passes without linking MuPDF.
 
