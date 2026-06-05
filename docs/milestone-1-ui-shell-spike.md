@@ -82,6 +82,24 @@ Current automated/local smoke result:
   compiles, opens the native window, remains running for a 5-second launch
   smoke, and exits without stderr errors.
 
+## Acceptance Criterion
+
+The M1.0 gate is a **feasibility** decision, not a polish decision. M1.0 is
+accepted if egui can **structurally** carry the dense debugger shell — the
+validated interactions below (virtualized 1,000,000-row tree, read-only
+selectable hex over a large stream, indirect-reference cross-jump with
+back/forward history, bounded escaped copy, resizable panels) plus a themed look
+that is clearly past the default egui skin. M1.0 is rejected only if egui cannot
+carry these structurally, or if the achievable themed look is unacceptable even
+when polished.
+
+Product-level polish (finer icons / toolbar / tabs / spacing), the deferred
+panels and features listed in *Design Reference Scope*, and a dark variant are
+normal Milestone 1+ work and **must not block M1.0 acceptance**. Do not keep the
+spike open polishing fake-shim data: remaining polish lands against real MuPDF
+data in later milestones, where the UI actually has to prove itself against real
+object graphs, damaged files, and large streams.
+
 ## Remaining Go/No-Go Work
 
 - Launch the GUI locally and record whether egui carries the dense debugger
