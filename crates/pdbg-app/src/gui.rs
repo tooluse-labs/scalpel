@@ -5,7 +5,7 @@ use eframe::egui::{
 use pdbg_core::{
     escape_pdf_text, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
     NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary, ObjectValue, ShimDocument,
-    StreamSummary,
+    StreamChunk, StreamMode, StreamSummary,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -233,6 +233,12 @@ pub struct GuiShellApp {
     smoke_exit_after: Option<Duration>,
     tree: TreeModel,
     stream: LargeStreamModel,
+    real_stream_mode: StreamMode,
+    real_stream_offset: u64,
+    real_stream_limit: usize,
+    real_stream_key: Option<RealStreamKey>,
+    real_stream_chunk: Option<StreamChunk>,
+    real_stream_error: Option<String>,
     selected_row: usize,
     back_stack: Vec<usize>,
     forward_stack: Vec<usize>,
@@ -266,6 +272,12 @@ impl GuiShellApp {
             smoke_exit_after,
             tree,
             stream: LargeStreamModel::default(),
+            real_stream_mode: StreamMode::Raw,
+            real_stream_offset: 0,
+            real_stream_limit: HEX_WINDOW_BYTES,
+            real_stream_key: None,
+            real_stream_chunk: None,
+            real_stream_error: None,
             selected_row: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
@@ -361,6 +373,7 @@ impl GuiShellApp {
     }
 
     fn refresh_real_detail_for_selection(&mut self) {
+        self.clear_real_stream_chunk();
         let TreeModel::Real(tree) = &self.tree else {
             return;
         };
@@ -386,6 +399,45 @@ impl GuiShellApp {
             Err(err) => {
                 self.real_detail = None;
                 self.real_detail_error = Some(err.clone());
+            }
+        }
+    }
+
+    fn clear_real_stream_chunk(&mut self) {
+        self.real_stream_key = None;
+        self.real_stream_chunk = None;
+        self.real_stream_error = None;
+    }
+
+    fn refresh_real_stream_chunk(&mut self, object: ObjectId) {
+        let key = RealStreamKey {
+            object,
+            mode: self.real_stream_mode,
+            offset: self.real_stream_offset,
+            limit: self.real_stream_limit,
+        };
+        let result = match self.state.as_ref() {
+            Ok(state) => load_stream_chunk(state, object, key.mode, key.offset, key.limit),
+            Err(err) => Err(err.clone()),
+        };
+        self.real_stream_key = Some(key);
+        match result {
+            Ok(chunk) => {
+                self.status_log.push(format!(
+                    "loaded {} stream chunk {} {} R @ {} ({} bytes{})",
+                    stream_mode_label(chunk.mode),
+                    object.num,
+                    object.gen,
+                    chunk.offset,
+                    chunk.bytes.len(),
+                    if chunk.truncated { ", truncated" } else { "" }
+                ));
+                self.real_stream_chunk = Some(chunk);
+                self.real_stream_error = None;
+            }
+            Err(err) => {
+                self.real_stream_chunk = None;
+                self.real_stream_error = Some(err);
             }
         }
     }
@@ -485,6 +537,19 @@ fn load_object_detail(state: &AppState, id: &NodeId) -> Result<ObjectDetail, Str
         .map_err(|err| err.message)
 }
 
+fn load_stream_chunk(
+    state: &AppState,
+    object: ObjectId,
+    mode: StreamMode,
+    offset: u64,
+    limit: usize,
+) -> Result<StreamChunk, String> {
+    state
+        .session
+        .run_task(|document| document.stream_load(object, mode, offset, limit))
+        .map_err(|err| err.message)
+}
+
 fn initial_status_log(
     state: &Result<AppState, String>,
     tree: &TreeModel,
@@ -494,7 +559,7 @@ fn initial_status_log(
         (Ok(_), TreeModel::Real(tree), Some(path)) => vec![
             format!("real MuPDF opened {}", file_chip_label(path)),
             format!("loaded bounded root page: {}", tree.row_count_label()),
-            "stream bytes remain M2; showing stream metadata only".to_string(),
+            "real stream bytes available as bounded raw/decoded chunks".to_string(),
         ],
         (Err(err), _, Some(path)) => vec![
             format!("failed to open {}", file_chip_label(path)),
@@ -691,6 +756,37 @@ fn optional_u64(value: Option<u64>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn stream_mode_label(mode: StreamMode) -> &'static str {
+    match mode {
+        StreamMode::Raw => "raw",
+        StreamMode::Decoded => "decoded",
+    }
+}
+
+fn hex_dump_bytes(base_offset: u64, bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (line_index, chunk) in bytes.chunks(16).enumerate() {
+        let line_offset = base_offset.saturating_add((line_index as u64).saturating_mul(16));
+        out.push_str(&format!("{line_offset:08x}  "));
+        for byte in chunk {
+            out.push_str(&format!("{byte:02x} "));
+        }
+        for _ in chunk.len()..16 {
+            out.push_str("   ");
+        }
+        out.push(' ');
+        for byte in chunk {
+            out.push(if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            });
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn draw_diagnostic_card(ui: &mut egui::Ui, diagnostic: &pdbg_core::DiagnosticSummary) {
@@ -1150,7 +1246,7 @@ impl GuiShellApp {
 
     fn draw_stream_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if self.tree.is_real() {
-            self.draw_real_stream_panel(ui);
+            self.draw_real_stream_panel(ui, ctx);
             return;
         }
 
@@ -1246,19 +1342,133 @@ impl GuiShellApp {
         }
     }
 
-    fn draw_real_stream_panel(&mut self, ui: &mut egui::Ui) {
+    fn draw_real_stream_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let Some(detail) = &self.real_detail else {
             ui.label(RichText::new("No object selected").color(PdbgTheme::MUTED));
             return;
         };
-        let Some(stream) = &detail.stream else {
+        let Some(stream) = detail.stream.clone() else {
             ui.label(RichText::new("Selected object has no stream").color(PdbgTheme::MUTED));
             return;
         };
+
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream Summary", Some("bytes viewer arrives in M2"));
-            draw_stream_summary_grid(ui, stream);
+            section_header(ui, "Stream Summary", Some("real bounded bytes"));
+            draw_stream_summary_grid(ui, &stream);
         });
+
+        ui.add_space(8.0);
+        let mut request_changed = false;
+        section_frame().show(ui, |ui| {
+            section_header(ui, "Stream Bytes", Some("raw / decoded chunk"));
+            ui.horizontal(|ui| {
+                request_changed |= ui
+                    .selectable_value(&mut self.real_stream_mode, StreamMode::Raw, "Raw")
+                    .changed();
+                let decoded_enabled = stream.can_decode;
+                ui.add_enabled_ui(decoded_enabled, |ui| {
+                    request_changed |= ui
+                        .selectable_value(
+                            &mut self.real_stream_mode,
+                            StreamMode::Decoded,
+                            "Decoded",
+                        )
+                        .changed();
+                });
+                if !decoded_enabled && self.real_stream_mode == StreamMode::Decoded {
+                    self.real_stream_mode = StreamMode::Raw;
+                    request_changed = true;
+                }
+            });
+            ui.add_space(4.0);
+            egui::Grid::new("real_stream_controls_grid")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Offset");
+                    request_changed |= ui
+                        .add(egui::DragValue::new(&mut self.real_stream_offset).speed(64))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Limit");
+                    request_changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.real_stream_limit)
+                                .range(1..=32 * 1024)
+                                .speed(64),
+                        )
+                        .changed();
+                    ui.end_row();
+                });
+            if request_changed {
+                self.clear_real_stream_chunk();
+            }
+            if ui.button("Load chunk").clicked() || self.real_stream_key.is_none() {
+                self.refresh_real_stream_chunk(stream.object);
+            }
+        });
+
+        if let Some(err) = &self.real_stream_error {
+            ui.add_space(8.0);
+            ui.colored_label(PdbgTheme::ERROR_FG, err);
+            return;
+        }
+
+        let Some(chunk) = self.real_stream_chunk.clone() else {
+            return;
+        };
+        ui.add_space(8.0);
+        let total = chunk
+            .total_size
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        section_frame().show(ui, |ui| {
+            section_header(
+                ui,
+                "Hex",
+                Some(&format!(
+                    "{} bytes @ {} / total {}{}",
+                    chunk.bytes.len(),
+                    chunk.offset,
+                    total,
+                    if chunk.truncated { " / truncated" } else { "" }
+                )),
+            );
+            let mut hex_text = if chunk.bytes.is_empty() {
+                "<empty chunk>".to_string()
+            } else {
+                hex_dump_bytes(chunk.offset, &chunk.bytes)
+            };
+            ui.add(
+                TextEdit::multiline(&mut hex_text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(14)
+                    .code_editor()
+                    .interactive(false),
+            );
+            if ui.button("Copy visible chunk").clicked() {
+                let escaped = escape_pdf_text(&hex_text, EgressFormat::Markdown, COPY_LIMIT_BYTES);
+                ctx.copy_text(escaped.text.clone());
+                self.status_log.push(format!(
+                    "copied visible {} stream chunk{}",
+                    stream_mode_label(chunk.mode),
+                    if escaped.truncated {
+                        " (truncated)"
+                    } else {
+                        ""
+                    }
+                ));
+                self.copied_excerpt = Some(escaped);
+            }
+        });
+
+        if !chunk.decode_diagnostics.is_empty() {
+            ui.add_space(8.0);
+            for diagnostic in &chunk.decode_diagnostics {
+                draw_diagnostic_card(ui, diagnostic);
+            }
+        }
     }
 
     fn draw_diagnostics_panel(&mut self, ui: &mut egui::Ui) {
@@ -1316,6 +1526,14 @@ impl GuiShellApp {
             }
         });
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RealStreamKey {
+    object: ObjectId,
+    mode: StreamMode,
+    offset: u64,
+    limit: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1788,6 +2006,13 @@ mod tests {
     }
 
     #[test]
+    fn hex_dump_bytes_formats_offsets_hex_and_ascii() {
+        let dump = hex_dump_bytes(16, b"BT /F1\n");
+        assert!(dump.starts_with("00000010  42 54 20 2f 46 31 0a"));
+        assert!(dump.contains("BT /F1."));
+    }
+
+    #[test]
     fn selected_hex_text_is_copy_authority() {
         let mut model = LargeStreamModel {
             selection_offset: 1024,
@@ -1951,6 +2176,36 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("large smoke timings:")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_stream_panel_loads_bounded_real_bytes() {
+        let path = write_temp_pdf("gui-stream", &synthetic_large_xref_pdf(16));
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+
+        app.follow_real_reference(ObjectId { num: 4, gen: 0 });
+        assert!(app
+            .real_detail
+            .as_ref()
+            .is_some_and(|detail| detail.stream.is_some()));
+        app.real_stream_limit = 16;
+        app.refresh_real_stream_chunk(ObjectId { num: 4, gen: 0 });
+
+        let chunk = app.real_stream_chunk.as_ref().unwrap();
+        assert_eq!(chunk.mode, StreamMode::Raw);
+        assert_eq!(chunk.offset, 0);
+        assert!(chunk.bytes.starts_with(b"BT /F1"));
+        assert!(chunk.truncated);
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.contains("loaded raw stream chunk 4 0 R")));
 
         let _ = std::fs::remove_file(path);
     }
