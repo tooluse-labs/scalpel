@@ -17,4 +17,4 @@ pub use registry::{ChildContainer, NodeTokenRegistry};
 pub use session::{DocumentSession, FakeSharedStore, FakeSharedStoreSnapshot, TaskQueueStats};
 #[cfg(feature = "real-mupdf")]
 pub use shim::RealMuPdfShim;
-pub use shim::{FakeShim, OpenDocument, Shim, ShimDocument, ShimError};
+pub use shim::{CancelToken, FakeShim, OpenDocument, Shim, ShimDocument, ShimError};

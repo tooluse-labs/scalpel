@@ -222,6 +222,73 @@ impl OpenDocument {
             message: "node is not registered in this document session".to_string(),
         })
     }
+
+    pub fn stream_load_with_cancel_token(
+        &mut self,
+        object: ObjectId,
+        mode: StreamMode,
+        offset: u64,
+        limit: usize,
+        cancel: &CancelToken,
+    ) -> Result<StreamChunk, ShimError> {
+        self.doc.stream_load_with_cancel(
+            &self.registry,
+            object,
+            mode,
+            offset,
+            limit,
+            cancel.as_mut_ptr(),
+        )
+    }
+
+    pub fn render_page_with_cancel_token(
+        &mut self,
+        request: &RenderRequest,
+        cancel: &CancelToken,
+    ) -> Result<RenderResult, ShimError> {
+        self.doc
+            .render_page_with_cancel(&self.registry, request, cancel.as_mut_ptr())
+    }
+}
+
+pub struct CancelToken {
+    raw: NonNull<raw::pdbg_cancel_token>,
+}
+
+impl CancelToken {
+    pub fn new() -> Result<Self, ShimError> {
+        unsafe {
+            let mut token = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_cancel_token_new(&mut token, &mut err);
+            check_status(status, &err)?;
+            let raw = NonNull::new(token).ok_or_else(|| ShimError {
+                status: raw::pdbg_status::PDBG_ERROR_GENERIC,
+                message: "pdbg_cancel_token_new returned null".to_string(),
+            })?;
+            Ok(Self { raw })
+        }
+    }
+
+    pub fn cancel(&self) {
+        unsafe { raw::pdbg_cancel_token_cancel(self.raw.as_ptr()) }
+    }
+
+    fn as_mut_ptr(&self) -> *mut raw::pdbg_cancel_token {
+        self.raw.as_ptr()
+    }
+}
+
+// Safety: the C cancel token stores its cancellation flag as an atomic integer.
+// It is intentionally shared across threads so a controller can request
+// cancellation while a worker is inside a bounded stream/render operation.
+unsafe impl Send for CancelToken {}
+unsafe impl Sync for CancelToken {}
+
+impl Drop for CancelToken {
+    fn drop(&mut self) {
+        unsafe { raw::pdbg_cancel_token_drop(self.raw.as_ptr()) }
+    }
 }
 
 struct PdbgContext {
@@ -425,6 +492,18 @@ impl PdbgDoc {
         offset: u64,
         limit: usize,
     ) -> Result<StreamChunk, ShimError> {
+        self.stream_load_with_cancel(registry, object, mode, offset, limit, ptr::null_mut())
+    }
+
+    fn stream_load_with_cancel(
+        &self,
+        registry: &NodeTokenRegistry,
+        object: ObjectId,
+        mode: StreamMode,
+        offset: u64,
+        limit: usize,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<StreamChunk, ShimError> {
         unsafe {
             let mut buffer = ptr::null_mut();
             let mut err = raw::pdbg_error::default();
@@ -434,7 +513,7 @@ impl PdbgDoc {
                 matches!(mode, StreamMode::Decoded) as i32,
                 offset,
                 limit,
-                ptr::null_mut(),
+                cancel,
                 &mut buffer,
                 &mut err,
             );
@@ -449,6 +528,15 @@ impl PdbgDoc {
         registry: &NodeTokenRegistry,
         request: &RenderRequest,
     ) -> Result<RenderResult, ShimError> {
+        self.render_page_with_cancel(registry, request, ptr::null_mut())
+    }
+
+    fn render_page_with_cancel(
+        &self,
+        registry: &NodeTokenRegistry,
+        request: &RenderRequest,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<RenderResult, ShimError> {
         unsafe {
             let options = raw_render_options(request);
             let mut image = ptr::null_mut();
@@ -457,7 +545,7 @@ impl PdbgDoc {
                 self.raw.as_ptr(),
                 page_index_to_u32(request.page_index)?,
                 &options,
-                ptr::null_mut(),
+                cancel,
                 &mut image,
                 &mut err,
             );
@@ -977,6 +1065,36 @@ mod tests {
         assert!(text.spans[0].untrusted);
     }
 
+    #[cfg(all(feature = "fake", not(feature = "real-mupdf")))]
+    #[test]
+    fn fake_cancel_token_maps_to_cancelled_status_and_keeps_document_usable() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let cancel = CancelToken::new().unwrap();
+        cancel.cancel();
+
+        let stream_err = doc
+            .stream_load_with_cancel_token(
+                ObjectId { num: 1, gen: 0 },
+                StreamMode::Raw,
+                0,
+                4,
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(stream_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
+        let render_err = doc
+            .render_page_with_cancel_token(&RenderRequest::page(0), &cancel)
+            .unwrap_err();
+        assert_eq!(render_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.file_path, "fake.pdf");
+        let render = doc.render_page(&RenderRequest::page(0)).unwrap();
+        assert_eq!(render.pixels_rgba, vec![255, 255, 255, 255]);
+    }
+
     #[cfg(feature = "fake")]
     #[test]
     fn opaque_accessor_outputs_are_owned_after_handles_drop() {
@@ -1445,6 +1563,38 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_mupdf_shim_cancelled_stream_returns_clean_error_and_keeps_doc_usable() {
+        let path = write_temp_real_pdf("stream-cancel", &synthetic_ascii_hex_stream_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let cancel = CancelToken::new().unwrap();
+        cancel.cancel();
+
+        let err = doc
+            .stream_load_with_cancel_token(
+                ObjectId { num: 4, gen: 0 },
+                StreamMode::Decoded,
+                0,
+                64,
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+        assert!(err.message.contains("cancelled"));
+
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.page_count, 1);
+        let decoded = doc
+            .stream_load(ObjectId { num: 4, gen: 0 }, StreamMode::Decoded, 0, 64)
+            .unwrap();
+        assert_eq!(decoded.bytes, b"Hello");
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_mupdf_shim_enforces_decoded_stream_limit_during_read() {
         let path = write_temp_real_pdf("stream-limit", &synthetic_ascii_hex_stream_pdf());
         let shim = RealMuPdfShim::new().unwrap();
@@ -1507,6 +1657,30 @@ mod tests {
         let err = doc.render_page(&request).unwrap_err();
         assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
         assert!(err.message.contains("pixel"));
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_cancelled_render_returns_clean_error_and_keeps_doc_usable() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(fixture).unwrap();
+        let cancel = CancelToken::new().unwrap();
+        cancel.cancel();
+
+        let err = doc
+            .render_page_with_cancel_token(&RenderRequest::page(0), &cancel)
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+        assert!(err.message.contains("cancelled"));
+
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.page_count, 1);
+        let render = doc.render_page(&RenderRequest::page(0)).unwrap();
+        assert_eq!((render.width, render.height), (72, 72));
     }
 
     #[cfg(feature = "real-mupdf")]

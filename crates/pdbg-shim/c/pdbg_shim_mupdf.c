@@ -78,7 +78,7 @@ struct pdbg_text_page {
 };
 
 struct pdbg_cancel_token {
-    int cancelled;
+    atomic_int cancelled;
 };
 
 static atomic_uint_fast64_t next_document_id = 1;
@@ -984,7 +984,7 @@ pdbg_status pdbg_cancel_token_new(pdbg_cancel_token **out, pdbg_error *err)
 void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
 {
     if (token)
-        token->cancelled = 1;
+        atomic_store(&token->cancelled, 1);
 }
 
 void pdbg_cancel_token_drop(pdbg_cancel_token *token)
@@ -1505,7 +1505,7 @@ pdbg_status pdbg_stream_load(
         set_error(err, PDBG_ERROR_PASSWORD, "document requires password before stream load");
         return PDBG_ERROR_PASSWORD;
     }
-    if (cancel && cancel->cancelled) {
+    if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }
@@ -1556,7 +1556,7 @@ pdbg_status pdbg_stream_load(
                     request_end = offset + (uint64_t)limit;
 
                 while (status == PDBG_OK) {
-                    if (cancel && cancel->cancelled) {
+                    if (cancel && atomic_load(&cancel->cancelled)) {
                         status = PDBG_ERROR_CANCELLED;
                         set_error(err, status, "cancelled");
                         break;
@@ -1641,7 +1641,7 @@ pdbg_status pdbg_page_render(
         set_error(err, PDBG_ERROR_PASSWORD, "document requires password before page render");
         return PDBG_ERROR_PASSWORD;
     }
-    if (cancel && cancel->cancelled) {
+    if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }

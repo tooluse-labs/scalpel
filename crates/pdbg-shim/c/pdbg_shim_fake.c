@@ -20,7 +20,7 @@ struct pdbg_doc {
 };
 
 struct pdbg_cancel_token {
-    int cancelled;
+    atomic_int cancelled;
 };
 
 struct pdbg_diagnostic_list {
@@ -262,7 +262,7 @@ pdbg_status pdbg_cancel_token_new(pdbg_cancel_token **out, pdbg_error *err)
 void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
 {
     if (token)
-        token->cancelled = 1;
+        atomic_store(&token->cancelled, 1);
 }
 
 void pdbg_cancel_token_drop(pdbg_cancel_token *token)
@@ -443,7 +443,7 @@ pdbg_status pdbg_stream_load(
         set_error(err, PDBG_ERROR_GENERIC, "invalid stream arguments");
         return PDBG_ERROR_GENERIC;
     }
-    if (cancel && cancel->cancelled) {
+    if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }
@@ -521,7 +521,7 @@ pdbg_status pdbg_page_render(
         set_error(err, PDBG_ERROR_GENERIC, "invalid render arguments");
         return PDBG_ERROR_GENERIC;
     }
-    if (cancel && cancel->cancelled) {
+    if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }
@@ -564,7 +564,7 @@ pdbg_status pdbg_page_extract_text(
         set_error(err, PDBG_ERROR_GENERIC, "invalid text arguments");
         return PDBG_ERROR_GENERIC;
     }
-    if (cancel && cancel->cancelled) {
+    if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
     }
