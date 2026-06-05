@@ -1418,6 +1418,57 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_flate_expansion_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &[u8]) {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(body);
+        }
+
+        let flate = [
+            0x78, 0x9c, 0x73, 0x74, 0x1c, 0x05, 0xa3, 0x60, 0x14, 0x8c, 0x54, 0x00, 0x00, 0xa4,
+            0x78, 0x04, 0x10,
+        ];
+        let mut pdf = Vec::from(&b"%PDF-1.1\n"[..]);
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "4 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
+                flate.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&flate);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n")
+                .as_bytes(),
+        );
+        pdf
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_shim_opens_minimal_pdf_and_traverses_inspect_roots() {
         let fixture = concat!(
@@ -1707,6 +1758,30 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
         assert!(err.message.contains("during decode"));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_enforces_filter_expansion_ratio_during_read() {
+        let path = write_temp_real_pdf("stream-ratio-limit", &synthetic_flate_expansion_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let config = SafeModeConfig {
+            max_decoded_stream_bytes: 4096,
+            max_filter_expansion_ratio: 4,
+            ..SafeModeConfig::default()
+        };
+        let mut doc = shim
+            .open_document_with_config(path.to_string_lossy().as_ref(), &config)
+            .unwrap();
+
+        let err = doc
+            .stream_load(ObjectId { num: 4, gen: 0 }, StreamMode::Decoded, 0, 16)
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("expansion ratio"));
 
         drop(doc);
         let _ = std::fs::remove_file(path);

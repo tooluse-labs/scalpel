@@ -38,6 +38,8 @@ struct pdbg_doc {
     int repaired_or_damaged;
     uint64_t max_store_bytes;
     uint64_t max_decoded_stream_bytes;
+    uint32_t max_filter_expansion_ratio;
+    uint32_t max_object_depth;
     uint64_t next_path_token;
     struct pdbg_path_binding *paths;
     size_t path_len;
@@ -91,6 +93,8 @@ struct pdbg_path_binding {
 
 #define PDBG_DEFAULT_MAX_STORE_BYTES (256ULL * 1024ULL * 1024ULL)
 #define PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES (64ULL * 1024ULL * 1024ULL)
+#define PDBG_DEFAULT_MAX_FILTER_EXPANSION_RATIO 64U
+#define PDBG_DEFAULT_MAX_OBJECT_DEPTH 128U
 
 static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
 {
@@ -101,6 +105,11 @@ static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
     doc->max_decoded_stream_bytes =
         options && options->max_decoded_stream_bytes ? options->max_decoded_stream_bytes
                                                      : PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES;
+    doc->max_filter_expansion_ratio =
+        options && options->max_filter_expansion_ratio ? options->max_filter_expansion_ratio
+                                                       : PDBG_DEFAULT_MAX_FILTER_EXPANSION_RATIO;
+    doc->max_object_depth =
+        options && options->max_object_depth ? options->max_object_depth : PDBG_DEFAULT_MAX_OBJECT_DEPTH;
 }
 
 static void set_error(pdbg_error *err, pdbg_status status, const char *message)
@@ -324,6 +333,8 @@ static int fill_stream_filters(fz_context *ctx, pdbg_stream_summary *stream, pdf
     return 1;
 }
 
+static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out);
+
 static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdbg_node_id *node, pdf_obj *obj)
 {
     memset(stream, 0, sizeof(*stream));
@@ -332,19 +343,34 @@ static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdb
     else if (pdf_is_indirect(ctx, obj))
         stream->object = object_id_from_ref(ctx, obj);
 
-    pdf_obj *length = pdf_dict_get(ctx, obj, PDF_NAME(Length));
-    if (length && pdf_is_number(ctx, length)) {
-        int64_t raw_size = pdf_to_int64(ctx, length);
-        if (raw_size >= 0) {
-            stream->raw_size_hint = (uint64_t)raw_size;
-            stream->has_raw_size_hint = 1;
-        }
+    uint64_t raw_size = 0;
+    if (stream_raw_size_hint(ctx, obj, &raw_size)) {
+        stream->raw_size_hint = raw_size;
+        stream->has_raw_size_hint = 1;
     }
 
     if (!fill_stream_filters(ctx, stream, pdf_dict_get(ctx, obj, PDF_NAME(Filter))))
         return 0;
 
     stream->can_decode = 1;
+    return 1;
+}
+
+static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out)
+{
+    if (!out)
+        return 0;
+    *out = 0;
+
+    pdf_obj *length = pdf_dict_get(ctx, obj, PDF_NAME(Length));
+    if (!length || !pdf_is_number(ctx, length))
+        return 0;
+
+    int64_t raw_size = pdf_to_int64(ctx, length);
+    if (raw_size < 0)
+        return 0;
+
+    *out = (uint64_t)raw_size;
     return 1;
 }
 
@@ -527,16 +553,48 @@ static size_t object_child_count(fz_context *ctx, pdf_obj *obj)
     return 0;
 }
 
-static char *object_preview(fz_context *ctx, pdf_obj *obj)
+static int object_exceeds_depth(fz_context *ctx, pdf_obj *obj, uint32_t max_depth, uint32_t depth)
+{
+    if (!obj || max_depth == 0)
+        return 0;
+    if (depth > max_depth)
+        return 1;
+
+    if (pdf_is_dict(ctx, obj)) {
+        int len = pdf_dict_len(ctx, obj);
+        for (int i = 0; i < len; i++) {
+            if (object_exceeds_depth(ctx, pdf_dict_get_val(ctx, obj, i), max_depth, depth + 1))
+                return 1;
+        }
+    } else if (pdf_is_array(ctx, obj)) {
+        int len = pdf_array_len(ctx, obj);
+        for (int i = 0; i < len; i++) {
+            if (object_exceeds_depth(ctx, pdf_array_get(ctx, obj, i), max_depth, depth + 1))
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
+static char *object_preview(fz_context *ctx, pdf_obj *obj, uint32_t max_depth)
 {
     if (!obj)
         return copy_string("");
+    if (object_exceeds_depth(ctx, obj, max_depth, 1))
+        return copy_string("<object preview exceeds max depth>");
+
     char preview[256];
     size_t len = 0;
     preview[0] = '\0';
-    pdf_sprint_obj(ctx, preview, sizeof(preview), &len, obj, 1, 1);
-    preview[sizeof(preview) - 1] = '\0';
-    return copy_string(preview);
+    char *rendered = pdf_sprint_obj(ctx, preview, sizeof(preview), &len, obj, 1, 1);
+    if (!rendered)
+        return copy_string("");
+
+    char *out = copy_string(rendered);
+    if (rendered != preview)
+        fz_free(ctx, rendered);
+    return out;
 }
 
 static void fill_value(fz_context *ctx, pdf_obj *obj, pdbg_object_value *value)
@@ -645,7 +703,7 @@ static int fill_entry_for_obj(
     else
         snprintf(label, sizeof(label), "item");
 
-    char *preview = object_preview(ctx, raw_obj);
+    char *preview = object_preview(ctx, raw_obj, doc->max_object_depth);
     if (!preview)
         return 0;
 
@@ -1057,8 +1115,8 @@ pdbg_status pdbg_document_open(
             status = PDBG_ERROR_UNSUPPORTED;
             set_error(err, status, "opened document is not a PDF");
         } else {
-            if (doc->safe_mode || doc->javascript_disabled)
-                pdf_disable_js(doc_ctx, pdf);
+            pdf_disable_js(doc_ctx, pdf);
+            doc->javascript_disabled = 1;
 
             doc->encrypted = document_is_encrypted(doc_ctx, opened);
             doc->needs_password = fz_needs_password(doc_ctx, opened);
@@ -1174,8 +1232,8 @@ pdbg_status pdbg_document_open_fd(
             status = PDBG_ERROR_UNSUPPORTED;
             set_error(err, status, "opened fd is not a PDF");
         } else {
-            if (doc->safe_mode || doc->javascript_disabled)
-                pdf_disable_js(doc_ctx, pdf);
+            pdf_disable_js(doc_ctx, pdf);
+            doc->javascript_disabled = 1;
 
             doc->encrypted = document_is_encrypted(doc_ctx, opened);
             doc->needs_password = fz_needs_password(doc_ctx, opened);
@@ -1443,7 +1501,7 @@ pdbg_status pdbg_object_detail(
         } else if (obj) {
             out->kind = node->kind == PDBG_NODE_TRAILER ? PDBG_OBJECT_TRAILER : object_kind_for(ctx, obj);
             out->label = copy_string("Object");
-            out->preview = object_preview(ctx, obj);
+            out->preview = object_preview(ctx, obj, doc->max_object_depth);
             fill_value(ctx, obj, &out->value);
             if (node->has_object) {
                 out->object = node->object;
@@ -1533,9 +1591,11 @@ pdbg_status pdbg_stream_load(
 
     fz_context *ctx = doc->ctx;
     fz_stream *stream = NULL;
+    pdf_obj *stream_obj = NULL;
     pdbg_buffer *buffer = NULL;
     pdbg_status status = PDBG_OK;
     fz_var(stream);
+    fz_var(stream_obj);
     fz_var(buffer);
     fz_var(status);
 
@@ -1558,6 +1618,13 @@ pdbg_status pdbg_stream_load(
             }
 
             if (status == PDBG_OK) {
+                uint64_t raw_size_hint = 0;
+                int has_raw_size_hint = 0;
+                if (decoded && doc->max_filter_expansion_ratio > 0) {
+                    stream_obj = pdf_load_object(ctx, doc->pdf_doc, object.num);
+                    has_raw_size_hint = stream_raw_size_hint(ctx, stream_obj, &raw_size_hint);
+                }
+
                 stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
                                  : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
 
@@ -1591,6 +1658,20 @@ pdbg_status pdbg_stream_load(
                         set_error(err, status, "decoded stream limit exceeded during decode");
                         break;
                     }
+                    if (decoded && has_raw_size_hint) {
+                        if (raw_size_hint == 0 && chunk_end > 0) {
+                            status = PDBG_ERROR_LIMIT;
+                            set_error(err, status, "decoded stream expansion ratio exceeded");
+                            break;
+                        }
+                        if (raw_size_hint > 0 &&
+                            (raw_size_hint > UINT64_MAX / (uint64_t)doc->max_filter_expansion_ratio ||
+                             chunk_end > raw_size_hint * (uint64_t)doc->max_filter_expansion_ratio)) {
+                            status = PDBG_ERROR_LIMIT;
+                            set_error(err, status, "decoded stream expansion ratio exceeded");
+                            break;
+                        }
+                    }
 
                     if (limit > 0 && copied < limit && chunk_end > offset && chunk_start < request_end) {
                         uint64_t copy_start = offset > chunk_start ? offset : chunk_start;
@@ -1621,6 +1702,8 @@ pdbg_status pdbg_stream_load(
     {
         if (stream)
             fz_drop_stream(ctx, stream);
+        if (stream_obj)
+            pdf_drop_obj(ctx, stream_obj);
     }
     fz_catch(ctx)
     {

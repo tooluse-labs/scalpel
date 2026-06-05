@@ -70,6 +70,23 @@ struct RealRenderJobOutput {
     result: Result<RenderResult, String>,
 }
 
+struct RealStreamJob {
+    key: RealStreamKey,
+    cancel: Arc<CancelToken>,
+    receiver: mpsc::Receiver<RealStreamJobOutput>,
+}
+
+impl Drop for RealStreamJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct RealStreamJobOutput {
+    key: RealStreamKey,
+    result: Result<StreamChunk, String>,
+}
+
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -287,6 +304,7 @@ pub struct GuiShellApp {
     real_stream_offset: u64,
     real_stream_limit: usize,
     real_stream_key: Option<RealStreamKey>,
+    real_stream_job: Option<RealStreamJob>,
     real_stream_chunk: Option<StreamChunk>,
     real_stream_error: Option<String>,
     selected_row: usize,
@@ -349,6 +367,7 @@ impl GuiShellApp {
             real_stream_offset: 0,
             real_stream_limit: HEX_WINDOW_BYTES,
             real_stream_key: None,
+            real_stream_job: None,
             real_stream_chunk: None,
             real_stream_error: None,
             selected_row: 0,
@@ -489,6 +508,9 @@ impl GuiShellApp {
     }
 
     fn clear_real_stream_chunk(&mut self) {
+        if let Some(job) = self.real_stream_job.take() {
+            job.cancel.cancel();
+        }
         self.real_stream_key = None;
         self.real_stream_chunk = None;
         self.real_stream_error = None;
@@ -501,28 +523,132 @@ impl GuiShellApp {
             offset: self.real_stream_offset,
             limit: self.real_stream_limit,
         };
-        let result = match self.state.as_ref() {
-            Ok(state) => load_stream_chunk(state, object, key.mode, key.offset, key.limit),
-            Err(err) => Err(err.clone()),
-        };
+        if self.real_stream_key == Some(key)
+            && (self.real_stream_chunk.is_some() || self.real_stream_job.is_some())
+        {
+            return;
+        }
+        if let Some(job) = self.real_stream_job.take() {
+            job.cancel.cancel();
+        }
         self.real_stream_key = Some(key);
-        match result {
-            Ok(chunk) => {
-                self.status_log.push(format!(
-                    "loaded {} stream chunk {} {} R @ {} ({} bytes{})",
-                    stream_mode_label(chunk.mode),
-                    object.num,
-                    object.gen,
-                    chunk.offset,
-                    chunk.bytes.len(),
-                    if chunk.truncated { ", truncated" } else { "" }
-                ));
-                self.real_stream_chunk = Some(chunk);
-                self.real_stream_error = None;
-            }
+        self.real_stream_chunk = None;
+        self.real_stream_error = None;
+
+        let Ok(state) = self.state.as_ref() else {
+            self.real_stream_error = Some("document is not open".to_string());
+            return;
+        };
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
             Err(err) => {
-                self.real_stream_chunk = None;
-                self.real_stream_error = Some(err);
+                self.real_stream_error = Some(err.message);
+                return;
+            }
+        };
+        let session = state.session.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = session
+                .run_task(|document| {
+                    document.stream_load_with_cancel_token(
+                        key.object,
+                        key.mode,
+                        key.offset,
+                        key.limit,
+                        worker_cancel.as_ref(),
+                    )
+                })
+                .map_err(|err| err.message);
+            let _ = sender.send(RealStreamJobOutput { key, result });
+        });
+        self.real_stream_job = Some(RealStreamJob {
+            key,
+            cancel,
+            receiver,
+        });
+        self.status_log.push(format!(
+            "queued {} stream chunk {} {} R @ {}",
+            stream_mode_label(key.mode),
+            object.num,
+            object.gen,
+            key.offset
+        ));
+    }
+
+    fn cancel_real_stream_job(&mut self) {
+        if let Some(job) = self.real_stream_job.take() {
+            job.cancel.cancel();
+            self.real_stream_chunk = None;
+            self.real_stream_error = Some("stream chunk load cancelled".to_string());
+            self.status_log.push(format!(
+                "cancelled {} stream chunk {} {} R @ {}",
+                stream_mode_label(job.key.mode),
+                job.key.object.num,
+                job.key.object.gen,
+                job.key.offset
+            ));
+        }
+    }
+
+    fn poll_real_stream_job(&mut self) {
+        let Some(polled) =
+            self.real_stream_job
+                .as_ref()
+                .and_then(|job| match job.receiver.try_recv() {
+                    Ok(output) => Some(Ok(output)),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
+                })
+        else {
+            return;
+        };
+
+        self.real_stream_job = None;
+        match polled {
+            Ok(output) => {
+                if self.real_stream_key != Some(output.key) {
+                    self.status_log.push(format!(
+                        "discarded stale {} stream chunk {} {} R @ {}",
+                        stream_mode_label(output.key.mode),
+                        output.key.object.num,
+                        output.key.object.gen,
+                        output.key.offset
+                    ));
+                    return;
+                }
+                match output.result {
+                    Ok(chunk) => {
+                        self.status_log.push(format!(
+                            "loaded {} stream chunk {} {} R @ {} ({} bytes{})",
+                            stream_mode_label(chunk.mode),
+                            output.key.object.num,
+                            output.key.object.gen,
+                            chunk.offset,
+                            chunk.bytes.len(),
+                            if chunk.truncated { ", truncated" } else { "" }
+                        ));
+                        self.real_stream_chunk = Some(chunk);
+                        self.real_stream_error = None;
+                    }
+                    Err(err) => {
+                        self.real_stream_chunk = None;
+                        self.real_stream_error = Some(err.clone());
+                        self.status_log.push(format!(
+                            "{} stream chunk {} {} R failed: {err}",
+                            stream_mode_label(output.key.mode),
+                            output.key.object.num,
+                            output.key.object.gen
+                        ));
+                    }
+                }
+            }
+            Err(key) => {
+                if self.real_stream_key == Some(key) {
+                    self.real_stream_chunk = None;
+                    self.real_stream_error = Some("stream worker disconnected".to_string());
+                }
             }
         }
     }
@@ -790,19 +916,6 @@ fn load_object_detail(state: &AppState, id: &NodeId) -> Result<ObjectDetail, Str
                 },
             )
         })
-        .map_err(|err| err.message)
-}
-
-fn load_stream_chunk(
-    state: &AppState,
-    object: ObjectId,
-    mode: StreamMode,
-    offset: u64,
-    limit: usize,
-) -> Result<StreamChunk, String> {
-    state
-        .session
-        .run_task(|document| document.stream_load(object, mode, offset, limit))
         .map_err(|err| err.message)
 }
 
@@ -1150,8 +1263,9 @@ fn segment_label(segment: &NodePathSegment) -> String {
 impl eframe::App for GuiShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_real_stream_job();
         self.poll_real_render_job();
-        if self.real_render_job.is_some() {
+        if self.real_stream_job.is_some() || self.real_render_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
@@ -1943,10 +2057,20 @@ impl GuiShellApp {
             if request_changed {
                 self.clear_real_stream_chunk();
             }
-            if ui.button("Load chunk").clicked() || self.real_stream_key.is_none() {
+            if self.real_stream_job.is_some() {
+                if ui.button("Cancel load").clicked() {
+                    self.cancel_real_stream_job();
+                }
+            } else if ui.button("Load chunk").clicked() || self.real_stream_key.is_none() {
                 self.refresh_real_stream_chunk(stream.object);
             }
         });
+
+        if self.real_stream_job.is_some() {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Loading stream chunk...").color(PdbgTheme::MUTED));
+            return;
+        }
 
         if let Some(err) = &self.real_stream_error {
             ui.add_space(8.0);
@@ -2539,6 +2663,22 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "real-mupdf")]
+    fn wait_for_real_stream(app: &mut GuiShellApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.real_stream_job.is_some() && Instant::now() < deadline {
+            app.poll_real_stream_job();
+            if app.real_stream_job.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        app.poll_real_stream_job();
+        assert!(
+            app.real_stream_job.is_none(),
+            "real stream job did not finish before test timeout"
+        );
+    }
+
     #[test]
     fn virtual_tree_does_not_materialize_rows() {
         let tree = VirtualObjectTree::new(1_000_000);
@@ -2822,6 +2962,8 @@ mod tests {
             .is_some_and(|detail| detail.stream.is_some()));
         app.real_stream_limit = 16;
         app.refresh_real_stream_chunk(ObjectId { num: 4, gen: 0 });
+        assert!(app.real_stream_job.is_some());
+        wait_for_real_stream(&mut app);
 
         let chunk = app.real_stream_chunk.as_ref().unwrap();
         assert_eq!(chunk.mode, StreamMode::Raw);
@@ -2831,7 +2973,41 @@ mod tests {
         assert!(app
             .status_log
             .iter()
+            .any(|line| line.contains("queued raw stream chunk 4 0 R")));
+        assert!(app
+            .status_log
+            .iter()
             .any(|line| line.contains("loaded raw stream chunk 4 0 R")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_stream_job_can_be_cancelled_from_ui_state() {
+        let path = write_temp_pdf("gui-stream-cancel", &synthetic_large_xref_pdf(16));
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        wait_for_real_render(&mut app);
+
+        app.follow_real_reference(ObjectId { num: 4, gen: 0 });
+        app.real_stream_limit = 16;
+        app.refresh_real_stream_chunk(ObjectId { num: 4, gen: 0 });
+        assert!(app.real_stream_job.is_some());
+
+        app.cancel_real_stream_job();
+        assert!(app.real_stream_job.is_none());
+        assert!(app.real_stream_chunk.is_none());
+        assert_eq!(
+            app.real_stream_error.as_deref(),
+            Some("stream chunk load cancelled")
+        );
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.contains("cancelled raw stream chunk 4 0 R")));
 
         let _ = std::fs::remove_file(path);
     }

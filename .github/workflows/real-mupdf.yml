@@ -1,0 +1,33 @@
+name: real-mupdf
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  MUPDF_VERSION: 1.27.2
+
+jobs:
+  macos-real-gate:
+    name: macos real-mupdf gate
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Download pinned MuPDF source
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/mupdf"
+          curl -fsSL "https://casper.mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz" \
+            -o "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source.tar.gz" -C "$RUNNER_TEMP/mupdf"
+      - name: Build MuPDF static libraries and mutool
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source"
+          make build=release build/release/libmupdf.a build/release/libmupdf-third.a build/release/mutool
+      - name: Real MuPDF gate
+        env:
+          PDBG_MUPDF_SOURCE_DIR: ${{ runner.temp }}/mupdf/mupdf-${{ env.MUPDF_VERSION }}-source
+        run: sh scripts/run_m1_real_gate.sh

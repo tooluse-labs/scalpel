@@ -41,6 +41,10 @@ content-stream operator visualization remain later milestones.
   to `PDBG_ERROR_CANCELLED`.
 - Add fake and real tests for span text, coordinates, limits, cancellation, and
   post-cancellation document usability.
+- The real gate must include a positioned-text golden fixture that pins
+  top-left page-space coordinates for a known glyph span, including CropBox or
+  rotation normalization, interior-NUL/lossy-text handling, and `max_chars`
+  truncation behavior.
 
 ### M3.2 Object Search
 
@@ -60,6 +64,9 @@ content-stream operator visualization remain later milestones.
 - Add bounded text-search over `TextPage` caches.
 - Page extraction should be demand-driven and cancellable; broad document
   search must report partial progress rather than freezing the UI.
+- Cache entries must have an explicit memory or page-count budget, and the large
+  document smoke must record a coarse search timing bound rather than allowing
+  unbounded extraction.
 - Search hits must include page index, matched excerpt, span bbox when available,
   and untrusted-marker propagation.
 - GUI results should jump to the page preview and select the hit; page-overlay
@@ -69,10 +76,15 @@ content-stream operator visualization remain later milestones.
 
 - Consolidate document, object, stream, render, and text diagnostics into a
   document-level diagnostics model with severity/code filtering.
+- Extend the real MuPDF shim to emit the diagnostic codes used by that model,
+  including missing/broken xref entries where MuPDF exposes repair context,
+  stream decode failures on bounded stream loads, encryption password failures,
+  JavaScript-disabled safety notices, and existing repair warnings.
 - Add JSON diagnostic payload export using
   `diagnostics_payload_to_json_string`.
-- Add a bounded Markdown report for summary, selected object, diagnostics, and
-  search hits. Markdown output must use the existing egress escaping rules.
+- Add the Markdown report builder used by the GUI/export path, then add a
+  bounded Markdown report for summary, selected object, diagnostics, and search
+  hits. Markdown output must use the existing egress escaping rules.
 - Keep repair/error reporting visible for damaged PDFs, including the M1
   repair-success fixture.
 
@@ -83,16 +95,18 @@ M3 is complete when:
 - real MuPDF text extraction returns owned spans with top-left page-space
   coordinates, bounded memory, and clean cancellation;
 - object search finds object numbers, dictionary keys, names, and scalar
-  previews without whole-tree materialization;
-- text search finds bounded excerpts across extracted pages and remains
-  cancellable;
+  previews without whole-tree materialization, with a test that proves the
+  search touches only bounded child pages unless the user explicitly expands
+  more of the tree;
+- text search finds bounded excerpts across extracted real pages, remains
+  cancellable, and stays inside the configured text-cache budget;
 - GUI search results navigate to real objects/pages and preserve Back/Forward
   history;
 - the diagnostics panel supports severity/code filtering and emits JSON with
   `diagnostic_schema_version`;
 - a bounded Markdown diagnostics report escapes untrusted PDF text;
 - the default local gate still passes without linking MuPDF, and the opt-in
-  real gate covers the M3 slices.
+  real gate plus manual `real-mupdf` workflow covers the M3 slices.
 
 ## Non-Goals
 

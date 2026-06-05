@@ -26,8 +26,8 @@ impl MuPdfCapabilities {
             can_load_raw_streams: true,
             can_load_decoded_streams: true,
             can_render_pages: true,
-            can_extract_text: true,
-            can_extract_positioned_text: true,
+            can_extract_text: false,
+            can_extract_positioned_text: false,
             can_ocr: false,
             can_list_incremental_sections: true,
             can_report_repair_diagnostics: true,
@@ -88,6 +88,18 @@ mod tests {
         assert_eq!(
             capabilities.gate(CapabilityFeature::RenderPages),
             CapabilityDecision::Enabled
+        );
+        assert_eq!(
+            capabilities.gate(CapabilityFeature::ExtractText),
+            CapabilityDecision::Unsupported {
+                reason: "text extraction is unavailable"
+            }
+        );
+        assert_eq!(
+            capabilities.gate(CapabilityFeature::ExtractPositionedText),
+            CapabilityDecision::Unsupported {
+                reason: "positioned text extraction is unavailable"
+            }
         );
         assert_eq!(
             capabilities.gate(CapabilityFeature::Ocr),

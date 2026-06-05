@@ -16,6 +16,10 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
 - Real open options now store the configured output and decoded-stream limits
   on the document handle, so decoded-stream limits are enforced during `fz_read`
   rather than after full materialization.
+- Real open options also store filter-expansion ratio and object-depth limits.
+  Decoded stream reads enforce the expansion ratio against the stream
+  dictionary's raw `/Length` hint during `fz_read`, and object previews stop
+  before recursively printing containers beyond the configured depth.
 - Real stream loading gates unauthenticated encrypted documents, cancellation,
   invalid object ids, non-stream objects, output limits, and decoded-size
   overflows with mapped `pdbg_error` values.
@@ -23,8 +27,9 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
   truncation, decoded-limit failure during read, and password-gated stream
   access.
 - The GUI real Stream tab now consumes real `stream_load` output as bounded
-  chunks, displays a read-only stream view, and copies visible output through
-  the existing Markdown egress escaping path.
+  chunks from a cancellable background session task, displays a read-only stream
+  view, and copies visible output through the existing Markdown egress escaping
+  path.
 - Stream presentation is modeled as two axes:
   - decode layer: `StreamMode::Raw` / `StreamMode::Decoded`;
   - display mode: `StreamViewMode::Hex` / `Text` / `Bytes`.
@@ -71,7 +76,7 @@ That gate covers the implemented M2 stream, page-list, render, preview-control,
 and cancellation slices in addition to the M1 open/inspect baseline:
 
 - real shim/core stream tests for raw and decoded chunks;
-- decoded stream limit enforcement during read;
+- decoded stream limit and filter-expansion-ratio enforcement during read;
 - real GUI stream chunk loading and Hex/Text/Bytes presentation tests;
 - real shim/core render tests for owned first-page RGBA pixels and pixel-limit
   enforcement;
@@ -90,8 +95,8 @@ M2 is complete when:
 
 - raw and decoded stream chunks are loaded through real MuPDF with bounded
   memory and correct raw/decoded semantics;
-- the GUI exposes stream summary plus bounded Hex/Text byte views over real
-  documents;
+- the GUI exposes stream summary plus cancellable bounded Hex/Text byte views
+  over real documents;
 - page list is populated from real MuPDF data;
 - first-page render preview is populated from real MuPDF data and render output
   is copied out through owned Rust buffers before C handles are dropped;
