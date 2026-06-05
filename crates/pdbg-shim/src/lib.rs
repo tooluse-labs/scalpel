@@ -26,6 +26,29 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn real_open_options() -> raw::pdbg_open_options {
+        raw::pdbg_open_options {
+            safe_mode: 1,
+            disable_javascript: 1,
+            enable_ocr: 0,
+            max_store_bytes: 64 * 1024 * 1024,
+            max_decoded_stream_bytes: 16 * 1024 * 1024,
+            max_filter_expansion_ratio: 100,
+            max_object_depth: 128,
+            repair_policy: raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT,
+        }
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn minimal_pdf_path() -> CString {
+        CString::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        ))
+        .unwrap()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_opens_minimal_pdf_and_returns_summary() {
         unsafe {
@@ -35,21 +58,8 @@ mod tests {
             assert_eq!(status, raw::pdbg_status::PDBG_OK);
             assert!(!ctx.is_null());
 
-            let fixture = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/synthetic/minimal.pdf"
-            );
-            let path = CString::new(fixture).unwrap();
-            let options = raw::pdbg_open_options {
-                safe_mode: 1,
-                disable_javascript: 1,
-                enable_ocr: 0,
-                max_store_bytes: 64 * 1024 * 1024,
-                max_decoded_stream_bytes: 16 * 1024 * 1024,
-                max_filter_expansion_ratio: 100,
-                max_object_depth: 128,
-                repair_policy: raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT,
-            };
+            let path = minimal_pdf_path();
+            let options = real_open_options();
 
             let mut doc: *mut raw::pdbg_doc = ptr::null_mut();
             let status = raw::pdbg_document_open(
@@ -151,6 +161,67 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_malformed_open_loop_preserves_exception_stack() {
+        unsafe {
+            let mut ctx: *mut raw::pdbg_context = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_context_new(&mut ctx, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert!(!ctx.is_null());
+
+            let temp_path = std::env::temp_dir().join(format!(
+                "pdbg-malformed-{}-{}.pdf",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&temp_path, b"this is deliberately not a pdf\n").unwrap();
+            let path = CString::new(temp_path.to_string_lossy().into_owned()).unwrap();
+            let options = real_open_options();
+
+            for _ in 0..128 {
+                let mut doc: *mut raw::pdbg_doc = ptr::null_mut();
+                let mut open_err = raw::pdbg_error::default();
+                let status = raw::pdbg_document_open(
+                    ctx,
+                    path.as_ptr(),
+                    ptr::null(),
+                    &options,
+                    &mut doc,
+                    &mut open_err,
+                );
+                assert!(matches!(
+                    status,
+                    raw::pdbg_status::PDBG_ERROR_FORMAT
+                        | raw::pdbg_status::PDBG_ERROR_UNSUPPORTED
+                        | raw::pdbg_status::PDBG_ERROR_GENERIC
+                ));
+                assert_eq!(open_err.status, status);
+                assert!(doc.is_null());
+            }
+
+            let good_path = minimal_pdf_path();
+            let mut good_doc: *mut raw::pdbg_doc = ptr::null_mut();
+            let status = raw::pdbg_document_open(
+                ctx,
+                good_path.as_ptr(),
+                ptr::null(),
+                &options,
+                &mut good_doc,
+                &mut err,
+            );
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert!(!good_doc.is_null());
+            raw::pdbg_document_drop(good_doc);
+            raw::pdbg_context_drop(ctx);
+            let _ = std::fs::remove_file(temp_path);
+        }
+    }
+
     #[cfg(all(feature = "real-mupdf", unix))]
     #[test]
     fn real_mupdf_open_fd_owns_dup_and_preserves_caller_fd() {
@@ -166,16 +237,7 @@ mod tests {
             );
             let file = std::fs::File::open(fixture).unwrap();
             let display_path = CString::new("minimal-fd.pdf").unwrap();
-            let options = raw::pdbg_open_options {
-                safe_mode: 1,
-                disable_javascript: 1,
-                enable_ocr: 0,
-                max_store_bytes: 64 * 1024 * 1024,
-                max_decoded_stream_bytes: 16 * 1024 * 1024,
-                max_filter_expansion_ratio: 100,
-                max_object_depth: 128,
-                repair_policy: raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT,
-            };
+            let options = real_open_options();
 
             let mut doc: *mut raw::pdbg_doc = ptr::null_mut();
             let status = raw::pdbg_document_open_fd(

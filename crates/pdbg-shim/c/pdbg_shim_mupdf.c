@@ -164,6 +164,12 @@ static void unlock_mutex(void *user, int lock)
     pthread_mutex_unlock(&ctx->locks[lock]);
 }
 
+static void ignore_mupdf_message(void *user, const char *message)
+{
+    (void)user;
+    (void)message;
+}
+
 static void destroy_locks(pdbg_context *ctx)
 {
     if (!ctx)
@@ -794,6 +800,8 @@ pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
         set_error(err, PDBG_ERROR_OOM, "failed to create MuPDF context");
         return PDBG_ERROR_OOM;
     }
+    fz_set_error_callback(ctx->ctx, ignore_mupdf_message, NULL);
+    fz_set_warning_callback(ctx->ctx, ignore_mupdf_message, NULL);
 
     pdbg_status status = PDBG_OK;
     fz_var(status);
