@@ -218,6 +218,10 @@ fn top_bar_chip(ui: &mut egui::Ui, label: &str, bg: Color32, fg: Color32) {
         });
 }
 
+fn option_text(value: Option<&str>) -> &str {
+    value.unwrap_or("-")
+}
+
 pub struct GuiShellApp {
     state: Result<AppState, String>,
     launched_at: Instant,
@@ -581,10 +585,10 @@ impl GuiShellApp {
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("hash");
-                            ui.monospace(format!("{:?}", summary.file_hash));
+                            ui.monospace(option_text(summary.file_hash.as_deref()));
                             ui.end_row();
                             ui.label("version");
-                            ui.monospace(format!("{:?}", summary.pdf_version));
+                            ui.monospace(option_text(summary.pdf_version.as_deref()));
                             ui.end_row();
                             ui.label("permissions");
                             ui.monospace(format!(
@@ -965,6 +969,12 @@ mod tests {
         model.hex_text.push_str("mutated");
         model.reset_hex_window();
         assert_eq!(model.hex_text, canonical);
+    }
+
+    #[test]
+    fn option_text_hides_rust_debug_wrappers() {
+        assert_eq!(option_text(Some("fake-hash")), "fake-hash");
+        assert_eq!(option_text(None), "-");
     }
 
     #[test]
