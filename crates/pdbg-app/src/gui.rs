@@ -15,6 +15,7 @@ const VIRTUAL_TREE_ROWS: usize = 1_000_000;
 const STREAM_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const HEX_WINDOW_BYTES: usize = 512;
 const COPY_LIMIT_BYTES: usize = 4096;
+const DEFAULT_RENDER_ZOOM: f32 = 2.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -249,6 +250,9 @@ pub struct GuiShellApp {
     real_detail_error: Option<String>,
     real_pages: Option<ChildPage<ObjectSummary>>,
     real_pages_error: Option<String>,
+    render_page_index: usize,
+    render_zoom: f32,
+    render_rotation_degrees: i32,
     real_render: Option<RenderResult>,
     real_render_error: Option<String>,
     real_render_texture: Option<egui::TextureHandle>,
@@ -272,7 +276,16 @@ impl GuiShellApp {
         let tree = TreeModel::from_state(&state, options.pdf_path.is_some());
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
         let (real_pages, real_pages_error) = load_initial_real_pages(&state, &tree);
-        let (real_render, real_render_error) = load_initial_real_render(&state, &tree);
+        let render_page_index = 0;
+        let render_zoom = DEFAULT_RENDER_ZOOM;
+        let render_rotation_degrees = 0;
+        let (real_render, real_render_error) = load_initial_real_render(
+            &state,
+            &tree,
+            render_page_index,
+            render_zoom,
+            render_rotation_degrees,
+        );
         let mut status_log = initial_status_log(&state, &tree, options.pdf_path.as_deref());
         if let Some(pages) = &real_pages {
             status_log.push(format!(
@@ -312,6 +325,9 @@ impl GuiShellApp {
             real_detail_error,
             real_pages,
             real_pages_error,
+            render_page_index,
+            render_zoom,
+            render_rotation_degrees,
             real_render,
             real_render_error,
             real_render_texture: None,
@@ -473,6 +489,59 @@ impl GuiShellApp {
         }
     }
 
+    fn page_count(&self) -> usize {
+        self.state
+            .as_ref()
+            .ok()
+            .and_then(|state| state.panels.summary.as_ref())
+            .map(|summary| summary.page_count)
+            .unwrap_or(0)
+    }
+
+    fn set_render_page(&mut self, page_index: usize) {
+        let page_count = self.page_count();
+        if page_count == 0 {
+            return;
+        }
+        let page_index = page_index.min(page_count - 1);
+        if self.render_page_index == page_index {
+            return;
+        }
+        self.render_page_index = page_index;
+        self.refresh_real_render();
+    }
+
+    fn refresh_real_render(&mut self) {
+        if !self.tree.is_real() || self.page_count() == 0 {
+            return;
+        }
+        self.real_render_texture = None;
+        let (render, error) = load_initial_real_render(
+            &self.state,
+            &self.tree,
+            self.render_page_index,
+            self.render_zoom,
+            self.render_rotation_degrees,
+        );
+        self.real_render = render;
+        self.real_render_error = error;
+        if let Some(render) = &self.real_render {
+            self.status_log.push(format!(
+                "rendered page {} @ {:.0}% rot {} -> {}x{}",
+                render.page_index + 1,
+                self.render_zoom * 100.0,
+                self.render_rotation_degrees,
+                render.width,
+                render.height
+            ));
+        } else if let Some(err) = &self.real_render_error {
+            self.status_log.push(format!(
+                "page {} render failed: {err}",
+                self.render_page_index + 1
+            ));
+        }
+    }
+
     fn document_chips(&self) -> (String, String, String) {
         if let Ok(state) = &self.state {
             if let Some(summary) = &state.panels.summary {
@@ -585,6 +654,9 @@ fn load_initial_real_pages(
 fn load_initial_real_render(
     state: &Result<AppState, String>,
     tree: &TreeModel,
+    page_index: usize,
+    zoom: f32,
+    rotation_degrees: i32,
 ) -> (Option<RenderResult>, Option<String>) {
     if !tree.is_real() {
         return (None, None);
@@ -599,8 +671,9 @@ fn load_initial_real_render(
         return (None, None);
     }
 
-    let mut request = RenderRequest::page(0);
-    request.zoom = 2.0;
+    let mut request = RenderRequest::page(page_index);
+    request.zoom = zoom;
+    request.rotation_degrees = rotation_degrees;
     match state
         .session
         .run_task(|document| document.render_page(&request))
@@ -1158,6 +1231,7 @@ impl GuiShellApp {
     }
 
     fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
+        self.draw_real_render_controls(ui);
         self.draw_real_page_list(ui);
         if let Some(err) = &self.real_render_error {
             ui.colored_label(PdbgTheme::ERROR_FG, err);
@@ -1209,10 +1283,86 @@ impl GuiShellApp {
         true
     }
 
-    fn draw_real_page_list(&self, ui: &mut egui::Ui) {
+    fn draw_real_render_controls(&mut self, ui: &mut egui::Ui) {
+        let page_count = self.page_count();
+        if page_count == 0 {
+            return;
+        }
+
+        let mut rerender = false;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(self.render_page_index > 0, egui::Button::new("Prev"))
+                .clicked()
+            {
+                self.render_page_index -= 1;
+                rerender = true;
+            }
+            ui.label(
+                RichText::new(format!(
+                    "Page {} / {page_count}",
+                    self.render_page_index + 1
+                ))
+                .small()
+                .color(PdbgTheme::MUTED),
+            );
+            if ui
+                .add_enabled(
+                    self.render_page_index + 1 < page_count,
+                    egui::Button::new("Next"),
+                )
+                .clicked()
+            {
+                self.render_page_index += 1;
+                rerender = true;
+            }
+
+            ui.separator();
+            egui::ComboBox::from_id_salt("render_zoom")
+                .selected_text(format!("{:.0}%", self.render_zoom * 100.0))
+                .show_ui(ui, |ui| {
+                    for zoom in [0.5_f32, 1.0, 1.5, 2.0, 3.0, 4.0] {
+                        if ui
+                            .selectable_value(
+                                &mut self.render_zoom,
+                                zoom,
+                                format!("{:.0}%", zoom * 100.0),
+                            )
+                            .changed()
+                        {
+                            rerender = true;
+                        }
+                    }
+                });
+            egui::ComboBox::from_id_salt("render_rotation")
+                .selected_text(format!("{} deg", self.render_rotation_degrees))
+                .show_ui(ui, |ui| {
+                    for rotation in [0, 90, 180, 270] {
+                        if ui
+                            .selectable_value(
+                                &mut self.render_rotation_degrees,
+                                rotation,
+                                format!("{rotation} deg"),
+                            )
+                            .changed()
+                        {
+                            rerender = true;
+                        }
+                    }
+                });
+        });
+        if rerender {
+            self.refresh_real_render();
+        }
+        ui.add_space(6.0);
+    }
+
+    fn draw_real_page_list(&mut self, ui: &mut egui::Ui) {
         if self.real_pages.is_none() && self.real_pages_error.is_none() {
             return;
         }
+
+        let mut clicked_page = None;
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Pages").small().color(PdbgTheme::MUTED));
@@ -1231,31 +1381,33 @@ impl GuiShellApp {
                 .unwrap_or(0);
             for (index, page) in pages.items.iter().enumerate().take(12) {
                 let selected = index == selected_page;
-                egui::Frame::new()
-                    .fill(if selected {
-                        PdbgTheme::SELECTED_BG
-                    } else {
-                        PdbgTheme::CHIP_BG
-                    })
-                    .stroke(egui::Stroke::new(
-                        if selected { 1.5 } else { 1.0 },
-                        if selected {
-                            PdbgTheme::ACCENT
-                        } else {
-                            PdbgTheme::BORDER
-                        },
-                    ))
-                    .corner_radius(3)
-                    .inner_margin(egui::Margin::symmetric(7, 3))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(&page.label).monospace().size(11.0).color(
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(&page.label).monospace().size(11.0).color(
                             if selected {
                                 PdbgTheme::ACCENT
                             } else {
                                 PdbgTheme::TEXT
                             },
-                        ));
-                    });
+                        ))
+                        .fill(if selected {
+                            PdbgTheme::SELECTED_BG
+                        } else {
+                            PdbgTheme::CHIP_BG
+                        })
+                        .stroke(egui::Stroke::new(
+                            if selected { 1.5 } else { 1.0 },
+                            if selected {
+                                PdbgTheme::ACCENT
+                            } else {
+                                PdbgTheme::BORDER
+                            },
+                        )),
+                    )
+                    .clicked()
+                {
+                    clicked_page = Some(index);
+                }
             }
             ui.label(
                 RichText::new(child_page_detail(pages.total, pages.items.len()))
@@ -1263,6 +1415,9 @@ impl GuiShellApp {
                     .color(PdbgTheme::MUTED),
             );
         });
+        if let Some(page_index) = clicked_page {
+            self.set_render_page(page_index);
+        }
         ui.add_space(6.0);
     }
 
@@ -2543,6 +2698,43 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_page_controls_refresh_render_parameters() {
+        let path = write_temp_pdf("gui-pages", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+
+        assert_eq!(app.page_count(), 2);
+        assert_eq!(app.real_pages.as_ref().unwrap().total, Some(2));
+        assert_eq!(app.real_pages.as_ref().unwrap().items[1].label, "Page 2");
+        let initial = app.real_render.as_ref().unwrap();
+        assert_eq!(initial.page_index, 0);
+        assert_eq!((initial.width, initial.height), (400, 200));
+
+        app.render_zoom = 1.0;
+        app.refresh_real_render();
+        let zoomed = app.real_render.as_ref().unwrap();
+        assert_eq!(zoomed.page_index, 0);
+        assert_eq!((zoomed.width, zoomed.height), (200, 100));
+
+        app.set_render_page(1);
+        let second_page = app.real_render.as_ref().unwrap();
+        assert_eq!(second_page.page_index, 1);
+        assert_eq!((second_page.width, second_page.height), (100, 200));
+
+        app.set_render_page(99);
+        assert_eq!(app.render_page_index, 1);
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("rendered page 2 @ 100%")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn reference_navigation_uses_back_forward_history() {
         let mut app = GuiShellApp::new();
@@ -2683,6 +2875,63 @@ mod tests {
         pdf.push_str(&format!(
             "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{xref_offset}\n%%EOF\n",
             object_count + 1
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_two_page_pdf() -> Vec<u8> {
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize; 7];
+        let push_object = |pdf: &mut String, offsets: &mut [usize], number: usize, body: &str| {
+            offsets[number] = pdf.len();
+            pdf.push_str(&format!("{number} 0 obj\n{body}\nendobj\n"));
+        };
+
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            "<< /Type /Catalog /Pages 2 0 R >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            "<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 5 0 R >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] /Contents 6 0 R >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            5,
+            "<< /Length 0 >>\nstream\n\nendstream",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            6,
+            "<< /Length 0 >>\nstream\n\nendstream",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 7\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 7 >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }
