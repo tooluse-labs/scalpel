@@ -3,9 +3,10 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    escape_pdf_text, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
-    NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary, ObjectValue, RenderRequest,
-    RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary, StreamViewMode,
+    escape_pdf_text, ChildContainer, ChildPage, ChildRange, DiagnosticSeverity, EgressFormat,
+    EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary,
+    ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary,
+    StreamViewMode,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -246,6 +247,8 @@ pub struct GuiShellApp {
     selected_tab: InspectorTab,
     real_detail: Option<ObjectDetail>,
     real_detail_error: Option<String>,
+    real_pages: Option<ChildPage<ObjectSummary>>,
+    real_pages_error: Option<String>,
     real_render: Option<RenderResult>,
     real_render_error: Option<String>,
     real_render_texture: Option<egui::TextureHandle>,
@@ -268,8 +271,17 @@ impl GuiShellApp {
         let state = open_app_state(options.pdf_path.as_deref());
         let tree = TreeModel::from_state(&state, options.pdf_path.is_some());
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
+        let (real_pages, real_pages_error) = load_initial_real_pages(&state, &tree);
         let (real_render, real_render_error) = load_initial_real_render(&state, &tree);
         let mut status_log = initial_status_log(&state, &tree, options.pdf_path.as_deref());
+        if let Some(pages) = &real_pages {
+            status_log.push(format!(
+                "loaded page list {}",
+                child_page_detail(pages.total, pages.items.len())
+            ));
+        } else if let Some(err) = &real_pages_error {
+            status_log.push(format!("page list load failed: {err}"));
+        }
         if let Some(render) = &real_render {
             status_log.push(format!(
                 "rendered page preview {}x{}",
@@ -298,6 +310,8 @@ impl GuiShellApp {
             selected_tab: InspectorTab::Object,
             real_detail,
             real_detail_error,
+            real_pages,
+            real_pages_error,
             real_render,
             real_render_error,
             real_render_texture: None,
@@ -534,6 +548,35 @@ fn load_initial_real_detail(
         Ok(state) => match load_object_detail(state, &summary.id) {
             Ok(detail) => (Some(detail), None),
             Err(err) => (None, Some(err)),
+        },
+        Err(err) => (None, Some(err.clone())),
+    }
+}
+
+fn load_initial_real_pages(
+    state: &Result<AppState, String>,
+    tree: &TreeModel,
+) -> (Option<ChildPage<ObjectSummary>>, Option<String>) {
+    let TreeModel::Real(tree) = tree else {
+        return (None, None);
+    };
+    let Some(page_root) = tree.page_root_summary() else {
+        return (None, None);
+    };
+
+    match state {
+        Ok(state) => match state.session.run_task(|document| {
+            document.children(
+                &page_root.id,
+                ChildRange {
+                    offset: 0,
+                    limit: 64,
+                },
+                ChildContainer::Array,
+            )
+        }) {
+            Ok(pages) => (Some(pages), None),
+            Err(err) => (None, Some(err.message)),
         },
         Err(err) => (None, Some(err.clone())),
     }
@@ -1115,6 +1158,7 @@ impl GuiShellApp {
     }
 
     fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
+        self.draw_real_page_list(ui);
         if let Some(err) = &self.real_render_error {
             ui.colored_label(PdbgTheme::ERROR_FG, err);
             return true;
@@ -1163,6 +1207,63 @@ impl GuiShellApp {
             );
         });
         true
+    }
+
+    fn draw_real_page_list(&self, ui: &mut egui::Ui) {
+        if self.real_pages.is_none() && self.real_pages_error.is_none() {
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Pages").small().color(PdbgTheme::MUTED));
+            if let Some(err) = &self.real_pages_error {
+                ui.colored_label(PdbgTheme::ERROR_FG, err);
+                return;
+            }
+
+            let Some(pages) = &self.real_pages else {
+                return;
+            };
+            let selected_page = self
+                .real_render
+                .as_ref()
+                .map(|render| render.page_index)
+                .unwrap_or(0);
+            for (index, page) in pages.items.iter().enumerate().take(12) {
+                let selected = index == selected_page;
+                egui::Frame::new()
+                    .fill(if selected {
+                        PdbgTheme::SELECTED_BG
+                    } else {
+                        PdbgTheme::CHIP_BG
+                    })
+                    .stroke(egui::Stroke::new(
+                        if selected { 1.5 } else { 1.0 },
+                        if selected {
+                            PdbgTheme::ACCENT
+                        } else {
+                            PdbgTheme::BORDER
+                        },
+                    ))
+                    .corner_radius(3)
+                    .inner_margin(egui::Margin::symmetric(7, 3))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(&page.label).monospace().size(11.0).color(
+                            if selected {
+                                PdbgTheme::ACCENT
+                            } else {
+                                PdbgTheme::TEXT
+                            },
+                        ));
+                    });
+            }
+            ui.label(
+                RichText::new(child_page_detail(pages.total, pages.items.len()))
+                    .small()
+                    .color(PdbgTheme::MUTED),
+            );
+        });
+        ui.add_space(6.0);
     }
 
     fn draw_inspector(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1820,6 +1921,18 @@ impl RealObjectTree {
         self.rows.get(row).map(|row| &row.summary)
     }
 
+    fn page_root_summary(&self) -> Option<&ObjectSummary> {
+        self.rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    &row.summary.id,
+                    NodeId::DictEntry { key, .. } if key == "Pages"
+                ) || matches!(&row.summary.id, NodeId::PageRoot { .. })
+            })
+            .map(|row| &row.summary)
+    }
+
     fn row_label(&self, row: usize) -> String {
         self.summary(row)
             .map(summary_inline_text)
@@ -2320,9 +2433,16 @@ mod tests {
         assert_eq!(app.tree.row_count(), 4);
         assert_eq!(app.tree.row_count_label(), "4 loaded / 4 total");
         assert!(app.real_detail.is_some());
+        let pages = app.real_pages.as_ref().unwrap();
+        assert_eq!(pages.total, Some(1));
+        assert_eq!(pages.items[0].label, "Page 1");
         assert!(app.real_render.is_some());
         assert!(app.breadcrumb_label().contains("Trailer"));
         assert!(app.status_log[0].contains("real MuPDF opened"));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("loaded page list")));
         assert!(app
             .status_log
             .iter()
@@ -2451,8 +2571,14 @@ mod tests {
     fn fake_shell_keeps_mock_page_preview() {
         let app = GuiShellApp::new();
         assert!(!app.tree.is_real());
+        assert!(app.real_pages.is_none());
+        assert!(app.real_pages_error.is_none());
         assert!(app.real_render.is_none());
         assert!(app.real_render_error.is_none());
+        assert!(!app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("loaded page list")));
         assert!(!app
             .status_log
             .iter()
