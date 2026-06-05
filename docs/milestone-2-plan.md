@@ -1,14 +1,15 @@
 # Milestone 2 Streams And Pages Plan
 
-Status: in progress on 2026-06-05. The stream byte slice is implemented for the
-macOS developer path behind the existing opt-in `real-mupdf` feature; page
-rendering and cancellation are not implemented yet.
+Status: in progress on 2026-06-05. The stream byte slice and first-page render
+preview are implemented for the macOS developer path behind the existing opt-in
+`real-mupdf` feature; page-list population and cancellation are not implemented
+yet.
 
 Milestone 2 turns the M1 inspect-only debugger into a byte-and-page inspector:
 raw/decoded stream chunks, stream presentation modes, page list/render preview,
 and cancellation boundaries. The default workspace gate must remain MuPDF-free.
 
-## Completed Stream Slice
+## Completed Stream And Render Slices
 
 - Real `pdbg_stream_load` is wired to MuPDF streaming APIs:
   `pdf_open_raw_stream_number` for raw decrypted-compressed bytes and
@@ -28,35 +29,46 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
 - Stream presentation is modeled as two axes:
   - decode layer: `StreamMode::Raw` / `StreamMode::Decoded`;
   - display mode: `StreamViewMode::Hex` / `Text` / `Bytes`.
+- Real `pdbg_page_render` is wired to MuPDF page rendering with bounded render
+  options, max pixel/output-byte guards, owned `pdbg_image` pixels, and
+  post-render grayscale/inverted RGBA transforms.
+- Core real-mupdf tests cover successful first-page RGBA output, image-buffer
+  ownership via accessors, and render pixel-limit failure.
+- The GUI Page Preview panel now loads a bounded first-page render for real
+  documents, uploads it as an egui texture, logs success/failure, and keeps the
+  existing mock preview for the fake shell path.
 
 ## Remaining M2 Work
 
 - Page list populated from real MuPDF data rather than only object-tree page
   roots.
-- Page render preview using the existing `pdbg_page_render` ABI and bounded
-  render options.
-- Render-result ownership and image-buffer accessor tests on the real shim.
 - Cancellation plumbing for long stream/render operations, including a clean
   `PDBG_ERROR_CANCELLED` path and no poisoned MuPDF state after cancellation.
+- Page preview controls beyond the initial bounded first-page render:
+  page navigation, zoom/rotation controls, and texture invalidation keyed by
+  page/render options.
 - Optional stream-view polish after real PDFs are exercised:
   syntax-highlighted "nice" content-stream view, richer binary/text affordances,
   and selected-byte copy beyond visible-chunk copy.
 
 ## Validation Record
 
-Latest local validation after the stream slice:
+Latest local validation after the stream and first-page render slices:
 
 ```sh
 PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
 sh scripts/run_m1_real_gate.sh
 ```
 
-That gate currently covers the implemented M2 stream slice in addition to the
-M1 open/inspect baseline:
+That gate currently covers the implemented M2 stream and render slices in
+addition to the M1 open/inspect baseline:
 
 - real shim/core stream tests for raw and decoded chunks;
 - decoded stream limit enforcement during read;
 - real GUI stream chunk loading and Hex/Text/Bytes presentation tests;
+- real shim/core render tests for owned first-page RGBA pixels and pixel-limit
+  enforcement;
+- real GUI first-page render loading and stride-aware texture upload tests;
 - the full default M0 local gate, proving the MuPDF-free floor still holds.
 
 ## M2 Exit Gate
@@ -67,9 +79,9 @@ M2 is complete when:
   memory and correct raw/decoded semantics;
 - the GUI exposes stream summary plus bounded Hex/Text byte views over real
   documents;
-- page list and first-page render preview are populated from real MuPDF data;
-- render output is copied out through owned Rust buffers before C handles are
-  dropped;
+- page list is populated from real MuPDF data;
+- first-page render preview is populated from real MuPDF data and render output
+  is copied out through owned Rust buffers before C handles are dropped;
 - cancellation returns cleanly for at least one long stream or render operation;
 - the default local gate still passes without linking MuPDF.
 
