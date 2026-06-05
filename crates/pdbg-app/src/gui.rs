@@ -342,6 +342,24 @@ impl GuiShellApp {
         self.follow_reference(row);
     }
 
+    fn expand_selected_real_row(&mut self) -> usize {
+        let Some(detail) = self.real_detail.clone() else {
+            return 0;
+        };
+        let inserted = match &mut self.tree {
+            TreeModel::Real(tree) => tree.expand_row_from_detail(self.selected_row, &detail),
+            TreeModel::Virtual(_) => 0,
+        };
+        if inserted > 0 {
+            self.status_log.push(format!(
+                "expanded {} bounded children under {}",
+                inserted,
+                self.tree.row_label(self.selected_row)
+            ));
+        }
+        inserted
+    }
+
     fn refresh_real_detail_for_selection(&mut self) {
         let TreeModel::Real(tree) = &self.tree else {
             return;
@@ -1045,6 +1063,17 @@ impl GuiShellApp {
                 });
         });
 
+        if detail.dictionary_entries.is_some() || detail.array_entries.is_some() {
+            ui.add_space(8.0);
+            if ui
+                .button("Expand bounded children")
+                .on_hover_text("Append only the loaded child page to the tree")
+                .clicked()
+            {
+                self.expand_selected_real_row();
+            }
+        }
+
         let references = detail_reference_targets(&detail);
         if !references.is_empty() {
             ui.add_space(8.0);
@@ -1371,6 +1400,7 @@ struct RealObjectTree {
 struct RealTreeRow {
     summary: ObjectSummary,
     depth: usize,
+    expanded: bool,
 }
 
 impl RealObjectTree {
@@ -1380,7 +1410,11 @@ impl RealObjectTree {
                 .items
                 .iter()
                 .cloned()
-                .map(|summary| RealTreeRow { summary, depth: 0 })
+                .map(|summary| RealTreeRow {
+                    summary,
+                    depth: 0,
+                    expanded: false,
+                })
                 .collect(),
             total: page.total,
         }
@@ -1486,6 +1520,7 @@ impl RealObjectTree {
                 diagnostics: Vec::new(),
             },
             depth: 0,
+            expanded: false,
         });
         self.rows.len() - 1
     }
@@ -1512,6 +1547,37 @@ impl RealObjectTree {
                     .and_then(|entries| entries.total)
             });
         row.summary.diagnostics = detail.diagnostics.clone();
+    }
+
+    fn expand_row_from_detail(&mut self, row: usize, detail: &ObjectDetail) -> usize {
+        let Some(parent) = self.rows.get_mut(row) else {
+            return 0;
+        };
+        if parent.expanded {
+            return 0;
+        }
+        parent.expanded = true;
+        let child_depth = parent.depth + 1;
+
+        let mut children = Vec::new();
+        if let Some(entries) = &detail.dictionary_entries {
+            children.extend(entries.items.iter().map(|entry| RealTreeRow {
+                summary: entry.value.clone(),
+                depth: child_depth,
+                expanded: false,
+            }));
+        }
+        if let Some(entries) = &detail.array_entries {
+            children.extend(entries.items.iter().cloned().map(|summary| RealTreeRow {
+                summary,
+                depth: child_depth,
+                expanded: false,
+            }));
+        }
+
+        let inserted = children.len();
+        self.rows.splice(row + 1..row + 1, children);
+        inserted
     }
 }
 
@@ -1825,6 +1891,70 @@ mod tests {
         assert!(app.status_log[0].contains("real MuPDF opened"));
     }
 
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_large_pdf_smoke_keeps_tree_bounded_and_records_timings() {
+        let path = write_temp_pdf("gui-large", &synthetic_large_xref_pdf(1_500));
+        let open_start = Instant::now();
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        let open_elapsed = open_start.elapsed();
+
+        let xref_size = app
+            .state
+            .as_ref()
+            .unwrap()
+            .panels
+            .summary
+            .as_ref()
+            .unwrap()
+            .xref_size;
+        assert!(xref_size > 1_000);
+        assert_eq!(app.tree.row_count(), 4);
+
+        let xref_expand_start = Instant::now();
+        app.select_row_from_tree(3);
+        let xref_inserted = app.expand_selected_real_row();
+        let xref_elapsed = xref_expand_start.elapsed();
+        assert_eq!(xref_inserted, 64);
+        assert!(app.tree.row_count() < xref_size / 10);
+
+        let pages_expand_start = Instant::now();
+        app.select_row_from_tree(2);
+        let pages_inserted = app.expand_selected_real_row();
+        let pages_elapsed = pages_expand_start.elapsed();
+        assert_eq!(pages_inserted, 1);
+
+        let jump_start = Instant::now();
+        app.follow_real_reference(ObjectId { num: 1, gen: 0 });
+        let jump_elapsed = jump_start.elapsed();
+        assert_eq!(
+            app.real_detail.as_ref().and_then(|detail| detail.object),
+            Some(ObjectId { num: 1, gen: 0 })
+        );
+        assert!(app.tree.row_count() < xref_size / 10);
+        assert!(open_elapsed < Duration::from_secs(5));
+        assert!(xref_elapsed < Duration::from_secs(2));
+        assert!(pages_elapsed < Duration::from_secs(2));
+        assert!(jump_elapsed < Duration::from_secs(2));
+
+        app.status_log.push(format!(
+            "large smoke timings: open={}ms xref_expand={}ms pages_expand={}ms jump={}ms",
+            open_elapsed.as_millis(),
+            xref_elapsed.as_millis(),
+            pages_elapsed.as_millis(),
+            jump_elapsed.as_millis()
+        ));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("large smoke timings:")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn reference_navigation_uses_back_forward_history() {
         let mut app = GuiShellApp::new();
@@ -1871,5 +2001,83 @@ mod tests {
             PdbgTheme::severity_fg(&DiagnosticSeverity::Error),
             PdbgTheme::ERROR_FG
         );
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn write_temp_pdf(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let temp_path = std::env::temp_dir().join(format!(
+            "pdbg-app-{}-{}-{}.pdf",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp_path, bytes).unwrap();
+        temp_path
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_large_xref_pdf(object_count: usize) -> Vec<u8> {
+        let object_count = object_count.max(8);
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = vec![0usize; object_count + 1];
+        let push_object = |pdf: &mut String, offsets: &mut [usize], number: usize, body: &str| {
+            offsets[number] = pdf.len();
+            pdf.push_str(&format!("{number} 0 obj\n{body}\nendobj\n"));
+        };
+
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            "<< /Type /Catalog /Pages 2 0 R /Names 5 0 R >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+        );
+        let stream = "BT /F1 12 Tf 24 120 Td (pdbg large smoke) Tj ET";
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            &format!(
+                "<< /Length {} >>\nstream\n{}\nendstream",
+                stream.len(),
+                stream
+            ),
+        );
+        push_object(&mut pdf, &mut offsets, 5, "<< /Dests 6 0 R >>");
+        for number in 6..=object_count {
+            let prev = if number == 6 { 1 } else { number - 1 };
+            push_object(
+                &mut pdf,
+                &mut offsets,
+                number,
+                &format!("<< /Index {number} /Prev {prev} 0 R /Name /Node{number} >>"),
+            );
+        }
+
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", object_count + 1));
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            object_count + 1
+        ));
+        pdf.into_bytes()
     }
 }
