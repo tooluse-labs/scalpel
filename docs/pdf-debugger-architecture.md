@@ -1626,6 +1626,8 @@ The UI state stores:
 - open document ids;
 - selected node id;
 - expanded tree nodes;
+- navigation history: a back/forward stack of visited `NodeId`s (browser-style),
+  so the user can retrace cross-reference jumps;
 - current page index;
 - zoom and rotation;
 - active stream view mode;
@@ -1633,6 +1635,18 @@ The UI state stores:
 - async task states.
 
 The UI state does not store MuPDF pointers or borrowed buffers.
+
+Indirect references are first-class navigation. When the inspector shows a value
+that is an indirect reference (for example `3 0 R`), it is rendered as a
+clickable link; activating it resolves the reference via `NodeModel::resolve_ref`
+to a `NodeId`, selects and expands that node in the tree, and pushes the prior
+selection onto the back stack. The toolbar exposes back/forward controls bound to
+the navigation history.
+
+Any text the UI copies or exports from document content (object values, stream
+excerpts, reports) is PDF-controlled and therefore untrusted: it must pass
+through the egress escaping rules in Section 9 (bounded plain text, no inlined
+active content) rather than being copied raw.
 
 ## 11. Diagnostics Model
 
@@ -1868,14 +1882,19 @@ egui, this spike stands up the real shell over the existing `FakeShim` and
 proves egui can carry the dense-debugger UX — while the cost is a fake-shim
 spike, not a mid-M3 rewrite.
 
+Implementation status is tracked in `docs/milestone-1-ui-shell-spike.md`.
+
 - A real `eframe` window rendering the Section 10 four-panel layout (document
   tree | page preview | object inspector / stream / diagnostics | log), driven
   by `AppState` over `FakeShim` (no real MuPDF).
-- The three highest-risk interactions exercised against fake data:
+- The highest-risk interactions exercised against fake data:
   - a virtualized lazy object tree backed by ~1,000,000 fake nodes that expands
     and scrolls without materializing or re-hashing the whole set per frame;
   - a hex / stream pane over a large fake buffer with text selection and
     egress-escaped copy of a bounded excerpt;
+  - indirect-reference cross-jump: clicking a reference value (e.g. `3 0 R`) in
+    the inspector resolves it, then selects and expands the target node in the
+    tree, with working back/forward navigation history (per Section 10.2);
   - resizable split panes / docking and HiDPI-correct rendering.
 - A recorded go/no-go: egui carries these interactions, or an alternative
   (retained-mode toolkit, or Tauri/web) is chosen now.

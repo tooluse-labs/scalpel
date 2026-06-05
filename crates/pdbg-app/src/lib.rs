@@ -4,6 +4,9 @@ use pdbg_core::{
     NodeId, ObjectSummary, OpenDocument, SafeModeConfig, ShimDocument, ShimError,
 };
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 pub struct AppState {
     session: DocumentSession<OpenDocument>,
     pub safe_mode: SafeModeConfig,

@@ -1,4 +1,13 @@
 fn main() {
+    if std::env::args().any(|arg| arg == "--gui") {
+        run_gui();
+        return;
+    }
+
+    run_headless();
+}
+
+fn run_headless() {
     match pdbg_app::AppState::new_headless() {
         Ok(state) => {
             let file = state
@@ -14,4 +23,19 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+#[cfg(feature = "gui")]
+fn run_gui() {
+    if let Err(err) = pdbg_app::gui::run_gui() {
+        eprintln!("pdbg-app GUI failed: {err}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn run_gui() {
+    eprintln!("pdbg-app GUI is behind the optional `gui` feature");
+    eprintln!("run: cargo run -p pdbg-app --features gui -- --gui");
+    std::process::exit(2);
 }

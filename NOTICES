@@ -22,6 +22,11 @@ notices, local patches, and corresponding-source instructions.
 
 ## Rust Toolchain
 
-The Milestone 0 workspace currently depends only on the Rust standard library
-and local workspace crates. No third-party Rust crates are listed in
-`Cargo.lock`.
+The Milestone 0 default workspace build currently depends only on the Rust
+standard library and local workspace crates.
+
+Optional post-M0 features may add third-party crates to `Cargo.lock`. They are
+not part of the default M0 resolve graph unless their feature is enabled. Before
+any optional feature becomes a required build or shipped distribution target,
+this file must be regenerated to include that feature's exact third-party
+dependency notices.
