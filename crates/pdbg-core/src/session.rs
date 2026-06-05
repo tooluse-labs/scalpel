@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_sessions_drive_shared_store_from_worker_threads() {
+    fn multiple_sessions_account_shared_store_from_worker_threads() {
         let shim = FakeShim::new().unwrap();
         let shared_store = shim.shared_store();
         let sessions = [

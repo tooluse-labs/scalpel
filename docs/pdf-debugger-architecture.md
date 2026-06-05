@@ -1859,6 +1859,32 @@ Acceptance checklist:
   fixtures live, how license-sensitive files are excluded, and how regressions
   are added.
 
+### Milestone 1.0: UI Shell Spike
+
+The UI engine (egui) is named throughout this document but is not yet validated:
+M0 ships `pdbg-app` as a headless app-state crate with no `egui`/`eframe`
+dependency and no window. Before Milestones 1-5 build feature panels on top of
+egui, this spike stands up the real shell over the existing `FakeShim` and
+proves egui can carry the dense-debugger UX — while the cost is a fake-shim
+spike, not a mid-M3 rewrite.
+
+- A real `eframe` window rendering the Section 10 four-panel layout (document
+  tree | page preview | object inspector / stream / diagnostics | log), driven
+  by `AppState` over `FakeShim` (no real MuPDF).
+- The three highest-risk interactions exercised against fake data:
+  - a virtualized lazy object tree backed by ~1,000,000 fake nodes that expands
+    and scrolls without materializing or re-hashing the whole set per frame;
+  - a hex / stream pane over a large fake buffer with text selection and
+    egress-escaped copy of a bounded excerpt;
+  - resizable split panes / docking and HiDPI-correct rendering.
+- A recorded go/no-go: egui carries these interactions, or an alternative
+  (retained-mode toolkit, or Tauri/web) is chosen now.
+
+Exit gate: the four-panel window launches, the three risk interactions are
+demonstrably smooth on the fake corpus, and the egui-vs-alternative decision is
+recorded. Headless CI keeps testing app-state; the window itself runs locally or
+in an optional, non-required GUI job.
+
 ### Milestone 1: Open And Inspect
 
 - Open PDF.

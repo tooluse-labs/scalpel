@@ -11,5 +11,5 @@ cargo test -p pdbg-core object_value_string_bytes_preserve_raw_bytes_as_authorit
 cargo test -p pdbg-core stream_summary_converts_filters_sizes_and_capability_flags
 cargo test -p pdbg-core diagnostic_conversion_resolves_node_page_and_object_fields
 cargo test -p pdbg-core c_invoked_rust_callback_catches_panic_before_returning_to_c
-cargo test -p pdbg-core multiple_sessions_drive_shared_store_from_worker_threads
+cargo test -p pdbg-core multiple_sessions_account_shared_store_from_worker_threads
 cargo test -p pdbg-core cloned_document_session_serializes_concurrent_tasks

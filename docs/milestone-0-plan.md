@@ -124,6 +124,9 @@ Deferred to Milestone 1:
 - Native egui window/GPU smoke beyond the M0 headless app-state check.
 - True coverage-guided fuzzing; M0's `fuzz-smoke` job is deterministic contract
   smoke, not a fuzzer.
+- Low-risk contract nits intentionally left for the next ABI/product touch:
+  optional `StreamChunk.total_size` wire flag, preserving `mupdf_code` in public
+  errors, MCP page-index / range-message polish, and Markdown `<` escaping.
 
 ## Two load-bearing principles (they decide the whole order)
 
@@ -157,9 +160,9 @@ xreflab/  (cargo virtual workspace)
 │                             tests + the synthetic fixture corpus. (A real test
 │                             crate — a root tests/ dir would NOT run under a
 │                             virtual workspace.)
-├─ crates/pdbg-app            egui binary: HEADLESS app-state smoke only
-│                             (panel construction + FakeShim command loop). No
-│                             real window/GPU at M0.
+├─ crates/pdbg-app            headless app-state crate (NO egui dep at M0):
+│                             panel construction + FakeShim command loop. The
+│                             real egui window is the M1.0 UI Shell Spike.
 └─ crates/pdbg-mcp            MCP tool-contract core: allowlist, artifact store,
                              tool input/output schema. No transport / server
                              lifecycle at M0.
@@ -185,8 +188,9 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
    Milestone 1 activates it against the real C shim and supplements it with
    MuPDF-backed malformed-PDF loop tests.
 5. **egui headless smoke tests app-state, not a window/GPU** — panel
-   construction + FakeShim-driven command loop only; a real native-window smoke
-   is deferred so CI doesn't go brittle on platform graphics.
+   construction + FakeShim-driven command loop only; the real egui window (and
+   its validation) is the **M1.0 UI Shell Spike** in architecture §13, so CI
+   doesn't go brittle on platform graphics at M0.
 6. **`pdbg-mcp` is a tool-contract core, not a server** — allowlist + artifact
    store + tool I/O schema only; no full MCP server lifecycle at M0.
 7. **C7b node-token registry is a shared prerequisite, not a golden-test
@@ -431,8 +435,8 @@ Everything else fans out from this spine. Real MuPDF is not on it.
   ASAN/UBSan; `open_fd` ownership; decode-time `PDBG_ERROR_LIMIT`; callback panic
   policy.
 - Egress escaping; MCP allowlist + artifact store.
-- Concurrency smoke clean under TSan; fuzz + ASAN/UBSan/TSan jobs green (tiny
-  corpus OK).
+- Concurrency smoke clean under TSan; deterministic contract-smoke +
+  ASAN/UBSan/TSan jobs green (tiny corpus OK).
 - Headless egui app-state smoke launches over FakeShim.
 - **All of the above CI jobs marked required on the default branch (T6.1).**
 
@@ -444,3 +448,8 @@ malformed-PDF `fz_try`/`fz_catch` integrity loop (replaces the M0 static-gate
 scaffold); MuPDF-backed concurrent open/traversal over a real `fz_locks_context`
 (replaces the fake-store concurrency smoke). The danger to manage: keep the
 `FakeShim` ABI-faithful so the M1 swap stays a drop-in.
+
+Known low-risk tail deferred with that work: adding an explicit wire flag for
+unknown `StreamChunk.total_size`, preserving `mupdf_code` where public errors
+need it, tightening MCP page-index/range diagnostics, and making Markdown egress
+escape `<` symmetrically with HTML output.
