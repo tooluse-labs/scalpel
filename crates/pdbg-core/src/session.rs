@@ -168,7 +168,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fake"))]
 mod tests {
     use super::*;
     use crate::{FakeShim, Shim};

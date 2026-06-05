@@ -113,6 +113,40 @@ impl Shim for FakeShim {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
+pub struct RealMuPdfShim {
+    ctx: PdbgContext,
+}
+
+#[cfg(feature = "real-mupdf")]
+impl RealMuPdfShim {
+    pub fn new() -> Result<Self, ShimError> {
+        Ok(Self {
+            ctx: PdbgContext::new()?,
+        })
+    }
+
+    pub fn open_document_with_config(
+        &self,
+        path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<OpenDocument, ShimError> {
+        Ok(OpenDocument {
+            doc: self.ctx.open_raw_document_with_config(path, config)?,
+            registry: NodeTokenRegistry::default(),
+        })
+    }
+}
+
+#[cfg(feature = "real-mupdf")]
+impl Shim for RealMuPdfShim {
+    type Document = OpenDocument;
+
+    fn open_document(&self, path: &str) -> Result<Self::Document, ShimError> {
+        self.open_document_with_config(path, &SafeModeConfig::default())
+    }
+}
+
 pub struct OpenDocument {
     doc: PdbgDoc,
     registry: NodeTokenRegistry,
@@ -824,6 +858,7 @@ fn page_index_to_u32(page_index: usize) -> Result<u32, ShimError> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "fake")]
     #[test]
     fn fake_shim_returns_document_summary() {
         let shim = FakeShim::new().unwrap();
@@ -849,6 +884,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fake")]
     #[test]
     fn fake_document_exposes_children_detail_stream_render_and_text() {
         let shim = FakeShim::new().unwrap();
@@ -895,6 +931,7 @@ mod tests {
         assert!(text.spans[0].untrusted);
     }
 
+    #[cfg(feature = "fake")]
     #[test]
     fn opaque_accessor_outputs_are_owned_after_handles_drop() {
         let (children, detail, stream, render, text) = {
@@ -928,6 +965,7 @@ mod tests {
         assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
     }
 
+    #[cfg(feature = "fake")]
     #[test]
     fn decoded_stream_limit_returns_limit_error_before_buffer_materialization() {
         let shim = FakeShim::new().unwrap();
@@ -952,7 +990,7 @@ mod tests {
         assert!(err.message.contains("during decode"));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "fake"))]
     #[test]
     fn open_fd_keeps_caller_fd_usable_after_document_drop() {
         use std::fs;
@@ -985,7 +1023,7 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "fake"))]
     #[test]
     fn open_fd_failure_keeps_caller_fd_usable() {
         use std::fs;
@@ -1020,7 +1058,54 @@ mod tests {
         assert_eq!(ResourceGroup::XObjects.as_public_str(), "xobjects");
     }
 
-    #[cfg(unix)]
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_opens_minimal_pdf_and_traverses_inspect_roots() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(fixture).unwrap();
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.page_count, 1);
+        assert!(summary.xref_size > 0);
+        assert!(summary.safety.safe_mode);
+        assert!(summary.safety.javascript_disabled);
+
+        let root = NodeId::DocumentRoot {
+            doc: summary.doc.clone(),
+        };
+        let range = ChildRange {
+            offset: 0,
+            limit: 16,
+        };
+        let children = doc
+            .children(&root, range, ChildContainer::Dictionary)
+            .unwrap();
+        assert_eq!(children.total, Some(4));
+        assert_eq!(children.items.len(), 4);
+        assert_eq!(children.items[0].label, "Trailer");
+        assert_eq!(children.items[2].label, "Pages");
+        assert_eq!(children.items[3].label, "Xref");
+
+        let trailer = doc.object_detail(&children.items[0].id, range).unwrap();
+        assert_eq!(trailer.kind, ObjectKind::Trailer);
+        assert!(trailer.dictionary_entries.unwrap().total.is_some());
+
+        let pages = doc
+            .children(&children.items[2].id, range, ChildContainer::Array)
+            .unwrap();
+        assert_eq!(pages.total, Some(1));
+        assert!(matches!(pages.items[0].id, NodeId::ArrayEntry { .. }));
+
+        let unsupported = doc
+            .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 16)
+            .unwrap_err();
+        assert_eq!(unsupported.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+    }
+
+    #[cfg(all(unix, feature = "fake"))]
     fn temp_pdf_file() -> (std::path::PathBuf, std::fs::File) {
         use std::fs::OpenOptions;
         use std::io::{Seek, SeekFrom, Write};
@@ -1049,7 +1134,7 @@ mod tests {
         (path, file)
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "fake"))]
     fn fd_file_identity(fd: i32) -> Option<(u64, u64)> {
         use std::os::unix::fs::MetadataExt;
 
