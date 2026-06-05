@@ -1072,6 +1072,21 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn write_temp_real_pdf(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pdbg-core-{}-{}-{}.pdf",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_shim_opens_minimal_pdf_and_traverses_inspect_roots() {
         let fixture = concat!(
@@ -1116,6 +1131,33 @@ mod tests {
             .stream_load(ObjectId { num: 1, gen: 0 }, StreamMode::Raw, 0, 16)
             .unwrap_err();
         assert_eq!(unsupported.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_repair_warning_on_summary() {
+        let mut bytes = include_bytes!("../../../fixtures/synthetic/minimal.pdf").to_vec();
+        let needle = b"startxref\n184\n";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        bytes.splice(pos..pos + needle.len(), b"startxref\n0\n".iter().copied());
+
+        let path = write_temp_real_pdf("repairable", &bytes);
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+
+        assert!(summary.safety.repaired_or_damaged);
+        assert!(summary.parsed_object_count.is_some_and(|count| count > 0));
+        assert!(summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::RepairWarning
+                && diagnostic.severity == DiagnosticSeverity::Warning
+        }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(all(feature = "real-mupdf", unix))]

@@ -49,6 +49,21 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn write_temp_pdf(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let temp_path = std::env::temp_dir().join(format!(
+            "pdbg-{}-{}-{}.pdf",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp_path, bytes).unwrap();
+        temp_path
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_opens_minimal_pdf_and_returns_summary() {
         unsafe {
@@ -171,15 +186,7 @@ mod tests {
             assert_eq!(status, raw::pdbg_status::PDBG_OK);
             assert!(!ctx.is_null());
 
-            let temp_path = std::env::temp_dir().join(format!(
-                "pdbg-malformed-{}-{}.pdf",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::write(&temp_path, b"this is deliberately not a pdf\n").unwrap();
+            let temp_path = write_temp_pdf("malformed", b"this is deliberately not a pdf\n");
             let path = CString::new(temp_path.to_string_lossy().into_owned()).unwrap();
             let options = real_open_options();
 
@@ -217,6 +224,76 @@ mod tests {
             assert_eq!(status, raw::pdbg_status::PDBG_OK);
             assert!(!good_doc.is_null());
             raw::pdbg_document_drop(good_doc);
+            raw::pdbg_context_drop(ctx);
+            let _ = std::fs::remove_file(temp_path);
+        }
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_repairable_pdf_emits_repair_warning() {
+        unsafe {
+            let mut ctx: *mut raw::pdbg_context = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_context_new(&mut ctx, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert!(!ctx.is_null());
+
+            let mut bytes = include_bytes!("../../../fixtures/synthetic/minimal.pdf").to_vec();
+            let needle = b"startxref\n184\n";
+            let pos = bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap();
+            bytes.splice(pos..pos + needle.len(), b"startxref\n0\n".iter().copied());
+
+            let temp_path = write_temp_pdf("repairable", &bytes);
+            let path = CString::new(temp_path.to_string_lossy().into_owned()).unwrap();
+            let options = real_open_options();
+
+            let mut doc: *mut raw::pdbg_doc = ptr::null_mut();
+            let status = raw::pdbg_document_open(
+                ctx,
+                path.as_ptr(),
+                ptr::null(),
+                &options,
+                &mut doc,
+                &mut err,
+            );
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert!(!doc.is_null());
+
+            let mut summary = std::mem::zeroed::<raw::pdbg_document_summary_out>();
+            let status = raw::pdbg_document_summary(doc, &mut summary, &mut err);
+            assert_eq!(status, raw::pdbg_status::PDBG_OK);
+            assert_eq!(summary.repaired_or_damaged, 1);
+            assert_eq!(summary.has_parsed_object_count, 1);
+            assert!(summary.parsed_object_count > 0);
+            assert!(!summary.diagnostics.is_null());
+            let diagnostic_count = raw::pdbg_diagnostic_list_len(summary.diagnostics);
+            assert!(diagnostic_count > 0);
+            let mut saw_repair_warning = false;
+            for index in 0..diagnostic_count {
+                let mut diagnostic = std::mem::zeroed::<raw::pdbg_diagnostic>();
+                let status = raw::pdbg_diagnostic_list_get(
+                    summary.diagnostics,
+                    index,
+                    &mut diagnostic,
+                    &mut err,
+                );
+                assert_eq!(status, raw::pdbg_status::PDBG_OK);
+                if diagnostic.code == raw::pdbg_diagnostic_code::PDBG_DIAG_REPAIR_WARNING {
+                    assert_eq!(
+                        diagnostic.severity,
+                        raw::pdbg_diagnostic_severity::PDBG_DIAG_WARNING
+                    );
+                    saw_repair_warning = true;
+                }
+            }
+            assert!(saw_repair_warning);
+
+            raw::pdbg_document_summary_out_drop(&mut summary);
+            raw::pdbg_document_drop(doc);
             raw::pdbg_context_drop(ctx);
             let _ = std::fs::remove_file(temp_path);
         }
