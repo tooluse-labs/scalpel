@@ -1,6 +1,7 @@
 # Milestone 1.0 UI Shell Spike
 
-Status: in progress. Launch smoke passed; manual interaction go/no-go pending.
+Status: in progress. Automated and manual launch passed; manual interaction
+go/no-go pending.
 
 This spike validates the UI shell before the MuPDF-backed feature milestones
 build real panels on top of it. The shell stays on `FakeShim`; real MuPDF
@@ -81,6 +82,9 @@ Current automated/local smoke result:
 - `cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 5000`
   compiles, opens the native window, remains running for a 5-second launch
   smoke, and exits without stderr errors.
+- `cargo run -p pdbg-app --features gui -- --gui` was manually launched twice
+  on 2026-06-05 and exited cleanly after interactive sessions of roughly 60s
+  and 44s.
 
 ## Acceptance Criterion
 
@@ -102,8 +106,8 @@ object graphs, damaged files, and large streams.
 
 ## Remaining Go/No-Go Work
 
-- Launch the GUI locally and record whether egui carries the dense debugger
-  layout smoothly on the fake corpus.
+- Record whether egui carries the dense debugger layout smoothly on the fake
+  corpus.
 - Exercise resizing, virtual tree scrolling, stream text selection/copy, and
   HiDPI behavior manually.
 - Exercise indirect-reference cross-jump and back/forward navigation manually.
