@@ -1468,6 +1468,49 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_mupdf_shim_renders_first_page_to_owned_rgba_pixels() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(fixture).unwrap();
+
+        let render = doc.render_page(&RenderRequest::page(0)).unwrap();
+        assert_eq!(render.page_index, 0);
+        assert_eq!((render.width, render.height), (72, 72));
+        assert!(render.stride >= render.width as usize * 4);
+        assert_eq!(
+            render.pixels_rgba.len(),
+            render.stride * render.height as usize
+        );
+        assert_eq!(&render.pixels_rgba[..4], &[255, 255, 255, 255]);
+
+        let mut inverted_request = RenderRequest::page(0);
+        inverted_request.color_mode = RenderColorMode::Inverted;
+        let inverted = doc.render_page(&inverted_request).unwrap();
+        assert_eq!(&inverted.pixels_rgba[..4], &[0, 0, 0, 255]);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_enforces_render_pixel_limit() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(fixture).unwrap();
+        let mut request = RenderRequest::page(0);
+        request.max_pixels = 1;
+
+        let err = doc.render_page(&request).unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("pixel"));
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_mupdf_shim_traverses_cloned_contexts_concurrently() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),

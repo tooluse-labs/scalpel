@@ -262,6 +262,15 @@ static void free_buffer(pdbg_buffer *buffer)
     free(buffer);
 }
 
+static void free_image(pdbg_image *image)
+{
+    if (!image)
+        return;
+    free(image->pixels);
+    free_diag_list(image->diagnostics);
+    free(image);
+}
+
 static void free_stream_summary(pdbg_stream_summary *stream)
 {
     if (!stream)
@@ -1623,13 +1632,151 @@ pdbg_status pdbg_page_render(
     pdbg_image **out,
     pdbg_error *err)
 {
-    (void)doc;
-    (void)page_index;
-    (void)options;
-    (void)cancel;
-    if (out)
-        *out = NULL;
-    return unsupported(err, "pdbg_page_render");
+    if (!doc || !out) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid render arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before page render");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && cancel->cancelled) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+
+    float zoom = options && options->zoom > 0.0f ? options->zoom : 1.0f;
+    int rotation = options ? options->rotation_degrees : 0;
+    uint32_t max_width = options && options->max_width ? options->max_width : 4096;
+    uint32_t max_height = options && options->max_height ? options->max_height : 4096;
+    uint64_t max_pixels = options && options->max_pixels ? options->max_pixels : 16777216ULL;
+    uint64_t max_output_bytes = options && options->max_output_bytes ? options->max_output_bytes : 128ULL * 1024ULL * 1024ULL;
+    pdbg_color_mode color_mode = options ? options->color_mode : PDBG_COLOR_RGBA;
+
+    if (!(rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270)) {
+        set_error(err, PDBG_ERROR_LIMIT, "render rotation must be 0, 90, 180, or 270 degrees");
+        return PDBG_ERROR_LIMIT;
+    }
+
+    fz_context *ctx = doc->ctx;
+    fz_page *page = NULL;
+    fz_pixmap *pixmap = NULL;
+    fz_device *device = NULL;
+    pdbg_image *image = NULL;
+    pdbg_status status = PDBG_OK;
+    fz_var(page);
+    fz_var(pixmap);
+    fz_var(device);
+    fz_var(image);
+    fz_var(status);
+
+    fz_try(ctx)
+    {
+        int page_count = fz_count_pages(ctx, doc->fz_doc);
+        if (page_index >= (uint32_t)page_count) {
+            status = PDBG_ERROR_LIMIT;
+            set_error(err, status, "page index out of range");
+        } else {
+            page = fz_load_page(ctx, doc->fz_doc, (int)page_index);
+            fz_matrix transform = fz_pre_rotate(fz_scale(zoom, zoom), (float)rotation);
+            fz_rect page_bounds = fz_bound_page(ctx, page);
+            fz_rect transformed = fz_transform_rect(page_bounds, transform);
+            fz_irect bbox = fz_round_rect(transformed);
+            int width = bbox.x1 - bbox.x0;
+            int height = bbox.y1 - bbox.y0;
+
+            if (width <= 0 || height <= 0) {
+                status = PDBG_ERROR_LIMIT;
+                set_error(err, status, "render output has empty dimensions");
+            } else if ((uint32_t)width > max_width || (uint32_t)height > max_height) {
+                status = PDBG_ERROR_LIMIT;
+                set_error(err, status, "render output exceeds configured dimensions");
+            } else if ((uint64_t)width > UINT64_MAX / (uint64_t)height ||
+                       (uint64_t)width * (uint64_t)height > max_pixels) {
+                status = PDBG_ERROR_LIMIT;
+                set_error(err, status, "render output exceeds configured pixel count");
+            } else {
+                pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 1);
+                fz_clear_pixmap_with_value(ctx, pixmap, 0xFF);
+                device = fz_new_draw_device(ctx, transform, pixmap);
+                fz_run_page(ctx, page, device, fz_identity, NULL);
+                fz_close_device(ctx, device);
+
+                int stride = fz_pixmap_stride(ctx, pixmap);
+                if (stride <= 0 ||
+                    (uint64_t)stride < (uint64_t)width * 4ULL ||
+                    (uint64_t)stride > UINT64_MAX / (uint64_t)height) {
+                    status = PDBG_ERROR_LIMIT;
+                    set_error(err, status, "render output byte size overflow");
+                } else {
+                    uint64_t byte_len = (uint64_t)stride * (uint64_t)height;
+                    if (byte_len > max_output_bytes || byte_len > SIZE_MAX) {
+                        status = PDBG_ERROR_LIMIT;
+                        set_error(err, status, "render output exceeds configured byte limit");
+                    } else {
+                        image = (pdbg_image *)calloc(1, sizeof(pdbg_image));
+                        if (!image) {
+                            status = PDBG_ERROR_OOM;
+                            set_error(err, status, "out of memory");
+                        } else {
+                            image->pixels = (uint8_t *)malloc((size_t)byte_len);
+                            if (!image->pixels) {
+                                status = PDBG_ERROR_OOM;
+                                set_error(err, status, "out of memory");
+                            } else {
+                                image->width = (uint32_t)width;
+                                image->height = (uint32_t)height;
+                                image->stride = (size_t)stride;
+                                memcpy(image->pixels, fz_pixmap_samples(ctx, pixmap), (size_t)byte_len);
+
+                                if (color_mode == PDBG_COLOR_GRAYSCALE || color_mode == PDBG_COLOR_INVERTED) {
+                                    for (uint32_t y = 0; y < image->height; y++) {
+                                        uint8_t *row = image->pixels + (size_t)y * image->stride;
+                                        for (uint32_t x = 0; x < image->width; x++) {
+                                            uint8_t *px = row + (size_t)x * 4;
+                                            if (color_mode == PDBG_COLOR_GRAYSCALE) {
+                                                uint8_t gray = (uint8_t)((30U * px[0] + 59U * px[1] + 11U * px[2]) / 100U);
+                                                px[0] = gray;
+                                                px[1] = gray;
+                                                px[2] = gray;
+                                            } else {
+                                                px[0] = (uint8_t)(255U - px[0]);
+                                                px[1] = (uint8_t)(255U - px[1]);
+                                                px[2] = (uint8_t)(255U - px[2]);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fz_always(ctx)
+    {
+        if (device)
+            fz_drop_device(ctx, device);
+        if (pixmap)
+            fz_drop_pixmap(ctx, pixmap);
+        if (page)
+            fz_drop_page(ctx, page);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status != PDBG_OK) {
+        free_image(image);
+        return status;
+    }
+
+    *out = image;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
 }
 
 pdbg_status pdbg_page_extract_text(
@@ -1656,11 +1803,7 @@ void pdbg_buffer_drop(pdbg_buffer *buffer)
 
 void pdbg_image_drop(pdbg_image *image)
 {
-    if (!image)
-        return;
-    free(image->pixels);
-    free_diag_list(image->diagnostics);
-    free(image);
+    free_image(image);
 }
 
 void pdbg_node_list_drop(pdbg_node_list *list)
