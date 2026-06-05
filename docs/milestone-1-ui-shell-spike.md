@@ -104,12 +104,33 @@ spike open polishing fake-shim data: remaining polish lands against real MuPDF
 data in later milestones, where the UI actually has to prove itself against real
 object graphs, damaged files, and large streams.
 
+## Manual Go/No-Go Checklist
+
+Run `cargo run -p pdbg-app --features gui -- --gui` and record the result
+against this checklist before closing M1.0:
+
+- Virtual tree: scroll the 1,000,000-row document tree quickly and continuously;
+  pass if there are no obvious stalls on the test machine.
+- Hex / stream copy: select visible hex text, copy it, and verify the copied
+  text is bounded and Markdown-escaped; pass if selection copy wins over the
+  fallback byte-range excerpt.
+- Reference navigation: click an indirect reference in the inspector; pass if
+  the target row is selected and Back / Forward retrace the same path.
+- Resizing: drag the main panel boundaries repeatedly; pass if the four-panel
+  shell follows the pointer without flashing, overlap, or unusable layout
+  collapse.
+- HiDPI: verify the top-bar scale readout matches the active system scaling and
+  text remains readable; pass if scaling changes do not blur or misalign the
+  shell.
+
+If all five checks pass, record M1.0 as accepted and move to Milestone 1
+MuPDF-backed Open And Inspect work. If a core interaction structurally fails,
+record the failure and re-evaluate the UI toolkit before building real feature
+panels. Ordinary polish issues should be filed for later milestones instead of
+keeping this spike open.
+
 ## Remaining Go/No-Go Work
 
-- Record whether egui carries the dense debugger layout smoothly on the fake
-  corpus.
-- Exercise resizing, virtual tree scrolling, stream text selection/copy, and
-  HiDPI behavior manually.
-- Exercise indirect-reference cross-jump and back/forward navigation manually.
-- If the shell is not acceptable, choose the alternative toolkit before
-  Milestone 1 feature panels begin.
+- Run the manual checklist above.
+- Record the result as `accepted` or `rejected`, including any failed checklist
+  item and the reason it is structural rather than polish.
