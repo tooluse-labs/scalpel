@@ -5,7 +5,7 @@ use eframe::egui::{
 use pdbg_core::{
     escape_pdf_text, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
     NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSummary, ObjectValue, ShimDocument,
-    StreamChunk, StreamMode, StreamSummary,
+    StreamChunk, StreamMode, StreamSummary, StreamViewMode,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -234,6 +234,7 @@ pub struct GuiShellApp {
     tree: TreeModel,
     stream: LargeStreamModel,
     real_stream_mode: StreamMode,
+    real_stream_view_mode: StreamViewMode,
     real_stream_offset: u64,
     real_stream_limit: usize,
     real_stream_key: Option<RealStreamKey>,
@@ -273,6 +274,7 @@ impl GuiShellApp {
             tree,
             stream: LargeStreamModel::default(),
             real_stream_mode: StreamMode::Raw,
+            real_stream_view_mode: StreamViewMode::Hex,
             real_stream_offset: 0,
             real_stream_limit: HEX_WINDOW_BYTES,
             real_stream_key: None,
@@ -762,6 +764,33 @@ fn stream_mode_label(mode: StreamMode) -> &'static str {
     match mode {
         StreamMode::Raw => "raw",
         StreamMode::Decoded => "decoded",
+    }
+}
+
+fn stream_view_mode_label(mode: StreamViewMode) -> &'static str {
+    match mode {
+        StreamViewMode::Hex => "Hex",
+        StreamViewMode::Text => "Text",
+        StreamViewMode::Bytes => "Bytes",
+    }
+}
+
+fn stream_chunk_display_text(chunk: &StreamChunk, view_mode: StreamViewMode) -> String {
+    match view_mode {
+        StreamViewMode::Hex => {
+            if chunk.bytes.is_empty() {
+                "<empty chunk>".to_string()
+            } else {
+                hex_dump_bytes(chunk.offset, &chunk.bytes)
+            }
+        }
+        StreamViewMode::Text => String::from_utf8_lossy(&chunk.bytes).into_owned(),
+        StreamViewMode::Bytes => chunk
+            .bytes
+            .iter()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -1362,6 +1391,7 @@ impl GuiShellApp {
         section_frame().show(ui, |ui| {
             section_header(ui, "Stream Bytes", Some("raw / decoded chunk"));
             ui.horizontal(|ui| {
+                ui.label(RichText::new("Decode").small().color(PdbgTheme::MUTED));
                 request_changed |= ui
                     .selectable_value(&mut self.real_stream_mode, StreamMode::Raw, "Raw")
                     .changed();
@@ -1379,6 +1409,20 @@ impl GuiShellApp {
                     self.real_stream_mode = StreamMode::Raw;
                     request_changed = true;
                 }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("View").small().color(PdbgTheme::MUTED));
+                ui.selectable_value(&mut self.real_stream_view_mode, StreamViewMode::Hex, "Hex");
+                ui.selectable_value(
+                    &mut self.real_stream_view_mode,
+                    StreamViewMode::Text,
+                    "Text",
+                );
+                ui.selectable_value(
+                    &mut self.real_stream_view_mode,
+                    StreamViewMode::Bytes,
+                    "Bytes",
+                );
             });
             ui.add_space(4.0);
             egui::Grid::new("real_stream_controls_grid")
@@ -1426,7 +1470,7 @@ impl GuiShellApp {
         section_frame().show(ui, |ui| {
             section_header(
                 ui,
-                "Hex",
+                stream_view_mode_label(self.real_stream_view_mode),
                 Some(&format!(
                     "{} bytes @ {} / total {}{}",
                     chunk.bytes.len(),
@@ -1435,23 +1479,21 @@ impl GuiShellApp {
                     if chunk.truncated { " / truncated" } else { "" }
                 )),
             );
-            let mut hex_text = if chunk.bytes.is_empty() {
-                "<empty chunk>".to_string()
-            } else {
-                hex_dump_bytes(chunk.offset, &chunk.bytes)
-            };
+            let mut visible_text = stream_chunk_display_text(&chunk, self.real_stream_view_mode);
             ui.add(
-                TextEdit::multiline(&mut hex_text)
+                TextEdit::multiline(&mut visible_text)
                     .font(egui::TextStyle::Monospace)
                     .desired_rows(14)
                     .code_editor()
                     .interactive(false),
             );
             if ui.button("Copy visible chunk").clicked() {
-                let escaped = escape_pdf_text(&hex_text, EgressFormat::Markdown, COPY_LIMIT_BYTES);
+                let escaped =
+                    escape_pdf_text(&visible_text, EgressFormat::Markdown, COPY_LIMIT_BYTES);
                 ctx.copy_text(escaped.text.clone());
                 self.status_log.push(format!(
-                    "copied visible {} stream chunk{}",
+                    "copied visible {} {} stream chunk{}",
+                    stream_view_mode_label(self.real_stream_view_mode).to_ascii_lowercase(),
                     stream_mode_label(chunk.mode),
                     if escaped.truncated {
                         " (truncated)"
@@ -2010,6 +2052,29 @@ mod tests {
         let dump = hex_dump_bytes(16, b"BT /F1\n");
         assert!(dump.starts_with("00000010  42 54 20 2f 46 31 0a"));
         assert!(dump.contains("BT /F1."));
+    }
+
+    #[test]
+    fn stream_chunk_display_text_supports_hex_text_and_bytes() {
+        let chunk = StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 32,
+            bytes: b"Hi\n".to_vec(),
+            total_size: Some(3),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        };
+
+        assert!(stream_chunk_display_text(&chunk, StreamViewMode::Hex)
+            .starts_with("00000020  48 69 0a"));
+        assert_eq!(
+            stream_chunk_display_text(&chunk, StreamViewMode::Text),
+            "Hi\n"
+        );
+        assert_eq!(
+            stream_chunk_display_text(&chunk, StreamViewMode::Bytes),
+            "72 105 10"
+        );
     }
 
     #[test]

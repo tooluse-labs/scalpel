@@ -419,6 +419,13 @@ pub enum StreamMode {
     Decoded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamViewMode {
+    Hex,
+    Text,
+    Bytes,
+}
+
 #[derive(Clone, Debug)]
 pub struct StreamChunk {
     pub mode: StreamMode,
