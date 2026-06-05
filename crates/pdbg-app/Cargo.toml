@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 eframe = { version = "0.34.3", default-features = false, features = ["glow", "default_fonts"], optional = true }
-pdbg-core = { path = "../pdbg-core" }
+pdbg-core = { path = "../pdbg-core", default-features = false }
 
 [lib]
 path = "src/lib.rs"
@@ -18,3 +18,4 @@ path = "src/main.rs"
 [features]
 default = []
 gui = ["dep:eframe"]
+real-mupdf = ["pdbg-core/real-mupdf"]

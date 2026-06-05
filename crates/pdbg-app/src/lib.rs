@@ -1,3 +1,5 @@
+#[cfg(feature = "real-mupdf")]
+use pdbg_core::RealMuPdfShim;
 use pdbg_core::{
     escape_pdf_text, CapabilityDecision, CapabilityFeature, ChildContainer, ChildPage, ChildRange,
     DocumentSession, DocumentSummary, EgressFormat, EscapedText, FakeShim, MuPdfCapabilities,
@@ -63,6 +65,24 @@ impl AppState {
         let shim = FakeShim::new()?;
         let doc = shim.open_document_with_config("fake.pdf", &safe_mode)?;
         let session = DocumentSession::with_shared_store(doc, shim.shared_store());
+        Self::from_session(session, safe_mode, capabilities)
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    pub fn new_real_path(path: &str) -> Result<Self, ShimError> {
+        let safe_mode = SafeModeConfig::default();
+        let capabilities = MuPdfCapabilities::mupdf_only_default();
+        let shim = RealMuPdfShim::new()?;
+        let doc = shim.open_document_with_config(path, &safe_mode)?;
+        let session = DocumentSession::new(doc);
+        Self::from_session(session, safe_mode, capabilities)
+    }
+
+    fn from_session(
+        session: DocumentSession<OpenDocument>,
+        safe_mode: SafeModeConfig,
+        capabilities: MuPdfCapabilities,
+    ) -> Result<Self, ShimError> {
         let mut state = Self {
             session,
             safe_mode,
@@ -146,7 +166,7 @@ fn feature_gates(capabilities: &MuPdfCapabilities) -> Vec<FeatureGateState> {
     .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "real-mupdf")))]
 mod tests {
     use super::*;
 
