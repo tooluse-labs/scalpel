@@ -41,9 +41,19 @@ fn configure_egui(ctx: &egui::Context) {
 
 fn pdbg_fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "InterVariable".to_string(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "JetBrainsMono-Regular".to_string(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"))
+            .into(),
+    );
     fonts.families.insert(
         FontFamily::Name("pdbg-sans".into()),
         vec![
+            "InterVariable".to_string(),
             "Ubuntu-Light".to_string(),
             "NotoEmoji-Regular".to_string(),
             "emoji-icon-font".to_string(),
@@ -52,6 +62,7 @@ fn pdbg_fonts() -> FontDefinitions {
     fonts.families.insert(
         FontFamily::Name("pdbg-mono".into()),
         vec![
+            "JetBrainsMono-Regular".to_string(),
             "Hack".to_string(),
             "Ubuntu-Light".to_string(),
             "NotoEmoji-Regular".to_string(),
@@ -221,6 +232,12 @@ pub struct GuiShellApp {
     status_log: Vec<String>,
 }
 
+impl Default for GuiShellApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GuiShellApp {
     pub fn new() -> Self {
         Self::new_with_options(GuiRunOptions::default())
@@ -386,16 +403,38 @@ impl GuiShellApp {
         );
 
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        let mono = FontFamily::Name("pdbg-mono".into());
         ScrollArea::vertical().show_rows(ui, row_height, self.tree.row_count(), |ui, range| {
             for row in range {
                 let label = self.tree.row_label(row);
                 let selected = row == self.selected_row;
-                let text = RichText::new(label).monospace().color(if selected {
+                // Two-tone row: object id in primary text, the /Name in muted
+                // (both accent when selected) so the tree reads as structure,
+                // not a flat dump.
+                let id_color = if selected {
                     PdbgTheme::ACCENT
                 } else {
                     PdbgTheme::TEXT
-                });
-                if ui.selectable_label(selected, text).clicked() {
+                };
+                let name_color = if selected {
+                    PdbgTheme::ACCENT
+                } else {
+                    PdbgTheme::MUTED
+                };
+                let fmt = |color: Color32| egui::TextFormat {
+                    font_id: FontId::new(11.0, mono.clone()),
+                    color,
+                    ..Default::default()
+                };
+                let mut job = egui::text::LayoutJob::default();
+                match label.split_once("  ") {
+                    Some((id_part, name_part)) => {
+                        job.append(id_part, 0.0, fmt(id_color));
+                        job.append(&format!("  {name_part}"), 0.0, fmt(name_color));
+                    }
+                    None => job.append(&label, 0.0, fmt(id_color)),
+                }
+                if ui.selectable_label(selected, job).clicked() {
                     self.select_row_from_tree(row);
                 }
             }
@@ -954,6 +993,8 @@ mod tests {
     #[test]
     fn theme_defines_named_font_stacks_and_severity_colors() {
         let fonts = pdbg_fonts();
+        assert!(fonts.font_data.contains_key("InterVariable"));
+        assert!(fonts.font_data.contains_key("JetBrainsMono-Regular"));
         assert!(fonts
             .families
             .contains_key(&FontFamily::Name("pdbg-sans".into())));

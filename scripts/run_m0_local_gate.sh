@@ -3,6 +3,7 @@ set -eu
 
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
+cargo clippy -p pdbg-app --features gui -- -D warnings
 cargo test --workspace
 cargo run -p pdbg-app --quiet
 python3 scripts/check_pdbg_shim_abi_snapshot.py

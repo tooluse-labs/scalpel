@@ -30,3 +30,18 @@ not part of the default M0 resolve graph unless their feature is enabled. Before
 any optional feature becomes a required build or shipped distribution target,
 this file must be regenerated to include that feature's exact third-party
 dependency notices.
+
+## GUI Font Assets
+
+The optional `pdbg-app/gui` feature bundles the following Open Font License
+fonts for a reproducible debugger UI:
+
+- Inter v4.1, from <https://github.com/rsms/inter/releases/tag/v4.1>,
+  licensed under the SIL Open Font License 1.1. The bundled font file is
+  `crates/pdbg-app/assets/fonts/InterVariable.ttf`; the copied license text is
+  `crates/pdbg-app/assets/licenses/Inter-OFL.txt`.
+- JetBrains Mono v2.304, from
+  <https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304>, licensed
+  under the SIL Open Font License 1.1. The bundled font file is
+  `crates/pdbg-app/assets/fonts/JetBrainsMono-Regular.ttf`; the copied license
+  text is `crates/pdbg-app/assets/licenses/JetBrainsMono-OFL.txt`.

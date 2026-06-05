@@ -16,8 +16,9 @@ integration remains Milestone 1.
   window over the existing `AppState` and `FakeShim`.
 - The window renders the Section 10 shell shape:
   document tree, page preview, inspector/stream/diagnostics, and log.
-- The shell applies a pdbg-specific egui theme: named sans/mono font stacks,
-  light debugger visuals, and stable diagnostic severity colors.
+- The shell applies a pdbg-specific egui theme: vendored Inter and JetBrains
+  Mono OFL font assets, named sans/mono font stacks, light debugger visuals,
+  and stable diagnostic severity colors.
 - A second visual polish pass adds a dark command bar, dark log console,
   structured inspector sections, tighter tree rows, and a centered page preview
   with restrained fake overlays.
