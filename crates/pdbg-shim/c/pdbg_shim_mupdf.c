@@ -36,6 +36,8 @@ struct pdbg_doc {
     int safe_mode;
     int javascript_disabled;
     int repaired_or_damaged;
+    uint64_t max_store_bytes;
+    uint64_t max_decoded_stream_bytes;
     uint64_t next_path_token;
     struct pdbg_path_binding *paths;
     size_t path_len;
@@ -85,6 +87,20 @@ struct pdbg_path_binding {
     uint64_t token;
     pdf_obj *obj;
 };
+
+#define PDBG_DEFAULT_MAX_STORE_BYTES (256ULL * 1024ULL * 1024ULL)
+#define PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES (64ULL * 1024ULL * 1024ULL)
+
+static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
+{
+    doc->safe_mode = options ? options->safe_mode : 1;
+    doc->javascript_disabled = options ? options->disable_javascript : 1;
+    doc->max_store_bytes =
+        options && options->max_store_bytes ? options->max_store_bytes : PDBG_DEFAULT_MAX_STORE_BYTES;
+    doc->max_decoded_stream_bytes =
+        options && options->max_decoded_stream_bytes ? options->max_decoded_stream_bytes
+                                                     : PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES;
+}
 
 static void set_error(pdbg_error *err, pdbg_status status, const char *message)
 {
@@ -235,6 +251,15 @@ static void free_diag_list(pdbg_diagnostic_list *list)
         free(list->items[i].message);
     free(list->items);
     free(list);
+}
+
+static void free_buffer(pdbg_buffer *buffer)
+{
+    if (!buffer)
+        return;
+    free(buffer->data);
+    free_diag_list(buffer->diagnostics);
+    free(buffer);
 }
 
 static void free_stream_summary(pdbg_stream_summary *stream)
@@ -986,8 +1011,7 @@ pdbg_status pdbg_document_open(
     doc->document_id = (uint64_t)atomic_fetch_add_explicit(&next_document_id, 1, memory_order_relaxed);
     doc->next_path_token = 1;
     doc->file_path = copy_string(path);
-    doc->safe_mode = options ? options->safe_mode : 1;
-    doc->javascript_disabled = options ? options->disable_javascript : 1;
+    apply_open_options(doc, options);
     if (!doc->file_path) {
         drop_doc_context(doc);
         free(doc);
@@ -1100,8 +1124,7 @@ pdbg_status pdbg_document_open_fd(
     doc->document_id = (uint64_t)atomic_fetch_add_explicit(&next_document_id, 1, memory_order_relaxed);
     doc->next_path_token = 1;
     doc->file_path = copy_string(path);
-    doc->safe_mode = options ? options->safe_mode : 1;
-    doc->javascript_disabled = options ? options->disable_javascript : 1;
+    apply_open_options(doc, options);
     if (!doc->file_path) {
         drop_doc_context(doc);
         fclose(file);
@@ -1464,15 +1487,132 @@ pdbg_status pdbg_stream_load(
     pdbg_buffer **out,
     pdbg_error *err)
 {
-    (void)doc;
-    (void)object;
-    (void)decoded;
-    (void)offset;
-    (void)limit;
-    (void)cancel;
-    if (out)
-        *out = NULL;
-    return unsupported(err, "pdbg_stream_load");
+    if (!doc || !out) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid stream arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before stream load");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && cancel->cancelled) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+    if (object.num <= 0) {
+        set_error(err, PDBG_ERROR_UNSUPPORTED, "object is not a stream");
+        return PDBG_ERROR_UNSUPPORTED;
+    }
+    if ((uint64_t)limit > doc->max_store_bytes) {
+        set_error(err, PDBG_ERROR_LIMIT, "requested stream chunk exceeds configured output limit");
+        return PDBG_ERROR_LIMIT;
+    }
+
+    fz_context *ctx = doc->ctx;
+    fz_stream *stream = NULL;
+    pdbg_buffer *buffer = NULL;
+    pdbg_status status = PDBG_OK;
+    fz_var(stream);
+    fz_var(buffer);
+    fz_var(status);
+
+    fz_try(ctx)
+    {
+        if (!pdf_obj_num_is_stream(ctx, doc->pdf_doc, object.num)) {
+            status = PDBG_ERROR_UNSUPPORTED;
+            set_error(err, status, "object is not a stream");
+        } else {
+            buffer = (pdbg_buffer *)calloc(1, sizeof(pdbg_buffer));
+            if (!buffer) {
+                status = PDBG_ERROR_OOM;
+                set_error(err, status, "out of memory");
+            } else if (limit > 0) {
+                buffer->data = (uint8_t *)malloc(limit);
+                if (!buffer->data) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+            }
+
+            if (status == PDBG_OK) {
+                stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
+                                 : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
+
+                unsigned char scratch[8192];
+                uint64_t total = 0;
+                size_t copied = 0;
+                uint64_t request_end = UINT64_MAX;
+                if ((uint64_t)limit <= UINT64_MAX - offset)
+                    request_end = offset + (uint64_t)limit;
+
+                while (status == PDBG_OK) {
+                    if (cancel && cancel->cancelled) {
+                        status = PDBG_ERROR_CANCELLED;
+                        set_error(err, status, "cancelled");
+                        break;
+                    }
+
+                    size_t n = fz_read(ctx, stream, scratch, sizeof(scratch));
+                    if (n == 0)
+                        break;
+                    if ((uint64_t)n > UINT64_MAX - total) {
+                        status = PDBG_ERROR_LIMIT;
+                        set_error(err, status, "stream size overflow");
+                        break;
+                    }
+
+                    uint64_t chunk_start = total;
+                    uint64_t chunk_end = total + (uint64_t)n;
+                    if (decoded && chunk_end > doc->max_decoded_stream_bytes) {
+                        status = PDBG_ERROR_LIMIT;
+                        set_error(err, status, "decoded stream limit exceeded during decode");
+                        break;
+                    }
+
+                    if (limit > 0 && copied < limit && chunk_end > offset && chunk_start < request_end) {
+                        uint64_t copy_start = offset > chunk_start ? offset : chunk_start;
+                        uint64_t copy_end = chunk_end < request_end ? chunk_end : request_end;
+                        if (copy_end > copy_start) {
+                            size_t scratch_offset = (size_t)(copy_start - chunk_start);
+                            size_t copy_len = (size_t)(copy_end - copy_start);
+                            memcpy(buffer->data + copied, scratch + scratch_offset, copy_len);
+                            copied += copy_len;
+                        }
+                    }
+
+                    total = chunk_end;
+                }
+
+                if (status == PDBG_OK) {
+                    buffer->len = copied;
+                    buffer->total_size = total;
+                    uint64_t visible_end = UINT64_MAX;
+                    if ((uint64_t)copied <= UINT64_MAX - offset)
+                        visible_end = offset + (uint64_t)copied;
+                    buffer->truncated = offset < total && visible_end < total;
+                }
+            }
+        }
+    }
+    fz_always(ctx)
+    {
+        if (stream)
+            fz_drop_stream(ctx, stream);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status != PDBG_OK) {
+        free_buffer(buffer);
+        return status;
+    }
+
+    *out = buffer;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
 }
 
 pdbg_status pdbg_page_render(
@@ -1511,11 +1651,7 @@ pdbg_status pdbg_page_extract_text(
 
 void pdbg_buffer_drop(pdbg_buffer *buffer)
 {
-    if (!buffer)
-        return;
-    free(buffer->data);
-    free_diag_list(buffer->diagnostics);
-    free(buffer);
+    free_buffer(buffer);
 }
 
 void pdbg_image_drop(pdbg_image *image)
