@@ -1,6 +1,8 @@
 # Milestone 1 Open And Inspect Plan
 
-Status: planned. Starts after accepted M1.0 UI Shell Spike.
+Status: implemented for the macOS developer path on 2026-06-05. The opt-in
+real-MuPDF local gate is `scripts/run_m1_real_gate.sh`; the default workspace
+gate remains MuPDF-free.
 
 Milestone 1 replaces the fake backend for the first real debugger slice:
 opening PDFs through MuPDF, reading document summaries, traversing the lazy COS
@@ -157,6 +159,30 @@ M1 is complete when:
   toolchain.
 - The default local gate still passes without linking MuPDF.
 - `NOTICES` and source-offer documentation cover the enabled MuPDF build path.
+
+## Validation Record
+
+Local validation was run on macOS with MuPDF 1.27.2 built from the pinned source
+tree recorded in ADR 0002:
+
+```sh
+PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
+sh scripts/run_m1_real_gate.sh
+```
+
+That gate covers:
+
+- real shim open/summary/fd/malformed/repair/encrypted tests;
+- real core open/summary/tree/detail/stream-summary/concurrency tests;
+- real app GUI-model tests, including bounded large-PDF responsiveness smoke;
+- real clippy for `pdbg-shim`, `pdbg-core`, and `pdbg-app`;
+- real headless `--pdf` smoke;
+- the full default M0 local gate to prove the MuPDF-free floor still holds.
+
+The current local macOS toolchain is stable-only, so real MuPDF TSan is not
+claimed as locally executed. TSan coverage remains a platform hardening gate
+for environments that provide nightly Rust plus a TSan-built MuPDF dependency;
+the M1 real gate still runs the cloned-context concurrency smoke without TSan.
 
 ## Non-Goals
 
