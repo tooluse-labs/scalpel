@@ -1924,6 +1924,8 @@ in an optional, non-required GUI job.
 
 ### Milestone 1: Open And Inspect
 
+Implementation plan: `docs/milestone-1-plan.md`.
+
 - Open PDF.
 - Password handling.
 - Document summary.

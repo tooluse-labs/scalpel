@@ -1,7 +1,7 @@
 # Milestone 1.0 UI Shell Spike
 
-Status: in progress. Automated and manual launch passed; manual interaction
-go/no-go pending.
+Status: accepted. egui carries the dense debugger shell; move to Milestone 1
+MuPDF-backed Open And Inspect work.
 
 This spike validates the UI shell before the MuPDF-backed feature milestones
 build real panels on top of it. The shell stays on `FakeShim`; real MuPDF
@@ -89,6 +89,12 @@ Current automated/local smoke result:
 - `cargo run -p pdbg-app --features gui -- --gui` was manually launched twice
   on 2026-06-05 and exited cleanly after interactive sessions of roughly 60s
   and 44s.
+- After the final visual/font polish, `cargo run -p pdbg-app --features gui
+  -- --gui` was manually launched for roughly 77s and 373s and exited cleanly.
+- `cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 3000` opens the
+  native window and exits cleanly. On macOS the close command may be processed
+  later than the requested timeout; this is a smoke-runner quirk, not a shell
+  feasibility blocker.
 
 ## Acceptance Criterion
 
@@ -127,14 +133,14 @@ against this checklist before closing M1.0:
   text remains readable; pass if scaling changes do not blur or misalign the
   shell.
 
-If all five checks pass, record M1.0 as accepted and move to Milestone 1
-MuPDF-backed Open And Inspect work. If a core interaction structurally fails,
-record the failure and re-evaluate the UI toolkit before building real feature
-panels. Ordinary polish issues should be filed for later milestones instead of
-keeping this spike open.
+Acceptance result: accepted on 2026-06-05. The shell has repeated clean manual
+launches, GUI-feature clippy/test coverage, native smoke coverage, virtualized
+tree behavior, stream selection/copy behavior, reference-navigation tests,
+resizable panels, HiDPI scale reporting, and a themed look with vendored fonts
+that is clearly past the default egui skin. No structural interaction failure
+was reported during the manual sessions.
 
-## Remaining Go/No-Go Work
-
-- Run the manual checklist above.
-- Record the result as `accepted` or `rejected`, including any failed checklist
-  item and the reason it is structural rather than polish.
+Any remaining UI work is Milestone 1+ product polish or real-data panel work:
+tree type badges over real object summaries, full stream viewer semantics,
+mode-specific panel content, page rendering, dark variant, keyboard navigation,
+and post-MVP overlays. Do not keep M1.0 open for fake-shim polish.
