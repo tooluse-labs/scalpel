@@ -1,0 +1,104 @@
+# Milestone 3 Search And Diagnostics Plan
+
+Status: planned on 2026-06-05. Milestone 2 is complete for the required macOS
+real-mupdf developer path; M3 starts from the same opt-in `real-mupdf` feature
+and keeps the default workspace gate MuPDF-free.
+
+Milestone 3 turns the byte-and-page inspector into a searchable diagnostics
+workbench: real text extraction, object search over the lazy tree, text search
+over bounded extracted text, and a document-level diagnostics surface suitable
+for basic report export. MCP transport, resource-specific inspectors, and
+content-stream operator visualization remain later milestones.
+
+## Committed Boundaries
+
+- Search is an application-layer feature. The C shim exposes text extraction,
+  but it does not need dedicated search entry points unless profiling later
+  proves Rust-side search too slow.
+- Object search must use the existing lazy node model and bounded child pages.
+  It must not materialize a whole large tree just to answer a query.
+- Text search is built on bounded `pdbg_page_extract_text` results and cached
+  page text. Extracted text is untrusted egress and must reuse the existing
+  clipboard/report escaping path.
+- Diagnostics output must carry `diagnostic_schema_version` when serialized.
+  UI cards can remain concise, but JSON/Markdown report data must use stable
+  diagnostic codes.
+- The existing real-MuPDF opt-in gate remains the integration path. The default
+  M0 gate must keep passing without MuPDF.
+
+## Implementation Phases
+
+### M3.1 Real Text Extraction
+
+- Implement real `pdbg_page_extract_text` using MuPDF structured-text output.
+- Return owned `pdbg_text_page` / `pdbg_text_span` data copied out before MuPDF
+  handles are dropped.
+- Preserve the normalized top-left page-space coordinate contract used by
+  `TextSpan.bbox`.
+- Enforce `pdbg_text_options.max_chars` and `max_blocks` during extraction or
+  while copying spans, returning `PDBG_ERROR_LIMIT` before unbounded growth.
+- Honor cooperative cancellation through the existing cancel token and map abort
+  to `PDBG_ERROR_CANCELLED`.
+- Add fake and real tests for span text, coordinates, limits, cancellation, and
+  post-cancellation document usability.
+
+### M3.2 Object Search
+
+- Add a Rust search model for object number, dictionary key, name object, and
+  scalar preview queries.
+- Search bounded lazy pages from the current root/trailer/xref/page tree without
+  whole-tree materialization.
+- Return stable search hits containing display label, matched field, optional
+  `ObjectId`, and optional `NodeId` for navigation.
+- Wire GUI search results to indirect-reference navigation and Back/Forward
+  history.
+- Add tests proving large fake/real trees stay bounded while still finding
+  visible and explicitly expanded matches.
+
+### M3.3 Text Search
+
+- Add bounded text-search over `TextPage` caches.
+- Page extraction should be demand-driven and cancellable; broad document
+  search must report partial progress rather than freezing the UI.
+- Search hits must include page index, matched excerpt, span bbox when available,
+  and untrusted-marker propagation.
+- GUI results should jump to the page preview and select the hit; page-overlay
+  drawing remains post-MVP unless needed for a small highlight smoke.
+
+### M3.4 Diagnostics And Basic Reports
+
+- Consolidate document, object, stream, render, and text diagnostics into a
+  document-level diagnostics model with severity/code filtering.
+- Add JSON diagnostic payload export using
+  `diagnostics_payload_to_json_string`.
+- Add a bounded Markdown report for summary, selected object, diagnostics, and
+  search hits. Markdown output must use the existing egress escaping rules.
+- Keep repair/error reporting visible for damaged PDFs, including the M1
+  repair-success fixture.
+
+## Exit Gate
+
+M3 is complete when:
+
+- real MuPDF text extraction returns owned spans with top-left page-space
+  coordinates, bounded memory, and clean cancellation;
+- object search finds object numbers, dictionary keys, names, and scalar
+  previews without whole-tree materialization;
+- text search finds bounded excerpts across extracted pages and remains
+  cancellable;
+- GUI search results navigate to real objects/pages and preserve Back/Forward
+  history;
+- the diagnostics panel supports severity/code filtering and emits JSON with
+  `diagnostic_schema_version`;
+- a bounded Markdown diagnostics report escapes untrusted PDF text;
+- the default local gate still passes without linking MuPDF, and the opt-in
+  real gate covers the M3 slices.
+
+## Non-Goals
+
+- Full MCP transport and agent tools.
+- OCR.
+- Resource-specific font/image/color-space inspectors.
+- Content-stream operator visualization and syntax-highlighted Nice view.
+- Page overlay rendering beyond small search-hit smoke coverage.
+- Full cross-platform search-performance benchmarking.
