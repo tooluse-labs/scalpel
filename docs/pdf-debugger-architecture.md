@@ -1598,6 +1598,12 @@ executable templates.
 
 ## 10. UI Architecture
 
+> UI reference (functional, not visual): `docs/ui/pdfbox-reference-notes.md`
+> distills borrowable PDFBox PDFDebugger workflows (tree node anatomy, two-axis
+> stream view, breadcrumb, operator highlighting, overlays), each tagged with
+> the milestone where it applies. `docs/ui/pdbg-ui-design-v1.svg` is the visual
+> target.
+
 ### 10.1 egui Layout
 
 Initial layout:
