@@ -33,6 +33,7 @@ cargo run -p pdbg-app -- --gui
 cargo check -p pdbg-app --features gui
 cargo test -p pdbg-app --features gui
 cargo run -p pdbg-app --features gui -- --gui
+cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 5000
 ```
 
 The second command should fail fast with a message explaining that the GUI is
@@ -42,9 +43,9 @@ Current automated/local smoke result:
 
 - `cargo check -p pdbg-app --features gui` passes.
 - `cargo test -p pdbg-app --features gui` passes.
-- `cargo run -p pdbg-app --features gui -- --gui` compiles, opens the native
-  window, and remained running for a 5-second launch smoke with no stderr
-  errors.
+- `cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 5000`
+  compiles, opens the native window, remains running for a 5-second launch
+  smoke, and exits without stderr errors.
 
 ## Remaining Go/No-Go Work
 

@@ -1,14 +1,24 @@
 use crate::AppState;
 use eframe::egui::{self, Color32, RichText, ScrollArea, TextEdit};
 use pdbg_core::{escape_pdf_text, EgressFormat, EscapedText};
+use std::time::{Duration, Instant};
 
 const VIRTUAL_TREE_ROWS: usize = 1_000_000;
 const STREAM_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const HEX_WINDOW_BYTES: usize = 512;
 const COPY_LIMIT_BYTES: usize = 4096;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GuiRunOptions {
+    pub smoke_exit_after: Option<Duration>,
+}
+
 pub fn run_gui() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
+    run_gui_with_options(GuiRunOptions::default())
+}
+
+pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
+    let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("pdbg UI Shell Spike")
             .with_inner_size([1440.0, 900.0]),
@@ -17,13 +27,15 @@ pub fn run_gui() -> eframe::Result<()> {
 
     eframe::run_native(
         "pdbg UI Shell Spike",
-        options,
-        Box::new(|_cc| Ok(Box::new(GuiShellApp::new()))),
+        native_options,
+        Box::new(move |_cc| Ok(Box::new(GuiShellApp::new_with_options(options)))),
     )
 }
 
 pub struct GuiShellApp {
     state: Result<AppState, String>,
+    launched_at: Instant,
+    smoke_exit_after: Option<Duration>,
     tree: VirtualObjectTree,
     stream: LargeStreamModel,
     selected_row: usize,
@@ -36,9 +48,15 @@ pub struct GuiShellApp {
 
 impl GuiShellApp {
     pub fn new() -> Self {
+        Self::new_with_options(GuiRunOptions::default())
+    }
+
+    pub fn new_with_options(options: GuiRunOptions) -> Self {
         let state = AppState::new_headless().map_err(|err| err.message);
         Self {
             state,
+            launched_at: Instant::now(),
+            smoke_exit_after: options.smoke_exit_after,
             tree: VirtualObjectTree::new(VIRTUAL_TREE_ROWS),
             stream: LargeStreamModel::default(),
             selected_row: 0,
@@ -165,6 +183,13 @@ impl eframe::App for GuiShellApp {
             .show_inside(ui, |ui| self.draw_inspector(ui, &ctx));
 
         egui::CentralPanel::default().show_inside(ui, |ui| self.draw_page_preview(ui));
+
+        if self
+            .smoke_exit_after
+            .is_some_and(|duration| self.launched_at.elapsed() >= duration)
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -559,5 +584,13 @@ mod tests {
         app.go_back();
         assert_eq!(app.selected_row, 0);
         assert_eq!(app.forward_stack, vec![42]);
+    }
+
+    #[test]
+    fn smoke_exit_option_is_stored_for_native_launch_tests() {
+        let app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: Some(Duration::from_millis(250)),
+        });
+        assert_eq!(app.smoke_exit_after, Some(Duration::from_millis(250)));
     }
 }
