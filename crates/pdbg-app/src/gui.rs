@@ -8,9 +8,9 @@ use pdbg_core::{
     ChildRange, DiagnosticCode, DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary,
     DocumentDiagnostics, EgressFormat, EscapedText, MarkdownReportInput, NodeId, NodePathSegment,
     ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest,
-    ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest, RenderResult, ShimDocument,
-    StreamChunk, StreamMode, StreamSummary, StreamViewMode, TextPageCache, TextSearchHit,
-    TextSearchRequest, TextSearchResult,
+    ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest, RenderResult, RenderResultCache,
+    ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary, StreamViewMode,
+    TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
 };
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
@@ -29,6 +29,10 @@ const OBJECT_SEARCH_MAX_NODES: usize = 768;
 const OBJECT_SEARCH_MAX_RESULTS: usize = 100;
 const TEXT_SEARCH_CACHE_MAX_PAGES: usize = 16;
 const TEXT_SEARCH_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const RENDER_CACHE_MAX_ITEMS: usize = 32;
+const RENDER_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+const DECODED_STREAM_CACHE_MAX_ITEMS: usize = 64;
+const DECODED_STREAM_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const TEXT_SEARCH_MAX_PAGES: usize = 64;
 const TEXT_SEARCH_MAX_RESULTS: usize = 100;
 const TEXT_SEARCH_MAX_CHARS_PER_PAGE: usize = 512 * 1024;
@@ -359,6 +363,7 @@ pub struct GuiShellApp {
     real_stream_job: Option<RealStreamJob>,
     real_stream_chunk: Option<StreamChunk>,
     real_stream_error: Option<String>,
+    decoded_stream_cache: StreamChunkCache<RealStreamKey>,
     selected_row: usize,
     back_stack: Vec<usize>,
     forward_stack: Vec<usize>,
@@ -375,6 +380,7 @@ pub struct GuiShellApp {
     real_render: Option<RenderResult>,
     real_render_error: Option<String>,
     real_render_texture: Option<egui::TextureHandle>,
+    render_cache: RenderResultCache<RealRenderKey>,
     object_search_query: String,
     object_search_result: Option<ObjectSearchResult>,
     object_search_error: Option<String>,
@@ -434,6 +440,10 @@ impl GuiShellApp {
             real_stream_job: None,
             real_stream_chunk: None,
             real_stream_error: None,
+            decoded_stream_cache: StreamChunkCache::new(
+                DECODED_STREAM_CACHE_MAX_ITEMS,
+                DECODED_STREAM_CACHE_MAX_BYTES,
+            ),
             selected_row: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
@@ -450,6 +460,7 @@ impl GuiShellApp {
             real_render: None,
             real_render_error: None,
             real_render_texture: None,
+            render_cache: RenderResultCache::new(RENDER_CACHE_MAX_ITEMS, RENDER_CACHE_MAX_BYTES),
             object_search_query: String::new(),
             object_search_result: None,
             object_search_error: None,
@@ -898,6 +909,17 @@ impl GuiShellApp {
         self.real_stream_chunk = None;
         self.real_stream_error = None;
 
+        if key.mode == StreamMode::Decoded {
+            if let Some(chunk) = self.decoded_stream_cache.get(&key) {
+                self.real_stream_chunk = Some(chunk);
+                self.status_log.push(format!(
+                    "reused cached decoded stream chunk {} {} R @ {}",
+                    key.object.num, key.object.gen, key.offset
+                ));
+                return;
+            }
+        }
+
         let Ok(state) = self.state.as_ref() else {
             self.real_stream_error = Some("document is not open".to_string());
             return;
@@ -992,6 +1014,9 @@ impl GuiShellApp {
                             chunk.bytes.len(),
                             if chunk.truncated { ", truncated" } else { "" }
                         ));
+                        if output.key.mode == StreamMode::Decoded {
+                            self.decoded_stream_cache.insert(output.key, chunk.clone());
+                        }
                         self.real_stream_chunk = Some(chunk);
                         self.real_stream_error = None;
                     }
@@ -1065,6 +1090,18 @@ impl GuiShellApp {
         self.real_render = None;
         self.real_render_error = None;
         self.real_render_key = Some(key);
+
+        if let Some(render) = self.render_cache.get(&key) {
+            self.real_render_texture = None;
+            self.real_render = Some(render);
+            self.status_log.push(format!(
+                "reused cached page {} @ {:.0}% rot {} render",
+                key.page_index + 1,
+                key.zoom() * 100.0,
+                key.rotation_degrees
+            ));
+            return;
+        }
 
         let Ok(state) = self.state.as_ref() else {
             self.real_render_error = Some("document is not open".to_string());
@@ -1152,6 +1189,7 @@ impl GuiShellApp {
                             render.width,
                             render.height
                         ));
+                        self.render_cache.insert(output.key, render.clone());
                         self.real_render = Some(render);
                     }
                     Err(err) => {
@@ -4067,6 +4105,45 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_gui_decoded_stream_cache_reuses_loaded_chunk() {
+        let path = write_temp_pdf("gui-stream-cache", &synthetic_large_xref_pdf(16));
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        wait_for_real_render(&mut app);
+
+        let object = ObjectId { num: 4, gen: 0 };
+        app.follow_real_reference(object);
+        app.real_stream_mode = StreamMode::Decoded;
+        app.real_stream_limit = 16;
+        app.refresh_real_stream_chunk(object);
+        assert!(app.real_stream_job.is_some());
+        wait_for_real_stream(&mut app);
+        assert_eq!(
+            app.real_stream_chunk.as_ref().unwrap().mode,
+            StreamMode::Decoded
+        );
+        assert_eq!(app.decoded_stream_cache.len(), 1);
+
+        app.clear_real_stream_chunk();
+        app.refresh_real_stream_chunk(object);
+
+        assert!(app.real_stream_job.is_none());
+        assert_eq!(
+            app.real_stream_chunk.as_ref().unwrap().mode,
+            StreamMode::Decoded
+        );
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| { line.contains("reused cached decoded stream chunk 4 0 R @ 0") }));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_gui_stream_job_can_be_cancelled_from_ui_state() {
         let path = write_temp_pdf("gui-stream-cancel", &synthetic_large_xref_pdf(16));
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
@@ -4131,6 +4208,34 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("rendered page 2 @ 100%")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_render_cache_reuses_previous_page() {
+        let path = write_temp_pdf("gui-render-cache", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+        });
+        wait_for_real_render(&mut app);
+
+        app.set_render_page(1);
+        wait_for_real_render(&mut app);
+        assert_eq!(app.render_cache.len(), 2);
+
+        app.set_render_page(0);
+
+        assert!(app.real_render_job.is_none());
+        let render = app.real_render.as_ref().unwrap();
+        assert_eq!(render.page_index, 0);
+        assert_eq!((render.width, render.height), (400, 200));
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("reused cached page 1 @ 200%")));
 
         let _ = std::fs::remove_file(path);
     }

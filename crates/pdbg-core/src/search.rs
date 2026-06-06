@@ -1,6 +1,7 @@
 use crate::{
     CancelToken, ChildContainer, ChildPage, ChildRange, NodeId, ObjectDetail, ObjectId, ObjectKind,
-    ObjectSummary, ObjectValue, PageRect, ShimDocument, ShimError, TextPage, TextRequest,
+    ObjectSummary, ObjectValue, PageRect, RenderResult, ShimDocument, ShimError, StreamChunk,
+    TextPage, TextRequest,
 };
 use pdbg_shim::raw;
 use std::collections::{HashSet, VecDeque};
@@ -188,6 +189,156 @@ impl TextPageCache {
 
     fn evict_to_budget(&mut self) {
         while self.entries.len() > self.max_pages || self.current_bytes > self.max_bytes {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderResultCache<K> {
+    entries: VecDeque<RenderResultCacheEntry<K>>,
+    max_items: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RenderResultCacheEntry<K> {
+    key: K,
+    render: RenderResult,
+    bytes: usize,
+}
+
+impl<K> RenderResultCache<K>
+where
+    K: Clone + Eq,
+{
+    pub fn new(max_items: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_items: max_items.max(1),
+            max_bytes: max_bytes.max(1),
+            current_bytes: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn current_bytes(&self) -> usize {
+        self.current_bytes
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<RenderResult> {
+        let index = self.entries.iter().position(|entry| &entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let render = entry.render.clone();
+        self.entries.push_back(entry);
+        Some(render)
+    }
+
+    pub fn insert(&mut self, key: K, render: RenderResult) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            if let Some(entry) = self.entries.remove(index) {
+                self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+            }
+        }
+
+        let bytes = estimate_render_result_bytes(&render);
+        if bytes > self.max_bytes {
+            return;
+        }
+        self.current_bytes += bytes;
+        self.entries
+            .push_back(RenderResultCacheEntry { key, render, bytes });
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.max_items || self.current_bytes > self.max_bytes {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StreamChunkCache<K> {
+    entries: VecDeque<StreamChunkCacheEntry<K>>,
+    max_items: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct StreamChunkCacheEntry<K> {
+    key: K,
+    chunk: StreamChunk,
+    bytes: usize,
+}
+
+impl<K> StreamChunkCache<K>
+where
+    K: Clone + Eq,
+{
+    pub fn new(max_items: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_items: max_items.max(1),
+            max_bytes: max_bytes.max(1),
+            current_bytes: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn current_bytes(&self) -> usize {
+        self.current_bytes
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<StreamChunk> {
+        let index = self.entries.iter().position(|entry| &entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let chunk = entry.chunk.clone();
+        self.entries.push_back(entry);
+        Some(chunk)
+    }
+
+    pub fn insert(&mut self, key: K, chunk: StreamChunk) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            if let Some(entry) = self.entries.remove(index) {
+                self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+            }
+        }
+
+        let bytes = estimate_stream_chunk_bytes(&chunk);
+        if bytes > self.max_bytes {
+            return;
+        }
+        self.current_bytes += bytes;
+        self.entries
+            .push_back(StreamChunkCacheEntry { key, chunk, bytes });
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.max_items || self.current_bytes > self.max_bytes {
             let Some(entry) = self.entries.pop_front() else {
                 break;
             };
@@ -850,6 +1001,25 @@ fn estimate_text_page_bytes(page: &TextPage) -> usize {
         .sum()
 }
 
+fn estimate_render_result_bytes(render: &RenderResult) -> usize {
+    std::mem::size_of_val(render)
+        + render.pixels_rgba.len()
+        + estimate_diagnostic_bytes(&render.diagnostics)
+}
+
+fn estimate_stream_chunk_bytes(chunk: &StreamChunk) -> usize {
+    std::mem::size_of_val(chunk)
+        + chunk.bytes.len()
+        + estimate_diagnostic_bytes(&chunk.decode_diagnostics)
+}
+
+fn estimate_diagnostic_bytes(diagnostics: &[crate::DiagnosticSummary]) -> usize {
+    diagnostics
+        .iter()
+        .map(|diagnostic| std::mem::size_of_val(diagnostic) + diagnostic.message.len())
+        .sum()
+}
+
 impl Query {
     fn new(query: &str) -> Self {
         let trimmed = query.trim().to_string();
@@ -1053,6 +1223,44 @@ mod tests {
         assert!(cache.current_bytes() <= 128);
     }
 
+    #[test]
+    fn render_result_cache_reuses_lru_and_skips_oversized_entries() {
+        let mut cache = RenderResultCache::new(2, 4096);
+        cache.insert(1, render_result(0, 256));
+        cache.insert(2, render_result(1, 256));
+        assert!(cache.get(&1).is_some());
+
+        cache.insert(3, render_result(2, 256));
+
+        assert!(cache.get(&2).is_none());
+        assert!(cache.get(&1).is_some());
+        assert!(cache.get(&3).is_some());
+        assert!(cache.current_bytes() <= 4096);
+
+        let mut byte_limited = RenderResultCache::new(4, 128);
+        byte_limited.insert(1, render_result(0, 512));
+        assert!(byte_limited.is_empty());
+    }
+
+    #[test]
+    fn stream_chunk_cache_reuses_lru_and_skips_oversized_entries() {
+        let mut cache = StreamChunkCache::new(2, 4096);
+        cache.insert(1, stream_chunk(256));
+        cache.insert(2, stream_chunk(256));
+        assert!(cache.get(&1).is_some());
+
+        cache.insert(3, stream_chunk(256));
+
+        assert!(cache.get(&2).is_none());
+        assert!(cache.get(&1).is_some());
+        assert!(cache.get(&3).is_some());
+        assert!(cache.current_bytes() <= 4096);
+
+        let mut byte_limited = StreamChunkCache::new(4, 128);
+        byte_limited.insert(1, stream_chunk(512));
+        assert!(byte_limited.is_empty());
+    }
+
     fn text_page(page_index: usize, text: &str) -> TextPage {
         TextPage {
             page_index,
@@ -1066,6 +1274,29 @@ mod tests {
                 },
                 untrusted: true,
             }],
+        }
+    }
+
+    fn render_result(page_index: usize, pixel_bytes: usize) -> RenderResult {
+        RenderResult {
+            page_index,
+            width: 1,
+            height: 1,
+            stride: pixel_bytes,
+            pixels_rgba: vec![0xaa; pixel_bytes],
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn stream_chunk(byte_count: usize) -> StreamChunk {
+        StreamChunk {
+            mode: crate::StreamMode::Decoded,
+            offset: 0,
+            bytes: vec![0xbb; byte_count],
+            total_size: Some(byte_count as u64),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
         }
     }
 }
