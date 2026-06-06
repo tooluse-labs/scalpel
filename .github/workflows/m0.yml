@@ -41,6 +41,7 @@ jobs:
       CC: clang
       CFLAGS: -fsanitize=thread -fno-omit-frame-pointer
       RUSTFLAGS: -Zsanitizer=thread
+      TSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/tsan_mupdf.supp
     steps:
       - uses: actions/checkout@v4
       - name: Nightly Rust toolchain

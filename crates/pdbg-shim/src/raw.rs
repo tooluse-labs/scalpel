@@ -315,6 +315,7 @@ pub struct pdbg_open_options {
     pub max_filter_expansion_ratio: u32,
     pub max_object_depth: u32,
     pub repair_policy: pdbg_repair_policy,
+    pub allow_external_references: c_int,
 }
 
 #[repr(C)]

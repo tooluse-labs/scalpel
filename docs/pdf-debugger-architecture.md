@@ -997,6 +997,7 @@ typedef struct pdbg_open_options {
     uint32_t max_filter_expansion_ratio;
     uint32_t max_object_depth;
     pdbg_repair_policy repair_policy;
+    int allow_external_references;
 } pdbg_open_options;
 
 typedef struct pdbg_render_options {
@@ -1596,6 +1597,8 @@ Safe mode is represented by `pdbg_open_options`, `DocumentSafetyState`, and
 document diagnostics. Future dangerous operations such as JavaScript execution,
 file extraction, saving, overwriting, redaction, or arbitrary MCP file exposure
 must require explicit user confirmation and a separate policy decision.
+`allow_external_references` is carried to the shim as policy state; summary
+scanning still only reports external references and never follows them.
 
 All GUI and report egress treats PDF-controlled text as untrusted. Copy actions
 may copy bounded plain text, but they must not copy hidden markup. Markdown

@@ -35,6 +35,7 @@ struct pdbg_doc {
     int authenticated;
     int safe_mode;
     int javascript_disabled;
+    int allow_external_references;
     int repaired_or_damaged;
     pdbg_repair_policy repair_policy;
     uint64_t max_store_bytes;
@@ -84,6 +85,10 @@ struct pdbg_cancel_token {
     atomic_int cancelled;
     pthread_mutex_t mutex;
     int mutex_initialized;
+    /* Protected by mutex. The pointed fz_cookie objects are stack-owned by active
+       MuPDF calls and are unlinked before returning. The abort field itself is
+       MuPDF's documented asynchronous cancellation channel, so controller writes
+       race with MuPDF reads by design; TSan runs suppress only that field access. */
     struct pdbg_active_cookie *active_cookies;
 };
 
@@ -115,6 +120,7 @@ static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
 {
     doc->safe_mode = options ? options->safe_mode : 1;
     doc->javascript_disabled = options ? options->disable_javascript : 1;
+    doc->allow_external_references = options ? options->allow_external_references : 0;
     doc->repair_policy = options ? options->repair_policy : PDBG_REPAIR_DEFAULT;
     doc->max_store_bytes =
         options && options->max_store_bytes ? options->max_store_bytes : PDBG_DEFAULT_MAX_STORE_BYTES;
@@ -290,6 +296,34 @@ static int attach_single_diag(pdbg_diagnostic_list **out, pdbg_diagnostic_code c
         return 0;
     free_diag_list(*out);
     *out = list;
+    return 1;
+}
+
+static int append_diag(pdbg_diagnostic_list **out, pdbg_diagnostic_code code, const char *message)
+{
+    if (!out)
+        return 0;
+    if (!*out)
+        return attach_single_diag(out, code, message);
+
+    char *message_copy = copy_string(message);
+    if (!message_copy)
+        return 0;
+
+    pdbg_diagnostic *items =
+        (pdbg_diagnostic *)realloc((*out)->items, ((*out)->len + 1) * sizeof(pdbg_diagnostic));
+    if (!items) {
+        free(message_copy);
+        return 0;
+    }
+
+    (*out)->items = items;
+    pdbg_diagnostic *item = &(*out)->items[(*out)->len];
+    memset(item, 0, sizeof(*item));
+    item->severity = PDBG_DIAG_WARNING;
+    item->code = code;
+    item->message = message_copy;
+    (*out)->len += 1;
     return 1;
 }
 
@@ -581,6 +615,123 @@ static int document_is_encrypted(fz_context *ctx, fz_document *doc)
     char encryption[128];
     int written = fz_lookup_metadata(ctx, doc, FZ_META_ENCRYPTION, encryption, sizeof(encryption));
     return written > 0 && strcmp(encryption, "None") != 0;
+}
+
+static int pdf_name_is(fz_context *ctx, pdf_obj *obj, const char *name)
+{
+    if (!obj || !name || !pdf_is_name(ctx, obj))
+        return 0;
+    const char *actual = pdf_to_name(ctx, obj);
+    return actual && strcmp(actual, name) == 0;
+}
+
+static int action_name_is_external(fz_context *ctx, pdf_obj *obj)
+{
+    return pdf_name_is(ctx, obj, "URI") || pdf_name_is(ctx, obj, "Launch") ||
+           pdf_name_is(ctx, obj, "GoToR") || pdf_name_is(ctx, obj, "SubmitForm") ||
+           pdf_name_is(ctx, obj, "ImportData");
+}
+
+static int file_spec_type_name(fz_context *ctx, pdf_obj *obj)
+{
+    return pdf_name_is(ctx, obj, "Filespec") || pdf_name_is(ctx, obj, "FileSpec");
+}
+
+static void scan_object_safety_refs(
+    fz_context *ctx,
+    pdf_obj *obj,
+    uint32_t depth,
+    uint32_t max_depth,
+    size_t *budget,
+    int *embedded,
+    int *external)
+{
+    if (!obj || !budget || *budget == 0 || depth > max_depth || (*embedded && *external))
+        return;
+    if (pdf_is_indirect(ctx, obj))
+        return;
+
+    *budget -= 1;
+
+    if (pdf_is_dict(ctx, obj)) {
+        int len = pdf_dict_len(ctx, obj);
+        int is_file_spec = 0;
+        int has_embedded_file_dict = 0;
+        int has_file_name = 0;
+
+        for (int i = 0; i < len && (!*embedded || !*external); i++) {
+            pdf_obj *key = pdf_dict_get_key(ctx, obj, i);
+            pdf_obj *val = pdf_dict_get_val(ctx, obj, i);
+            const char *key_name = pdf_is_name(ctx, key) ? pdf_to_name(ctx, key) : "";
+
+            if (strcmp(key_name, "Type") == 0) {
+                if (pdf_name_is(ctx, val, "EmbeddedFile"))
+                    *embedded = 1;
+                if (file_spec_type_name(ctx, val))
+                    is_file_spec = 1;
+            } else if (strcmp(key_name, "EF") == 0) {
+                has_embedded_file_dict = 1;
+                *embedded = 1;
+            } else if (
+                strcmp(key_name, "F") == 0 || strcmp(key_name, "UF") == 0 ||
+                strcmp(key_name, "DOS") == 0 || strcmp(key_name, "Mac") == 0 ||
+                strcmp(key_name, "Unix") == 0) {
+                if (pdf_is_string(ctx, val) || pdf_is_name(ctx, val) || pdf_is_dict(ctx, val))
+                    has_file_name = 1;
+            } else if (strcmp(key_name, "S") == 0) {
+                if (action_name_is_external(ctx, val))
+                    *external = 1;
+            } else if (strcmp(key_name, "URI") == 0) {
+                if (pdf_is_string(ctx, val) || pdf_is_name(ctx, val))
+                    *external = 1;
+            } else if (strcmp(key_name, "FS") == 0) {
+                if (pdf_name_is(ctx, val, "URL"))
+                    *external = 1;
+            }
+
+            if (val && !pdf_is_indirect(ctx, val))
+                scan_object_safety_refs(ctx, val, depth + 1, max_depth, budget, embedded, external);
+        }
+
+        if (is_file_spec && has_file_name && !has_embedded_file_dict)
+            *external = 1;
+    } else if (pdf_is_array(ctx, obj)) {
+        int len = pdf_array_len(ctx, obj);
+        for (int i = 0; i < len && (!*embedded || !*external); i++) {
+            pdf_obj *item = pdf_array_get(ctx, obj, i);
+            if (item && !pdf_is_indirect(ctx, item))
+                scan_object_safety_refs(ctx, item, depth + 1, max_depth, budget, embedded, external);
+        }
+    }
+}
+
+static void scan_document_safety_refs(fz_context *ctx, pdbg_doc *doc, int *embedded, int *external)
+{
+    if (!doc || !doc->pdf_doc || !embedded || !external)
+        return;
+
+    int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
+    size_t budget = 4096;
+    uint32_t max_depth = doc->max_object_depth ? doc->max_object_depth : PDBG_DEFAULT_MAX_OBJECT_DEPTH;
+
+    for (int num = 1; num < xref_len && (!*embedded || !*external) && budget > 0; num++) {
+        pdf_obj *obj = NULL;
+        fz_var(obj);
+        fz_try(ctx)
+        {
+            obj = pdf_load_object(ctx, doc->pdf_doc, num);
+            scan_object_safety_refs(ctx, obj, 0, max_depth, &budget, embedded, external);
+        }
+        fz_always(ctx)
+        {
+            if (obj)
+                pdf_drop_obj(ctx, obj);
+        }
+        fz_catch(ctx)
+        {
+            /* Safety scanning is best-effort; damaged objects are reported by other paths. */
+        }
+    }
 }
 
 static pdbg_object_id object_id_from_ref(fz_context *ctx, pdf_obj *obj)
@@ -1266,7 +1417,7 @@ void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
             pthread_mutex_lock(&token->mutex);
             for (struct pdbg_active_cookie *active = token->active_cookies; active; active = active->next) {
                 if (active->cookie) {
-                    /* MuPDF's fz_cookie contract uses this field for asynchronous abort. */
+                    /* Intentional MuPDF async-abort write; lifetime is mutex-protected above. */
                     active->cookie->abort = 1;
                 }
             }
@@ -1579,10 +1730,38 @@ pdbg_status pdbg_document_summary(pdbg_doc *doc, pdbg_document_summary_out *out,
             out->permissions.high_quality_print = pdf_has_permission(ctx, doc->pdf_doc, FZ_PERMISSION_PRINT_HQ);
             fill_metadata(ctx, doc->fz_doc, out);
 
-            if (pdf_was_repaired(ctx, doc->pdf_doc)) {
+            if (status == PDBG_OK) {
+                int embedded = 0;
+                int external = 0;
+                scan_document_safety_refs(ctx, doc, &embedded, &external);
+                out->embedded_files_detected = embedded;
+                out->external_references_detected = external;
+                if (embedded &&
+                    !append_diag(
+                        &out->diagnostics,
+                        PDBG_DIAG_EMBEDDED_FILE_DETECTED,
+                        "embedded files detected; automatic extraction is disabled")) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+                if (status == PDBG_OK && external &&
+                    !append_diag(
+                        &out->diagnostics,
+                        PDBG_DIAG_EXTERNAL_REFERENCE_DETECTED,
+                        doc->allow_external_references
+                            ? "external references detected; automatic following is not performed by this shim"
+                            : "external references detected; safe mode will not follow them")) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+            }
+
+            if (status == PDBG_OK && pdf_was_repaired(ctx, doc->pdf_doc)) {
                 out->repaired_or_damaged = 1;
-                out->diagnostics =
-                    make_diag_list(PDBG_DIAG_REPAIR_WARNING, "MuPDF repaired the document on open");
+                if (!append_diag(&out->diagnostics, PDBG_DIAG_REPAIR_WARNING, "MuPDF repaired the document on open")) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
             }
         }
     }

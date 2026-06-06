@@ -51,6 +51,7 @@ impl SafeModeConfig {
                 RepairPolicy::Never => raw::pdbg_repair_policy::PDBG_REPAIR_NEVER,
                 RepairPolicy::Allow => raw::pdbg_repair_policy::PDBG_REPAIR_ALLOW,
             },
+            allow_external_references: self.allow_external_references as i32,
         }
     }
 }
@@ -74,6 +75,7 @@ mod tests {
         assert_eq!(raw.safe_mode, 1);
         assert_eq!(raw.disable_javascript, 1);
         assert_eq!(raw.enable_ocr, 0);
+        assert_eq!(raw.allow_external_references, 0);
         assert_eq!(
             raw.repair_policy,
             raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT
@@ -91,5 +93,15 @@ mod tests {
             config.to_raw_open_options().repair_policy,
             raw::pdbg_repair_policy::PDBG_REPAIR_NEVER
         );
+    }
+
+    #[test]
+    fn allow_external_references_maps_to_raw_open_option() {
+        let config = SafeModeConfig {
+            allow_external_references: true,
+            ..SafeModeConfig::default()
+        };
+
+        assert_eq!(config.to_raw_open_options().allow_external_references, 1);
     }
 }

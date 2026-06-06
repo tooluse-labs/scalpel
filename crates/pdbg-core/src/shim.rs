@@ -1443,6 +1443,93 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_external_reference_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /S /URI /URI (https://example.invalid/payload) >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_embedded_file_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(payload.txt) 4 0 R] >> >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /Filespec /F (payload.txt) /EF << /F 5 0 R >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "5 0 obj\n<< /Type /EmbeddedFile /Length 5 >>\nstream\nhello\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     fn synthetic_stream_pdf() -> Vec<u8> {
         fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
             offsets.push(pdf.len());
@@ -1755,6 +1842,42 @@ mod tests {
         assert!(summary.parsed_object_count.is_some_and(|count| count > 0));
         assert!(summary.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == DiagnosticCode::RepairWarning
+                && diagnostic.severity == DiagnosticSeverity::Warning
+        }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_external_reference_on_summary() {
+        let path = write_temp_real_pdf("external-reference", &synthetic_external_reference_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+
+        assert!(summary.safety.external_references_detected);
+        assert!(summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::ExternalReferenceDetected
+                && diagnostic.severity == DiagnosticSeverity::Warning
+        }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_embedded_file_on_summary() {
+        let path = write_temp_real_pdf("embedded-file", &synthetic_embedded_file_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+
+        assert!(summary.safety.embedded_files_detected);
+        assert!(summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::EmbeddedFileDetected
                 && diagnostic.severity == DiagnosticSeverity::Warning
         }));
 

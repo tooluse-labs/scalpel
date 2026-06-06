@@ -36,6 +36,7 @@ mod tests {
             max_filter_expansion_ratio: 100,
             max_object_depth: 128,
             repair_policy: raw::pdbg_repair_policy::PDBG_REPAIR_DEFAULT,
+            allow_external_references: 0,
         }
     }
 

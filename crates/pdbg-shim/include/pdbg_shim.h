@@ -239,6 +239,7 @@ typedef struct pdbg_open_options {
     uint32_t max_filter_expansion_ratio;
     uint32_t max_object_depth;
     pdbg_repair_policy repair_policy;
+    int allow_external_references;
 } pdbg_open_options;
 
 typedef struct pdbg_render_options {
