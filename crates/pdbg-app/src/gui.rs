@@ -45,6 +45,7 @@ const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
+const APP_TITLE: &str = "pdbg Preview";
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -178,13 +179,13 @@ struct OpenedPdfModel {
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("pdbg UI Shell Spike")
+            .with_title(APP_TITLE)
             .with_inner_size([1440.0, 900.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "pdbg UI Shell Spike",
+        APP_TITLE,
         native_options,
         Box::new(move |cc| {
             configure_egui(&cc.egui_ctx);
@@ -1308,6 +1309,27 @@ impl GuiShellApp {
         )
     }
 
+    fn window_title(&self) -> String {
+        if let Some(job) = &self.open_pdf_job {
+            return format!(
+                "Opening {} - {APP_TITLE}",
+                display_file_chip_label(&job.path)
+            );
+        }
+        if self.empty_workspace {
+            return APP_TITLE.to_string();
+        }
+        if let Ok(state) = &self.state {
+            if let Some(summary) = &state.panels.summary {
+                return format!(
+                    "{} - {APP_TITLE}",
+                    display_file_chip_label(&summary.file_path)
+                );
+            }
+        }
+        format!("fake.pdf - {APP_TITLE}")
+    }
+
     fn breadcrumb_label(&self) -> String {
         if let Some(detail) = &self.real_detail {
             return node_breadcrumb(&detail.id);
@@ -2196,6 +2218,7 @@ impl eframe::App for GuiShellApp {
         self.poll_real_render_job();
         self.poll_object_search_job();
         self.poll_text_search_job();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         if self.open_pdf_job.is_some()
             || self.real_stream_job.is_some()
             || self.real_render_job.is_some()
@@ -4780,7 +4803,22 @@ mod tests {
         assert_eq!(app.page_count(), 0);
         assert!(app.real_render_job.is_none());
         assert_eq!(app.document_chips().0, "No PDF");
+        assert_eq!(app.window_title(), APP_TITLE);
         assert!(app.status_log.iter().any(|line| line == "No PDF open"));
+    }
+
+    #[test]
+    fn gui_window_title_reflects_document_and_pending_open() {
+        let mut app = GuiShellApp::new();
+        assert_eq!(app.window_title(), format!("fake.pdf - {APP_TITLE}"));
+
+        app.open_pdf_from_path("fixtures/synthetic/minimal.pdf".to_string());
+        assert!(app.open_pdf_job.is_some());
+        assert_eq!(
+            app.window_title(),
+            format!("Opening minimal.pdf - {APP_TITLE}")
+        );
+        app.cancel_open_pdf_job();
     }
 
     #[cfg(not(feature = "real-mupdf"))]
@@ -4850,6 +4888,10 @@ mod tests {
         assert!(app.open_pdf_error.is_none());
         assert!(!app.open_pdf_dialog_open);
         let canonical = path.canonicalize().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            app.window_title(),
+            format!("{} - {APP_TITLE}", display_file_chip_label(&canonical))
+        );
         assert_eq!(app.recent_pdf_paths.first(), Some(&canonical));
         assert_eq!(
             load_recent_pdf_paths_from(&recent_path).first(),
