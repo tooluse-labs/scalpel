@@ -1,7 +1,8 @@
 use crate::{
     ChildContainer, ChildPage, ChildRange, NodeId, ObjectDetail, ObjectId, ObjectKind,
-    ObjectSummary, ObjectValue, ShimDocument, ShimError,
+    ObjectSummary, ObjectValue, PageRect, ShimDocument, ShimError, TextPage, TextRequest,
 };
+use pdbg_shim::raw;
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Debug)]
@@ -55,6 +56,140 @@ pub struct ObjectSearchResult {
     pub hits: Vec<ObjectSearchHit>,
     pub searched_nodes: usize,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSearchRequest {
+    pub query: String,
+    pub start_page: usize,
+    pub max_pages: usize,
+    pub max_results: usize,
+    pub max_excerpt_chars: usize,
+    pub max_chars_per_page: usize,
+    pub max_blocks_per_page: usize,
+}
+
+impl TextSearchRequest {
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            start_page: 0,
+            max_pages: 64,
+            max_results: 100,
+            max_excerpt_chars: 160,
+            max_chars_per_page: 512_000,
+            max_blocks_per_page: 50_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSearchHit {
+    pub page_index: usize,
+    pub span_index: usize,
+    pub excerpt: String,
+    pub bbox: Option<PageRect>,
+    pub untrusted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSearchPageError {
+    pub page_index: usize,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSearchResult {
+    pub hits: Vec<TextSearchHit>,
+    pub searched_pages: usize,
+    pub cache_hits: usize,
+    pub page_errors: Vec<TextSearchPageError>,
+    pub truncated: bool,
+}
+
+impl TextSearchResult {
+    fn empty() -> Self {
+        Self {
+            hits: Vec::new(),
+            searched_pages: 0,
+            cache_hits: 0,
+            page_errors: Vec::new(),
+            truncated: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TextPageCache {
+    entries: VecDeque<TextPageCacheEntry>,
+    max_pages: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TextPageCacheEntry {
+    page: TextPage,
+    bytes: usize,
+}
+
+impl TextPageCache {
+    pub fn new(max_pages: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_pages: max_pages.max(1),
+            max_bytes: max_bytes.max(1),
+            current_bytes: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn current_bytes(&self) -> usize {
+        self.current_bytes
+    }
+
+    pub fn get(&mut self, page_index: usize) -> Option<TextPage> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.page.page_index == page_index)?;
+        let entry = self.entries.remove(index)?;
+        let page = entry.page.clone();
+        self.entries.push_back(entry);
+        Some(page)
+    }
+
+    pub fn insert(&mut self, page: TextPage) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.page.page_index == page.page_index)
+        {
+            if let Some(entry) = self.entries.remove(index) {
+                self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+            }
+        }
+
+        let bytes = estimate_text_page_bytes(&page);
+        if bytes > self.max_bytes {
+            return;
+        }
+        self.current_bytes += bytes;
+        self.entries.push_back(TextPageCacheEntry { page, bytes });
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.max_pages || self.current_bytes > self.max_bytes {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
+        }
+    }
 }
 
 struct PendingNode {
@@ -206,6 +341,83 @@ where
         searched_nodes: state.searched_nodes,
         truncated: state.truncated,
     })
+}
+
+pub fn search_text<D>(
+    document: &mut D,
+    cache: &mut TextPageCache,
+    request: &TextSearchRequest,
+) -> Result<TextSearchResult, ShimError>
+where
+    D: ShimDocument,
+{
+    let page_count = document.summary()?.page_count;
+    search_text_with_cache(page_count, cache, request, |text_request| {
+        document.extract_text(text_request)
+    })
+}
+
+pub fn search_text_with_cache<F>(
+    page_count: usize,
+    cache: &mut TextPageCache,
+    request: &TextSearchRequest,
+    mut extract: F,
+) -> Result<TextSearchResult, ShimError>
+where
+    F: FnMut(&TextRequest) -> Result<TextPage, ShimError>,
+{
+    let query = Query::new(&request.query);
+    if query.folded.is_empty() || page_count == 0 {
+        return Ok(TextSearchResult::empty());
+    }
+
+    let mut result = TextSearchResult::empty();
+    let max_results = request.max_results.max(1);
+    let start_page = request.start_page.min(page_count);
+    let max_pages = request.max_pages.max(1);
+    let end_page = start_page.saturating_add(max_pages).min(page_count);
+
+    for page_index in start_page..end_page {
+        if result.hits.len() >= max_results {
+            result.truncated = true;
+            break;
+        }
+
+        let page = if let Some(page) = cache.get(page_index) {
+            result.cache_hits += 1;
+            page
+        } else {
+            let mut text_request = TextRequest::page(page_index);
+            text_request.max_chars = request.max_chars_per_page.max(1);
+            text_request.max_blocks = request.max_blocks_per_page.max(1);
+            match extract(&text_request) {
+                Ok(page) => {
+                    cache.insert(page.clone());
+                    page
+                }
+                Err(err) if err.status == raw::pdbg_status::PDBG_ERROR_CANCELLED => {
+                    return Err(err);
+                }
+                Err(err) => {
+                    result.searched_pages += 1;
+                    result.page_errors.push(TextSearchPageError {
+                        page_index,
+                        message: err.message,
+                    });
+                    continue;
+                }
+            }
+        };
+
+        result.searched_pages += 1;
+        append_text_hits(&page, &query.folded, request, max_results, &mut result);
+    }
+
+    if end_page < page_count {
+        result.truncated = true;
+    }
+
+    Ok(result)
 }
 
 fn consume_child_page<D>(
@@ -376,6 +588,48 @@ fn match_detail(
     }
 }
 
+fn append_text_hits(
+    page: &TextPage,
+    folded_query: &str,
+    request: &TextSearchRequest,
+    max_results: usize,
+    result: &mut TextSearchResult,
+) {
+    for (span_index, span) in page.spans.iter().enumerate() {
+        if result.hits.len() >= max_results {
+            result.truncated = true;
+            return;
+        }
+
+        let folded_text = span.text.to_lowercase();
+        let mut offset = 0;
+        while offset < folded_text.len() {
+            let Some(relative_match) = folded_text[offset..].find(folded_query) else {
+                break;
+            };
+            let match_start = offset + relative_match;
+            let match_end = match_start + folded_query.len();
+            result.hits.push(TextSearchHit {
+                page_index: page.page_index,
+                span_index,
+                excerpt: bounded_text_excerpt(
+                    &span.text,
+                    match_start,
+                    match_end,
+                    request.max_excerpt_chars,
+                ),
+                bbox: Some(span.bbox.clone()),
+                untrusted: span.untrusted,
+            });
+            if result.hits.len() >= max_results {
+                result.truncated = true;
+                return;
+            }
+            offset = match_end.max(match_start + 1);
+        }
+    }
+}
+
 fn hit(
     summary: &ObjectSummary,
     matched_field: ObjectSearchField,
@@ -448,6 +702,62 @@ fn truncate_excerpt(value: &str) -> String {
         end -= 1;
     }
     format!("{}...", &value[..end])
+}
+
+fn bounded_text_excerpt(
+    text: &str,
+    match_start: usize,
+    match_end: usize,
+    max_chars: usize,
+) -> String {
+    let total_chars = text.chars().count();
+    let max_chars = max_chars.max(1);
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+
+    let start = clamp_char_boundary(text, match_start.min(text.len()));
+    let end = clamp_char_boundary(text, match_end.min(text.len())).max(start);
+    let match_start_char = text[..start].chars().count();
+    let match_chars = text[start..end].chars().count().max(1);
+    let context_chars = max_chars.saturating_sub(match_chars) / 2;
+    let excerpt_start_char = match_start_char.saturating_sub(context_chars);
+    let excerpt_end_char = excerpt_start_char.saturating_add(max_chars).min(total_chars);
+
+    let mut excerpt = String::new();
+    if excerpt_start_char > 0 {
+        excerpt.push_str("...");
+    }
+    excerpt.push_str(&slice_by_char_range(
+        text,
+        excerpt_start_char,
+        excerpt_end_char,
+    ));
+    if excerpt_end_char < total_chars {
+        excerpt.push_str("...");
+    }
+    excerpt
+}
+
+fn clamp_char_boundary(text: &str, mut index: usize) -> usize {
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn slice_by_char_range(text: &str, start_char: usize, end_char: usize) -> String {
+    text.chars()
+        .skip(start_char)
+        .take(end_char.saturating_sub(start_char))
+        .collect()
+}
+
+fn estimate_text_page_bytes(page: &TextPage) -> usize {
+    page.spans
+        .iter()
+        .map(|span| span.text.len() + std::mem::size_of_val(span))
+        .sum()
 }
 
 impl Query {
@@ -557,5 +867,80 @@ mod tests {
             hit.matched_field == ObjectSearchField::ScalarPreview
                 && hit.excerpt == "fake object"
         }));
+    }
+
+    #[test]
+    fn text_search_finds_untrusted_fake_text_and_caches_page() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let mut cache = TextPageCache::new(4, 64 * 1024);
+        let request = TextSearchRequest {
+            max_pages: 1,
+            ..TextSearchRequest::new("A")
+        };
+
+        let first = search_text(&mut doc, &mut cache, &request).unwrap();
+
+        assert_eq!(first.searched_pages, 1);
+        assert_eq!(first.cache_hits, 0);
+        assert!(first.page_errors.is_empty());
+        assert!(first.hits.iter().any(|hit| {
+            hit.page_index == 0
+                && hit.span_index == 0
+                && hit.excerpt.as_bytes() == b"A\0B"
+                && hit.bbox.is_some()
+                && hit.untrusted
+        }));
+        assert_eq!(cache.len(), 1);
+
+        let second = search_text(&mut doc, &mut cache, &request).unwrap();
+        assert_eq!(second.cache_hits, 1);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn text_search_reports_page_limit_truncation() {
+        let mut cache = TextPageCache::new(4, 64 * 1024);
+        let request = TextSearchRequest {
+            max_pages: 1,
+            ..TextSearchRequest::new("needle")
+        };
+
+        let result = search_text_with_cache(3, &mut cache, &request, |text_request| {
+            Ok(text_page(text_request.page_index, "needle"))
+        })
+        .unwrap();
+
+        assert_eq!(result.searched_pages, 1);
+        assert!(result.truncated);
+        assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn text_page_cache_evicts_to_page_and_byte_budgets() {
+        let mut cache = TextPageCache::new(1, 128);
+        cache.insert(text_page(0, "first"));
+        cache.insert(text_page(1, "second"));
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(1).is_some());
+        assert!(cache.current_bytes() <= 128);
+    }
+
+    fn text_page(page_index: usize, text: &str) -> TextPage {
+        TextPage {
+            page_index,
+            spans: vec![crate::TextSpan {
+                text: text.to_string(),
+                bbox: PageRect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+                untrusted: true,
+            }],
+        }
     }
 }

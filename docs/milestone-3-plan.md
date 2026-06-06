@@ -71,6 +71,10 @@ content-stream operator visualization remain later milestones.
 
 ### M3.3 Text Search
 
+- Initial slice: bounded text search now runs over cached `TextPage` extraction
+  results, with explicit page/byte cache budgets, max-page/max-result bounds,
+  page-level extraction errors, bbox/untrusted propagation, and GUI search
+  workers that can be cancelled while results jump the preview to the hit page.
 - Add bounded text-search over `TextPage` caches.
 - Page extraction should be demand-driven and cancellable; broad document
   search must report partial progress rather than freezing the UI.

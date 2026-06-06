@@ -3,11 +3,12 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    escape_pdf_text, search_objects, CancelToken, ChildContainer, ChildPage, ChildRange,
-    DiagnosticSeverity, EgressFormat, EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId,
-    ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest, ObjectSearchResult,
-    ObjectSummary, ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode,
-    StreamSummary, StreamViewMode,
+    escape_pdf_text, search_objects, search_text_with_cache, CancelToken, ChildContainer,
+    ChildPage, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
+    NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit,
+    ObjectSearchRequest, ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest,
+    RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary, StreamViewMode,
+    TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
 };
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
@@ -24,6 +25,12 @@ const OBJECT_SEARCH_MAX_CHILD_PAGES: usize = 2;
 const OBJECT_SEARCH_MAX_DEPTH: usize = 4;
 const OBJECT_SEARCH_MAX_NODES: usize = 768;
 const OBJECT_SEARCH_MAX_RESULTS: usize = 100;
+const TEXT_SEARCH_CACHE_MAX_PAGES: usize = 16;
+const TEXT_SEARCH_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const TEXT_SEARCH_MAX_PAGES: usize = 64;
+const TEXT_SEARCH_MAX_RESULTS: usize = 100;
+const TEXT_SEARCH_MAX_CHARS_PER_PAGE: usize = 512 * 1024;
+const TEXT_SEARCH_MAX_BLOCKS_PER_PAGE: usize = 50_000;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -91,6 +98,23 @@ impl Drop for RealStreamJob {
 struct RealStreamJobOutput {
     key: RealStreamKey,
     result: Result<StreamChunk, String>,
+}
+
+struct RealTextSearchJob {
+    query: String,
+    cancel: Arc<CancelToken>,
+    receiver: mpsc::Receiver<RealTextSearchJobOutput>,
+}
+
+impl Drop for RealTextSearchJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct RealTextSearchJobOutput {
+    query: String,
+    result: Result<(TextSearchResult, TextPageCache), String>,
 }
 
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
@@ -332,6 +356,12 @@ pub struct GuiShellApp {
     object_search_query: String,
     object_search_result: Option<ObjectSearchResult>,
     object_search_error: Option<String>,
+    text_search_query: String,
+    text_search_result: Option<TextSearchResult>,
+    text_search_error: Option<String>,
+    text_search_job: Option<RealTextSearchJob>,
+    text_search_cache: TextPageCache,
+    selected_text_hit: Option<TextSearchHit>,
     copied_excerpt: Option<EscapedText>,
     status_log: Vec<String>,
 }
@@ -398,6 +428,15 @@ impl GuiShellApp {
             object_search_query: String::new(),
             object_search_result: None,
             object_search_error: None,
+            text_search_query: String::new(),
+            text_search_result: None,
+            text_search_error: None,
+            text_search_job: None,
+            text_search_cache: TextPageCache::new(
+                TEXT_SEARCH_CACHE_MAX_PAGES,
+                TEXT_SEARCH_CACHE_MAX_BYTES,
+            ),
+            selected_text_hit: None,
             copied_excerpt: None,
             status_log,
         };
@@ -549,6 +588,144 @@ impl GuiShellApp {
                 self.object_search_error = Some(err.clone());
             }
         }
+    }
+
+    fn start_text_search(&mut self) {
+        let query = self.text_search_query.trim().to_string();
+        if query.is_empty() {
+            self.cancel_text_search_job();
+            self.text_search_result = None;
+            self.text_search_error = None;
+            self.selected_text_hit = None;
+            return;
+        }
+
+        if let Some(job) = self.text_search_job.take() {
+            job.cancel.cancel();
+        }
+
+        let page_count = self.page_count();
+        if page_count == 0 {
+            self.text_search_result = None;
+            self.text_search_error = Some("document has no pages".to_string());
+            return;
+        }
+
+        let Ok(state) = self.state.as_ref() else {
+            self.text_search_result = None;
+            self.text_search_error = Some("document is not open".to_string());
+            return;
+        };
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
+            Err(err) => {
+                self.text_search_result = None;
+                self.text_search_error = Some(err.message);
+                return;
+            }
+        };
+
+        let request = TextSearchRequest {
+            query: query.clone(),
+            max_pages: TEXT_SEARCH_MAX_PAGES,
+            max_results: TEXT_SEARCH_MAX_RESULTS,
+            max_chars_per_page: TEXT_SEARCH_MAX_CHARS_PER_PAGE,
+            max_blocks_per_page: TEXT_SEARCH_MAX_BLOCKS_PER_PAGE,
+            ..TextSearchRequest::new(query.clone())
+        };
+        let session = state.session.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let mut cache = self.text_search_cache.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = session
+                .run_task(|document| {
+                    search_text_with_cache(page_count, &mut cache, &request, |text_request| {
+                        document
+                            .extract_text_with_cancel_token(text_request, worker_cancel.as_ref())
+                    })
+                })
+                .map(|result| (result, cache))
+                .map_err(|err| err.message);
+            let _ = sender.send(RealTextSearchJobOutput { query, result });
+        });
+
+        self.text_search_result = None;
+        self.text_search_error = None;
+        self.selected_text_hit = None;
+        self.text_search_job = Some(RealTextSearchJob {
+            query: self.text_search_query.trim().to_string(),
+            cancel,
+            receiver,
+        });
+        self.status_log.push(format!(
+            "queued text search {:?} across up to {} pages",
+            self.text_search_query.trim(),
+            page_count.min(TEXT_SEARCH_MAX_PAGES)
+        ));
+    }
+
+    fn cancel_text_search_job(&mut self) {
+        if let Some(job) = self.text_search_job.take() {
+            job.cancel.cancel();
+            self.text_search_error = Some("text search cancelled".to_string());
+            self.status_log
+                .push(format!("cancelled text search {:?}", job.query));
+        }
+    }
+
+    fn poll_text_search_job(&mut self) {
+        let Some(polled) =
+            self.text_search_job
+                .as_ref()
+                .and_then(|job| match job.receiver.try_recv() {
+                    Ok(output) => Some(Ok(output)),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.query.clone())),
+                })
+        else {
+            return;
+        };
+
+        self.text_search_job = None;
+        match polled {
+            Ok(output) => match output.result {
+                Ok((result, cache)) => {
+                    self.status_log.push(format!(
+                        "text search {:?}: {} hits across {} pages{}",
+                        output.query,
+                        result.hits.len(),
+                        result.searched_pages,
+                        if result.truncated { " (truncated)" } else { "" }
+                    ));
+                    self.text_search_cache = cache;
+                    self.text_search_result = Some(result);
+                    self.text_search_error = None;
+                }
+                Err(err) => {
+                    self.text_search_result = None;
+                    self.text_search_error = Some(err.clone());
+                    self.status_log
+                        .push(format!("text search {:?} failed: {err}", output.query));
+                }
+            },
+            Err(query) => {
+                self.text_search_result = None;
+                self.text_search_error = Some("text search worker disconnected".to_string());
+                self.status_log
+                    .push(format!("text search {:?} worker disconnected", query));
+            }
+        }
+    }
+
+    fn follow_text_search_hit(&mut self, hit: &TextSearchHit) {
+        self.selected_text_hit = Some(hit.clone());
+        self.set_render_page(hit.page_index);
+        self.status_log.push(format!(
+            "opened text search hit page {} span {}",
+            hit.page_index + 1,
+            hit.span_index
+        ));
     }
 
     fn expand_selected_real_row(&mut self) -> usize {
@@ -1243,6 +1420,63 @@ fn object_ref_text(object: ObjectId) -> String {
     format!("{} {} R", object.num, object.gen)
 }
 
+fn text_search_status_label(
+    result: Option<&TextSearchResult>,
+    error: Option<&str>,
+    running: bool,
+    cached_pages: usize,
+    cached_bytes: usize,
+) -> String {
+    if running {
+        return "running".to_string();
+    }
+    if error.is_some() {
+        return format!("failed / {cached_pages} cached");
+    }
+    match result {
+        Some(result) => format!(
+            "{} hits / {} pages{} / {} cached / {} KiB",
+            result.hits.len(),
+            result.searched_pages,
+            if result.truncated { " / truncated" } else { "" },
+            cached_pages,
+            cached_bytes / 1024
+        ),
+        None => format!("{cached_pages} cached / {} KiB", cached_bytes / 1024),
+    }
+}
+
+fn text_search_hit_summary(hit: &TextSearchHit) -> String {
+    format!(
+        "p{} s{}  {}",
+        hit.page_index + 1,
+        hit.span_index,
+        hit.excerpt.replace('\n', " ")
+    )
+}
+
+fn text_search_hit_hover(hit: &TextSearchHit) -> String {
+    let trust = if hit.untrusted { "untrusted" } else { "trusted" };
+    match &hit.bbox {
+        Some(bbox) => format!(
+            "page {} span {} {trust} bbox {:.1},{:.1} {:.1}x{:.1}",
+            hit.page_index + 1,
+            hit.span_index,
+            bbox.x,
+            bbox.y,
+            bbox.width,
+            bbox.height
+        ),
+        None => format!("page {} span {} {trust}", hit.page_index + 1, hit.span_index),
+    }
+}
+
+fn text_hits_same_position(left: &TextSearchHit, right: &TextSearchHit) -> bool {
+    left.page_index == right.page_index
+        && left.span_index == right.span_index
+        && left.excerpt == right.excerpt
+}
+
 fn push_value_reference(out: &mut Vec<ObjectId>, value: &ObjectValue) {
     if let ObjectValue::IndirectRef(object) = value {
         push_unique_object(out, *object);
@@ -1437,7 +1671,11 @@ impl eframe::App for GuiShellApp {
         let ctx = ui.ctx().clone();
         self.poll_real_stream_job();
         self.poll_real_render_job();
-        if self.real_stream_job.is_some() || self.real_render_job.is_some() {
+        self.poll_text_search_job();
+        if self.real_stream_job.is_some()
+            || self.real_render_job.is_some()
+            || self.text_search_job.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
@@ -1531,6 +1769,8 @@ impl GuiShellApp {
     fn draw_tree(&mut self, ui: &mut egui::Ui) {
         self.draw_object_search(ui);
         ui.add_space(8.0);
+        self.draw_text_search(ui);
+        ui.add_space(8.0);
         section_header(ui, "Document Tree", Some(&self.tree.row_count_label()));
 
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
@@ -1610,6 +1850,103 @@ impl GuiShellApp {
         }
         if let Some(hit) = clicked_hit {
             self.follow_object_search_hit(&hit);
+        }
+    }
+
+    fn draw_text_search(&mut self, ui: &mut egui::Ui) {
+        let status = text_search_status_label(
+            self.text_search_result.as_ref(),
+            self.text_search_error.as_deref(),
+            self.text_search_job.is_some(),
+            self.text_search_cache.len(),
+            self.text_search_cache.current_bytes(),
+        );
+        section_header(ui, "Text Search", Some(&status));
+
+        let mut run_search = false;
+        let mut cancel_search = false;
+        let mut clear_search = false;
+        section_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    self.text_search_job.is_none(),
+                    TextEdit::singleline(&mut self.text_search_query)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("page text"),
+                );
+                run_search |= response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if self.text_search_job.is_some() {
+                    cancel_search |= ui.button("Cancel").clicked();
+                } else {
+                    run_search |= ui.button("Search").clicked();
+                }
+                clear_search |= ui.button("Clear").clicked();
+            });
+        });
+
+        if clear_search {
+            self.cancel_text_search_job();
+            self.text_search_query.clear();
+            self.text_search_result = None;
+            self.text_search_error = None;
+            self.selected_text_hit = None;
+        } else if cancel_search {
+            self.cancel_text_search_job();
+        } else if run_search {
+            self.start_text_search();
+        }
+
+        if let Some(err) = &self.text_search_error {
+            ui.add_space(6.0);
+            ui.colored_label(PdbgTheme::ERROR_FG, err);
+        }
+
+        let mut clicked_hit = None;
+        if let Some(result) = &self.text_search_result {
+            if !result.page_errors.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} pages had extraction errors",
+                        result.page_errors.len()
+                    ))
+                    .small()
+                    .color(PdbgTheme::WARN_FG),
+                );
+            }
+            if !result.hits.is_empty() {
+                ui.add_space(6.0);
+                ScrollArea::vertical()
+                    .id_salt("text_search_results")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        for hit in &result.hits {
+                            let selected = self
+                                .selected_text_hit
+                                .as_ref()
+                                .is_some_and(|selected| text_hits_same_position(selected, hit));
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    RichText::new(text_search_hit_summary(hit))
+                                        .monospace()
+                                        .size(11.0),
+                                )
+                                .on_hover_text(text_search_hit_hover(hit))
+                                .clicked()
+                            {
+                                clicked_hit = Some(hit.clone());
+                            }
+                        }
+                    });
+            } else if self.text_search_error.is_none() && self.text_search_job.is_none() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("No matches").small().color(PdbgTheme::MUTED));
+            }
+        }
+        if let Some(hit) = clicked_hit {
+            self.follow_text_search_hit(&hit);
         }
     }
 
@@ -1749,6 +2086,18 @@ impl GuiShellApp {
                 .monospace()
                 .color(PdbgTheme::MUTED),
             );
+            if let Some(hit) = self
+                .selected_text_hit
+                .as_ref()
+                .filter(|hit| hit.page_index == render.page_index)
+            {
+                ui.label(
+                    RichText::new(text_search_hit_summary(hit))
+                        .monospace()
+                        .color(PdbgTheme::ACCENT),
+                )
+                .on_hover_text(text_search_hit_hover(hit));
+            }
         });
         true
     }
@@ -3017,6 +3366,21 @@ mod tests {
         );
     }
 
+    fn wait_for_text_search(app: &mut GuiShellApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.text_search_job.is_some() && Instant::now() < deadline {
+            app.poll_text_search_job();
+            if app.text_search_job.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        app.poll_text_search_job();
+        assert!(
+            app.text_search_job.is_none(),
+            "text search job did not finish before test timeout"
+        );
+    }
+
     #[test]
     fn virtual_tree_does_not_materialize_rows() {
         let tree = VirtualObjectTree::new(1_000_000);
@@ -3082,6 +3446,36 @@ mod tests {
         assert_eq!(tree.rows[row].summary.id, node);
         assert_eq!(tree.rows[row].summary.preview, "Needs");
         assert_eq!(tree.rows[row].depth, 2);
+    }
+
+    #[test]
+    fn gui_text_search_runs_async_caches_and_selects_hit() {
+        let mut app = GuiShellApp::new();
+        app.text_search_query = "A".to_string();
+
+        app.start_text_search();
+        assert!(app.text_search_job.is_some());
+        wait_for_text_search(&mut app);
+
+        let result = app.text_search_result.as_ref().unwrap();
+        assert_eq!(result.searched_pages, 1);
+        assert_eq!(result.cache_hits, 0);
+        assert!(result.hits.iter().any(|hit| hit.untrusted));
+        assert_eq!(app.text_search_cache.len(), 1);
+
+        app.start_text_search();
+        wait_for_text_search(&mut app);
+        assert_eq!(app.text_search_result.as_ref().unwrap().cache_hits, 1);
+
+        let hit = app.text_search_result.as_ref().unwrap().hits[0].clone();
+        app.follow_text_search_hit(&hit);
+
+        assert_eq!(app.selected_text_hit.as_ref().unwrap().page_index, 0);
+        assert_eq!(app.render_page_index, 0);
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("opened text search hit page 1")));
     }
 
     #[test]
