@@ -1331,6 +1331,9 @@ impl GuiShellApp {
     }
 
     fn breadcrumb_label(&self) -> String {
+        if self.empty_workspace {
+            return "No document".to_string();
+        }
         if let Some(detail) = &self.real_detail {
             return node_breadcrumb(&detail.id);
         }
@@ -4804,6 +4807,7 @@ mod tests {
         assert!(app.real_render_job.is_none());
         assert_eq!(app.document_chips().0, "No PDF");
         assert_eq!(app.window_title(), APP_TITLE);
+        assert_eq!(app.breadcrumb_label(), "No document");
         assert!(app.status_log.iter().any(|line| line == "No PDF open"));
     }
 
