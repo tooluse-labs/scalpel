@@ -1,8 +1,10 @@
 # Milestone 3 Search And Diagnostics Plan
 
-Status: in progress on 2026-06-05. Milestone 2 is complete for the required
-macOS real-mupdf developer path; M3 starts from the same opt-in `real-mupdf`
-feature and keeps the default workspace gate MuPDF-free.
+Status: implemented on 2026-06-06. Milestone 2 is complete for the required
+macOS real-mupdf developer path; M3 uses the same opt-in `real-mupdf` feature
+and keeps the default workspace gate MuPDF-free. Local verification in this
+workspace is limited by the missing Rust toolchain; the checked scripts remain
+MuPDF-free.
 
 Milestone 3 turns the byte-and-page inspector into a searchable diagnostics
 workbench: real text extraction, object search over the lazy tree, text search
