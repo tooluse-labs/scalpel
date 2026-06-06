@@ -1,7 +1,6 @@
 use crate::{
-    diagnostics_payload_to_json_string, escape_pdf_text, DiagnosticSeverity,
-    DiagnosticSummary, DocumentSummary, EgressFormat, EscapedText, ObjectDetail, ObjectSearchResult,
-    TextSearchResult,
+    diagnostics_payload_to_json_string, escape_pdf_text, DiagnosticSeverity, DiagnosticSummary,
+    DocumentSummary, EgressFormat, EscapedText, ObjectDetail, ObjectSearchResult, TextSearchResult,
 };
 
 const REPORT_FIELD_LIMIT_BYTES: usize = 4096;
@@ -94,7 +93,9 @@ fn push_document_summary(out: &mut String, document: Option<&DocumentSummary>) {
     out.push_str(&markdown_field(&document.file_path));
     out.push('\n');
     out.push_str("- version: ");
-    out.push_str(&markdown_field(document.pdf_version.as_deref().unwrap_or("-")));
+    out.push_str(&markdown_field(
+        document.pdf_version.as_deref().unwrap_or("-"),
+    ));
     out.push('\n');
     out.push_str(&format!(
         "- pages: {}\n- xref size: {}\n- encrypted: {}\n- repaired_or_damaged: {}\n\n",
@@ -147,7 +148,10 @@ fn push_diagnostics(out: &mut String, diagnostics: &[DiagnosticSummary], max_dia
         out.push('\n');
     }
     if diagnostics.len() > limit {
-        out.push_str(&format!("- truncated: {} more diagnostics\n", diagnostics.len() - limit));
+        out.push_str(&format!(
+            "- truncated: {} more diagnostics\n",
+            diagnostics.len() - limit
+        ));
     }
     out.push('\n');
 }
@@ -173,19 +177,26 @@ fn push_object_search(
         if let Some(object) = hit.object {
             out.push_str(&format!("{} {} R ", object.num, object.gen));
         }
-        out.push_str("`");
+        out.push('`');
         out.push_str(object_search_field_label(hit.matched_field));
         out.push_str("` ");
         out.push_str(&markdown_field(&hit.excerpt));
         out.push('\n');
     }
     if result.hits.len() > limit {
-        out.push_str(&format!("- truncated: {} more hits\n", result.hits.len() - limit));
+        out.push_str(&format!(
+            "- truncated: {} more hits\n",
+            result.hits.len() - limit
+        ));
     }
     out.push('\n');
 }
 
-fn push_text_search(out: &mut String, text_search: Option<&TextSearchResult>, max_text_hits: usize) {
+fn push_text_search(
+    out: &mut String,
+    text_search: Option<&TextSearchResult>,
+    max_text_hits: usize,
+) {
     out.push_str("## Text Search Hits\n\n");
     let Some(result) = text_search else {
         out.push_str("- none\n\n");
@@ -210,7 +221,10 @@ fn push_text_search(out: &mut String, text_search: Option<&TextSearchResult>, ma
         out.push('\n');
     }
     if result.hits.len() > limit {
-        out.push_str(&format!("- truncated: {} more hits\n", result.hits.len() - limit));
+        out.push_str(&format!(
+            "- truncated: {} more hits\n",
+            result.hits.len() - limit
+        ));
     }
     out.push('\n');
 }
@@ -268,7 +282,10 @@ mod tests {
         let diagnostics = DocumentDiagnostics::new(vec![
             diagnostic(DiagnosticSeverity::Info, DiagnosticCode::JavaScriptDisabled),
             diagnostic(DiagnosticSeverity::Warning, DiagnosticCode::RepairWarning),
-            diagnostic(DiagnosticSeverity::Error, DiagnosticCode::StreamDecodeFailure),
+            diagnostic(
+                DiagnosticSeverity::Error,
+                DiagnosticCode::StreamDecodeFailure,
+            ),
         ]);
         let filter = DiagnosticFilter {
             min_severity: Some(DiagnosticSeverity::Warning),

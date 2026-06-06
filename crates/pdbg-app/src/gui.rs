@@ -1130,7 +1130,8 @@ impl GuiShellApp {
     }
 
     fn filtered_diagnostics(&self) -> Vec<DiagnosticSummary> {
-        self.diagnostics_model().filtered(&self.diagnostics_filter())
+        self.diagnostics_model()
+            .filtered(&self.diagnostics_filter())
     }
 
     fn collected_diagnostics(&self) -> Vec<DiagnosticSummary> {
@@ -1434,10 +1435,7 @@ fn detail_reference_targets(detail: &ObjectDetail) -> Vec<ObjectId> {
     out
 }
 
-fn object_search_status_label(
-    result: Option<&ObjectSearchResult>,
-    error: Option<&str>,
-) -> String {
+fn object_search_status_label(result: Option<&ObjectSearchResult>, error: Option<&str>) -> String {
     if error.is_some() {
         return "failed".to_string();
     }
@@ -1534,7 +1532,11 @@ fn text_search_hit_summary(hit: &TextSearchHit) -> String {
 }
 
 fn text_search_hit_hover(hit: &TextSearchHit) -> String {
-    let trust = if hit.untrusted { "untrusted" } else { "trusted" };
+    let trust = if hit.untrusted {
+        "untrusted"
+    } else {
+        "trusted"
+    };
     match &hit.bbox {
         Some(bbox) => format!(
             "page {} span {} {trust} bbox {:.1},{:.1} {:.1}x{:.1}",
@@ -1545,7 +1547,11 @@ fn text_search_hit_hover(hit: &TextSearchHit) -> String {
             bbox.width,
             bbox.height
         ),
-        None => format!("page {} span {} {trust}", hit.page_index + 1, hit.span_index),
+        None => format!(
+            "page {} span {} {trust}",
+            hit.page_index + 1,
+            hit.span_index
+        ),
     }
 }
 
@@ -1879,8 +1885,8 @@ impl GuiShellApp {
                         .desired_width(f32::INFINITY)
                         .hint_text("object, key, name, scalar"),
                 );
-                run_search |= response.lost_focus()
-                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                run_search |=
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                 run_search |= ui.button("Search").clicked();
                 clear_search |= ui.button("Clear").clicked();
             });
@@ -1952,8 +1958,8 @@ impl GuiShellApp {
                         .desired_width(f32::INFINITY)
                         .hint_text("page text"),
                 );
-                run_search |= response.lost_focus()
-                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                run_search |=
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                 if self.text_search_job.is_some() {
                     cancel_search |= ui.button("Cancel").clicked();
                 } else {
@@ -2299,7 +2305,9 @@ impl GuiShellApp {
             let loaded_pages = pages.items.len();
             let visible_pages = loaded_pages.min(12);
             let first_visible_page = if selected_page < loaded_pages {
-                selected_page.saturating_add(1).saturating_sub(visible_pages)
+                selected_page
+                    .saturating_add(1)
+                    .saturating_sub(visible_pages)
             } else {
                 0
             };
@@ -3211,8 +3219,7 @@ impl RealObjectTree {
             return Some(self.rows.len() - 1);
         }
 
-        hit.object
-            .map(|object| self.ensure_object_row(doc, object))
+        hit.object.map(|object| self.ensure_object_row(doc, object))
     }
 
     fn update_row_from_detail(&mut self, row: usize, detail: &ObjectDetail) {

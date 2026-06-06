@@ -2,9 +2,9 @@
 
 Status: implemented on 2026-06-06. Milestone 2 is complete for the required
 macOS real-mupdf developer path; M3 uses the same opt-in `real-mupdf` feature
-and keeps the default workspace gate MuPDF-free. Local verification in this
-workspace is limited by the missing Rust toolchain; the checked scripts remain
-MuPDF-free.
+and keeps the default workspace gate MuPDF-free. `scripts/run_m3_local_gate.sh`
+runs the default M3 focused checks and then the M0 local gate; real MuPDF
+coverage remains in `scripts/run_real_gate.sh`.
 
 Milestone 3 turns the byte-and-page inspector into a searchable diagnostics
 workbench: real text extraction, object search over the lazy tree, text search

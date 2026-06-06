@@ -59,6 +59,9 @@ struct pdbg_text_page {
 static atomic_uint_fast64_t next_context_id = 1;
 static atomic_uint_fast64_t next_document_id = 1;
 
+#define PDBG_FAKE_TEXT_CHARS 4U
+#define PDBG_FAKE_TEXT_BLOCKS 2U
+
 static void set_error(pdbg_error *err, pdbg_status status, const char *message)
 {
     if (!err)
@@ -559,14 +562,22 @@ pdbg_status pdbg_page_extract_text(
     pdbg_text_page **out,
     pdbg_error *err)
 {
-    (void)options;
     if (!doc || !out) {
         set_error(err, PDBG_ERROR_GENERIC, "invalid text arguments");
         return PDBG_ERROR_GENERIC;
     }
+    *out = NULL;
     if (cancel && atomic_load(&cancel->cancelled)) {
         set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
         return PDBG_ERROR_CANCELLED;
+    }
+    if (options && options->max_blocks && options->max_blocks < PDBG_FAKE_TEXT_BLOCKS) {
+        set_error(err, PDBG_ERROR_LIMIT, "text extraction exceeded configured block limit");
+        return PDBG_ERROR_LIMIT;
+    }
+    if (options && options->max_chars && options->max_chars < PDBG_FAKE_TEXT_CHARS) {
+        set_error(err, PDBG_ERROR_LIMIT, "text extraction exceeded configured character limit");
+        return PDBG_ERROR_LIMIT;
     }
 
     pdbg_text_page *page = (pdbg_text_page *)calloc(1, sizeof(pdbg_text_page));
@@ -575,26 +586,29 @@ pdbg_status pdbg_page_extract_text(
         return PDBG_ERROR_OOM;
     }
 
-    page->len = 1;
-    page->spans = (pdbg_text_span *)calloc(1, sizeof(pdbg_text_span));
+    page->len = PDBG_FAKE_TEXT_BLOCKS;
+    page->spans = (pdbg_text_span *)calloc(PDBG_FAKE_TEXT_BLOCKS, sizeof(pdbg_text_span));
     if (!page->spans) {
         free(page);
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
 
-    char *text = (char *)malloc(4);
-    if (!text) {
+    char *text0 = (char *)malloc(4);
+    char *text1 = (char *)malloc(2);
+    if (!text0 || !text1) {
+        free(text0);
+        free(text1);
         free(page->spans);
         free(page);
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
-    text[0] = 'A';
-    text[1] = '\0';
-    text[2] = 'B';
-    text[3] = '\0';
-    page->spans[0].text = text;
+    text0[0] = 'A';
+    text0[1] = '\0';
+    text0[2] = 'B';
+    text0[3] = '\0';
+    page->spans[0].text = text0;
     page->spans[0].text_len = 3;
     page->spans[0].x = 5.0f;
     page->spans[0].y = 7.0f;
@@ -602,6 +616,16 @@ pdbg_status pdbg_page_extract_text(
     page->spans[0].height = 12.0f;
     page->spans[0].page_index = page_index;
     page->spans[0].untrusted = 1;
+    text1[0] = 'C';
+    text1[1] = '\0';
+    page->spans[1].text = text1;
+    page->spans[1].text_len = 1;
+    page->spans[1].x = 20.0f;
+    page->spans[1].y = 28.0f;
+    page->spans[1].width = 6.0f;
+    page->spans[1].height = 8.0f;
+    page->spans[1].page_index = page_index;
+    page->spans[1].untrusted = 1;
     *out = page;
     set_error(err, PDBG_OK, "");
     return PDBG_OK;

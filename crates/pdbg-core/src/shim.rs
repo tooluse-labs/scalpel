@@ -311,7 +311,8 @@ impl OpenDocument {
         request: &TextRequest,
         cancel: &CancelToken,
     ) -> Result<TextPage, ShimError> {
-        self.doc.extract_text_with_cancel(request, cancel.as_mut_ptr())
+        self.doc
+            .extract_text_with_cancel(request, cancel.as_mut_ptr())
     }
 }
 
@@ -402,15 +403,12 @@ impl PdbgContext {
                 "path contains interior NUL",
             )
         })?;
-        let password = password
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| {
-                ShimError::new(
-                    raw::pdbg_status::PDBG_ERROR_GENERIC,
-                    "password contains interior NUL",
-                )
-            })?;
+        let password = password.map(CString::new).transpose().map_err(|_| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "password contains interior NUL",
+            )
+        })?;
         let options = config.to_raw_open_options();
         let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
@@ -452,15 +450,12 @@ impl PdbgContext {
                 "display path contains interior NUL",
             )
         })?;
-        let password = password
-            .map(CString::new)
-            .transpose()
-            .map_err(|_| {
-                ShimError::new(
-                    raw::pdbg_status::PDBG_ERROR_GENERIC,
-                    "password contains interior NUL",
-                )
-            })?;
+        let password = password.map(CString::new).transpose().map_err(|_| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "password contains interior NUL",
+            )
+        })?;
         let options = config.to_raw_open_options();
         let _open_guard = self.open_lock.lock().expect("pdbg context mutex poisoned");
 
@@ -806,14 +801,12 @@ impl PdbgImage {
         let width = raw::pdbg_image_width(self.raw.as_ptr());
         let height = raw::pdbg_image_height(self.raw.as_ptr());
         let stride = raw::pdbg_image_stride(self.raw.as_ptr());
-        let byte_len = stride
-            .checked_mul(height as usize)
-            .ok_or_else(|| {
-                ShimError::new(
-                    raw::pdbg_status::PDBG_ERROR_LIMIT,
-                    "render output byte size overflow",
-                )
-            })?;
+        let byte_len = stride.checked_mul(height as usize).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "render output byte size overflow",
+            )
+        })?;
         let pixels_rgba =
             wire::copy_bytes(raw::pdbg_image_rgba_pixels(self.raw.as_ptr()), byte_len);
         let diagnostic_count = raw::pdbg_image_diagnostic_count(self.raw.as_ptr());
@@ -924,7 +917,8 @@ unsafe fn convert_document_summary(
     out: &raw::pdbg_document_summary_out,
     registry: &NodeTokenRegistry,
 ) -> DocumentSummary {
-    let mut diagnostics = wire::diagnostic_list(out.diagnostics, &|node| registry.resolve_node(node));
+    let mut diagnostics =
+        wire::diagnostic_list(out.diagnostics, &|node| registry.resolve_node(node));
     if out.javascript_disabled != 0
         && !diagnostics
             .iter()
@@ -1260,6 +1254,30 @@ mod tests {
         assert_eq!(summary.file_path, "fake.pdf");
         let render = doc.render_page(&RenderRequest::page(0)).unwrap();
         assert_eq!(render.pixels_rgba, vec![255, 255, 255, 255]);
+    }
+
+    #[cfg(all(feature = "fake", not(feature = "real-mupdf")))]
+    #[test]
+    fn fake_text_options_enforce_character_and_block_limits() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+
+        let mut char_limited = TextRequest::page(0);
+        char_limited.max_chars = 2;
+        let err = doc.extract_text(&char_limited).unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("character limit"));
+
+        let mut block_limited = TextRequest::page(0);
+        block_limited.max_blocks = 1;
+        let err = doc.extract_text(&block_limited).unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("block limit"));
+
+        let mut default_block_limit = TextRequest::page(0);
+        default_block_limit.max_blocks = 0;
+        let text = doc.extract_text(&default_block_limit).unwrap();
+        assert_eq!(text.spans.len(), 2);
     }
 
     #[cfg(feature = "fake")]

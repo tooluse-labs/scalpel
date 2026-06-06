@@ -147,6 +147,10 @@ impl TextPageCache {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn current_bytes(&self) -> usize {
         self.current_bytes
     }
@@ -310,13 +314,7 @@ where
                 break;
             }
 
-            consume_child_page(
-                document,
-                &context,
-                pending.depth + 1,
-                page,
-                &mut state,
-            )?;
+            consume_child_page(document, &context, pending.depth + 1, page, &mut state)?;
 
             offset += page_len;
             if state.searched_nodes >= max_nodes || state.hits.len() >= max_results {
@@ -328,10 +326,7 @@ where
                 break;
             }
         }
-        if !exhausted_node
-            && state.searched_nodes < max_nodes
-            && state.hits.len() < max_results
-        {
+        if !exhausted_node && state.searched_nodes < max_nodes && state.hits.len() < max_results {
             state.truncated = true;
         }
     }
@@ -482,11 +477,7 @@ fn page_is_exhausted(
     page_len < child_page_size
 }
 
-fn match_summary(
-    query: &Query,
-    summary: &ObjectSummary,
-    depth: usize,
-) -> Option<ObjectSearchHit> {
+fn match_summary(query: &Query, summary: &ObjectSummary, depth: usize) -> Option<ObjectSearchHit> {
     if object_ref_matches(query.object_ref, summary.object) {
         return Some(hit(
             summary,
@@ -547,9 +538,12 @@ fn match_detail(
     depth: usize,
 ) -> Option<ObjectSearchHit> {
     match &detail.value {
-        ObjectValue::Name(name) if contains_folded(name, &query.folded) => {
-            Some(hit(summary, ObjectSearchField::NameObject, name.clone(), depth))
-        }
+        ObjectValue::Name(name) if contains_folded(name, &query.folded) => Some(hit(
+            summary,
+            ObjectSearchField::NameObject,
+            name.clone(),
+            depth,
+        )),
         ObjectValue::Bool(value) if contains_folded(&value.to_string(), &query.folded) => {
             Some(hit(
                 summary,
@@ -575,9 +569,12 @@ fn match_detail(
         ObjectValue::StringBytes {
             decoded_text: Some(text),
             ..
-        } if contains_folded(text, &query.folded) => {
-            Some(hit(summary, ObjectSearchField::ScalarPreview, text.clone(), depth))
-        }
+        } if contains_folded(text, &query.folded) => Some(hit(
+            summary,
+            ObjectSearchField::ScalarPreview,
+            text.clone(),
+            depth,
+        )),
         _ if contains_folded(&detail.preview, &query.folded) => Some(hit(
             summary,
             ObjectSearchField::ScalarPreview,
@@ -722,7 +719,9 @@ fn bounded_text_excerpt(
     let match_chars = text[start..end].chars().count().max(1);
     let context_chars = max_chars.saturating_sub(match_chars) / 2;
     let excerpt_start_char = match_start_char.saturating_sub(context_chars);
-    let excerpt_end_char = excerpt_start_char.saturating_add(max_chars).min(total_chars);
+    let excerpt_end_char = excerpt_start_char
+        .saturating_add(max_chars)
+        .min(total_chars);
 
     let mut excerpt = String::new();
     if excerpt_start_char > 0 {
@@ -864,8 +863,7 @@ mod tests {
         let result = search_objects(&mut doc, &request).unwrap();
 
         assert!(result.hits.iter().any(|hit| {
-            hit.matched_field == ObjectSearchField::ScalarPreview
-                && hit.excerpt == "fake object"
+            hit.matched_field == ObjectSearchField::ScalarPreview && hit.excerpt == "fake object"
         }));
     }
 
