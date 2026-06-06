@@ -79,6 +79,7 @@ fn run_gui(options: CliOptions) {
     let options = pdbg_app::gui::GuiRunOptions {
         smoke_exit_after: options.gui_smoke_ms.map(std::time::Duration::from_millis),
         pdf_path: options.pdf_path,
+        recent_files_path: None,
     };
     if let Err(err) = pdbg_app::gui::run_gui_with_options(options) {
         eprintln!("pdbg-app GUI failed: {err}");

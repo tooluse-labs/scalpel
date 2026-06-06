@@ -12,7 +12,10 @@ use pdbg_core::{
     ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary, StreamViewMode,
     TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,11 +43,13 @@ const TEXT_SEARCH_MAX_BLOCKS_PER_PAGE: usize = 50_000;
 const MARKDOWN_REPORT_LIMIT_BYTES: usize = 64 * 1024;
 const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
+const RECENT_PDF_MAX_ITEMS: usize = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
     pub smoke_exit_after: Option<Duration>,
     pub pdf_path: Option<String>,
+    pub recent_files_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,6 +358,11 @@ pub struct GuiShellApp {
     state: Result<AppState, String>,
     launched_at: Instant,
     smoke_exit_after: Option<Duration>,
+    recent_files_path: PathBuf,
+    recent_pdf_paths: Vec<String>,
+    open_pdf_dialog_open: bool,
+    open_pdf_path_input: String,
+    open_pdf_error: Option<String>,
     tree: TreeModel,
     stream: LargeStreamModel,
     real_stream_mode: StreamMode,
@@ -413,6 +423,11 @@ impl GuiShellApp {
         let tree = TreeModel::from_state(&state, options.pdf_path.is_some());
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
         let (real_pages, real_pages_error) = load_initial_real_pages(&state, &tree);
+        let recent_files_path = options
+            .recent_files_path
+            .clone()
+            .unwrap_or_else(default_recent_files_path);
+        let mut recent_pdf_paths = load_recent_pdf_paths_from(&recent_files_path);
         let render_page_index = 0;
         let render_zoom = DEFAULT_RENDER_ZOOM;
         let render_rotation_degrees = 0;
@@ -425,11 +440,27 @@ impl GuiShellApp {
         } else if let Some(err) = &real_pages_error {
             status_log.push(format!("page list load failed: {err}"));
         }
+        if state.is_ok() {
+            if let Some(path) = options.pdf_path.as_deref() {
+                if record_recent_pdf_path(&mut recent_pdf_paths, path) {
+                    if let Err(err) =
+                        save_recent_pdf_paths_to(&recent_files_path, &recent_pdf_paths)
+                    {
+                        status_log.push(format!("recent file save failed: {err}"));
+                    }
+                }
+            }
+        }
         let smoke_exit_after = options.smoke_exit_after;
         let mut app = Self {
             state,
             launched_at: Instant::now(),
             smoke_exit_after,
+            recent_files_path,
+            recent_pdf_paths,
+            open_pdf_dialog_open: false,
+            open_pdf_path_input: options.pdf_path.unwrap_or_default(),
+            open_pdf_error: None,
             tree,
             stream: LargeStreamModel::default(),
             real_stream_mode: StreamMode::Raw,
@@ -1343,6 +1374,106 @@ fn open_app_state(pdf_path: Option<&str>) -> Result<AppState, String> {
     AppState::new_headless().map_err(|err| err.message)
 }
 
+fn choose_pdf_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("PDF", &["pdf"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn default_recent_files_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("PDBG_RECENT_FILES_PATH").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path).join("pdbg").join("recent-files.txt");
+    }
+    if let Some(path) = std::env::var_os("HOME").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path)
+            .join(".config")
+            .join("pdbg")
+            .join("recent-files.txt");
+    }
+    std::env::temp_dir().join("pdbg").join("recent-files.txt")
+}
+
+fn load_recent_pdf_paths_from(path: &Path) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for line in contents.lines() {
+        let entry = line.trim();
+        if !is_recent_path_entry_safe(entry) {
+            continue;
+        }
+        if seen.insert(entry.to_string()) {
+            paths.push(entry.to_string());
+        }
+        if paths.len() >= RECENT_PDF_MAX_ITEMS {
+            break;
+        }
+    }
+    paths
+}
+
+fn save_recent_pdf_paths_to(path: &Path, paths: &[String]) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut out = String::new();
+    for path in paths
+        .iter()
+        .filter(|path| is_recent_path_entry_safe(path))
+        .take(RECENT_PDF_MAX_ITEMS)
+    {
+        out.push_str(path);
+        out.push('\n');
+    }
+
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, out)?;
+    fs::rename(tmp_path, path)
+}
+
+fn record_recent_pdf_path(paths: &mut Vec<String>, path: &str) -> bool {
+    let Some(path) = normalize_recent_pdf_path(path) else {
+        return false;
+    };
+    let before = paths.clone();
+    paths.retain(|entry| entry != &path);
+    paths.insert(0, path);
+    paths.truncate(RECENT_PDF_MAX_ITEMS);
+    *paths != before
+}
+
+fn normalize_recent_pdf_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if !is_recent_path_entry_safe(path) {
+        return None;
+    }
+    let path = Path::new(path);
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let text = normalized.to_string_lossy().into_owned();
+    is_recent_path_entry_safe(&text).then_some(text)
+}
+
+fn is_recent_path_entry_safe(path: &str) -> bool {
+    !path.trim().is_empty() && !path.contains('\n') && !path.contains('\r')
+}
+
+fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
 fn load_initial_real_detail(
     state: &Result<AppState, String>,
     tree: &TreeModel,
@@ -1889,6 +2020,7 @@ fn segment_label(segment: &NodePathSegment) -> String {
 impl eframe::App for GuiShellApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_dropped_pdf_files(&ctx);
         self.poll_real_stream_job();
         self.poll_real_render_job();
         self.poll_object_search_job();
@@ -1941,6 +2073,8 @@ impl eframe::App for GuiShellApp {
             )
             .show_inside(ui, |ui| self.draw_page_preview(ui));
 
+        self.draw_open_pdf_dialog(&ctx);
+
         if self
             .smoke_exit_after
             .is_some_and(|duration| self.launched_at.elapsed() >= duration)
@@ -1951,6 +2085,204 @@ impl eframe::App for GuiShellApp {
 }
 
 impl GuiShellApp {
+    fn handle_dropped_pdf_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        let Some(path) = dropped
+            .into_iter()
+            .filter_map(|file| file.path)
+            .find(|path| is_pdf_path(path))
+        else {
+            return;
+        };
+        self.open_pdf_from_path(path.to_string_lossy().into_owned());
+    }
+
+    fn draw_open_pdf_dialog(&mut self, ctx: &egui::Context) {
+        if !self.open_pdf_dialog_open {
+            return;
+        }
+
+        let mut window_open = self.open_pdf_dialog_open;
+        let mut path_to_open = None;
+        egui::Window::new("Open PDF")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .open(&mut window_open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        TextEdit::singleline(&mut self.open_pdf_path_input)
+                            .desired_width(380.0)
+                            .hint_text("/path/to/file.pdf"),
+                    );
+                    if ui.button("Choose...").clicked() {
+                        if let Some(path) = choose_pdf_file() {
+                            self.open_pdf_path_input = path;
+                        }
+                    }
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        path_to_open = Some(self.open_pdf_path_input.clone());
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let can_open = !self.open_pdf_path_input.trim().is_empty();
+                    if ui
+                        .add_enabled(can_open, egui::Button::new("Open"))
+                        .clicked()
+                    {
+                        path_to_open = Some(self.open_pdf_path_input.clone());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.open_pdf_dialog_open = false;
+                    }
+                });
+
+                if let Some(err) = &self.open_pdf_error {
+                    ui.add_space(8.0);
+                    ui.colored_label(PdbgTheme::ERROR_FG, err);
+                }
+
+                if !self.recent_pdf_paths.is_empty() {
+                    ui.add_space(12.0);
+                    section_header(ui, "Recent Files", None);
+                    ScrollArea::vertical()
+                        .id_salt("recent_pdf_paths")
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for path in self.recent_pdf_paths.clone() {
+                                if ui
+                                    .selectable_label(false, file_chip_label(&path))
+                                    .on_hover_text(&path)
+                                    .clicked()
+                                {
+                                    path_to_open = Some(path);
+                                }
+                            }
+                        });
+                }
+            });
+
+        self.open_pdf_dialog_open = window_open && self.open_pdf_dialog_open;
+        if let Some(path) = path_to_open {
+            self.open_pdf_from_path(path);
+        }
+    }
+
+    fn open_pdf_from_path(&mut self, path: String) {
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            self.open_pdf_error = Some("PDF path is empty".to_string());
+            return;
+        }
+
+        let state = match open_app_state(Some(&path)) {
+            Ok(state) => state,
+            Err(err) => {
+                self.open_pdf_error = Some(err.clone());
+                self.status_log
+                    .push(format!("failed to open {}: {err}", file_chip_label(&path)));
+                return;
+            }
+        };
+
+        self.cancel_inflight_document_jobs();
+        self.apply_opened_pdf_state(state, &path);
+        self.open_pdf_path_input = path.clone();
+        self.open_pdf_dialog_open = false;
+        self.open_pdf_error = None;
+        self.record_recent_pdf_path(&path);
+    }
+
+    fn apply_opened_pdf_state(&mut self, state: AppState, path: &str) {
+        let state = Ok(state);
+        let tree = TreeModel::from_state(&state, true);
+        let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
+        let (real_pages, real_pages_error) = load_initial_real_pages(&state, &tree);
+        let mut status_log = initial_status_log(&state, &tree, Some(path));
+        if let Some(pages) = &real_pages {
+            status_log.push(format!(
+                "loaded page list {}",
+                child_page_detail(pages.total, pages.items.len())
+            ));
+        } else if let Some(err) = &real_pages_error {
+            status_log.push(format!("page list load failed: {err}"));
+        }
+
+        self.state = state;
+        self.tree = tree;
+        self.stream = LargeStreamModel::default();
+        self.real_stream_mode = StreamMode::Raw;
+        self.real_stream_view_mode = StreamViewMode::Hex;
+        self.real_stream_offset = 0;
+        self.real_stream_limit = HEX_WINDOW_BYTES;
+        self.real_stream_key = None;
+        self.real_stream_chunk = None;
+        self.real_stream_error = None;
+        self.decoded_stream_cache = StreamChunkCache::new(
+            DECODED_STREAM_CACHE_MAX_ITEMS,
+            DECODED_STREAM_CACHE_MAX_BYTES,
+        );
+        self.selected_row = 0;
+        self.back_stack.clear();
+        self.forward_stack.clear();
+        self.selected_tab = InspectorTab::Object;
+        self.real_detail = real_detail;
+        self.real_detail_error = real_detail_error;
+        self.real_pages = real_pages;
+        self.real_pages_error = real_pages_error;
+        self.render_page_index = 0;
+        self.render_zoom = DEFAULT_RENDER_ZOOM;
+        self.render_rotation_degrees = 0;
+        self.real_render_key = None;
+        self.real_render = None;
+        self.real_render_error = None;
+        self.real_render_texture = None;
+        self.render_cache = RenderResultCache::new(RENDER_CACHE_MAX_ITEMS, RENDER_CACHE_MAX_BYTES);
+        self.object_search_query.clear();
+        self.object_search_result = None;
+        self.object_search_error = None;
+        self.text_search_query.clear();
+        self.text_search_result = None;
+        self.text_search_error = None;
+        self.text_search_cache =
+            TextPageCache::new(TEXT_SEARCH_CACHE_MAX_PAGES, TEXT_SEARCH_CACHE_MAX_BYTES);
+        self.selected_text_hit = None;
+        self.copied_excerpt = None;
+        self.status_log = status_log;
+        self.refresh_real_render();
+    }
+
+    fn cancel_inflight_document_jobs(&mut self) {
+        if let Some(job) = self.real_stream_job.take() {
+            job.cancel.cancel();
+        }
+        if let Some(job) = self.real_render_job.take() {
+            job.cancel.cancel();
+        }
+        if let Some(job) = self.object_search_job.take() {
+            job.cancel.cancel();
+        }
+        if let Some(job) = self.text_search_job.take() {
+            job.cancel.cancel();
+        }
+    }
+
+    fn record_recent_pdf_path(&mut self, path: &str) {
+        if !record_recent_pdf_path(&mut self.recent_pdf_paths, path) {
+            return;
+        }
+        if let Err(err) = save_recent_pdf_paths_to(&self.recent_files_path, &self.recent_pdf_paths)
+        {
+            self.status_log
+                .push(format!("recent file save failed: {err}"));
+        }
+    }
+
     fn draw_top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label(
@@ -1959,6 +2291,34 @@ impl GuiShellApp {
                     .size(15.0)
                     .color(PdbgTheme::TOP_BAR_TEXT),
             );
+            ui.add_space(8.0);
+            if top_bar_button(ui, "Open PDF...", true).clicked() {
+                self.open_pdf_dialog_open = true;
+                self.open_pdf_error = None;
+            }
+            if !self.recent_pdf_paths.is_empty() {
+                let mut recent_to_open = None;
+                ui.menu_button(
+                    RichText::new("Recent")
+                        .size(12.0)
+                        .color(PdbgTheme::TOP_BAR_TEXT),
+                    |ui| {
+                        for path in self.recent_pdf_paths.clone() {
+                            if ui
+                                .button(file_chip_label(&path))
+                                .on_hover_text(&path)
+                                .clicked()
+                            {
+                                recent_to_open = Some(path);
+                                ui.close();
+                            }
+                        }
+                    },
+                );
+                if let Some(path) = recent_to_open {
+                    self.open_pdf_from_path(path);
+                }
+            }
             ui.add_space(8.0);
             if top_bar_button(ui, "Back", !self.back_stack.is_empty()).clicked() {
                 self.go_back();
@@ -3962,6 +4322,101 @@ mod tests {
         assert_eq!(node_breadcrumb(&id), "Pages/[0]/Contents");
     }
 
+    #[test]
+    fn recent_pdf_paths_are_deduped_bounded_and_persisted() {
+        let recent_path = temp_recent_file_path("round-trip");
+        let dir = recent_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = dir.join("first.pdf");
+        let second = dir.join("second.pdf");
+        std::fs::write(&first, b"%PDF-1.7\n").unwrap();
+        std::fs::write(&second, b"%PDF-1.7\n").unwrap();
+
+        let mut recent = Vec::new();
+        assert!(record_recent_pdf_path(
+            &mut recent,
+            &first.to_string_lossy()
+        ));
+        assert!(record_recent_pdf_path(
+            &mut recent,
+            &second.to_string_lossy()
+        ));
+        assert!(record_recent_pdf_path(
+            &mut recent,
+            &first.to_string_lossy()
+        ));
+        assert_eq!(recent.len(), 2);
+        assert_eq!(
+            recent[0],
+            first.canonicalize().unwrap().to_string_lossy().to_string()
+        );
+        assert!(!record_recent_pdf_path(&mut recent, "bad\npath.pdf"));
+
+        for index in 0..(RECENT_PDF_MAX_ITEMS + 4) {
+            let path = dir.join(format!("extra-{index}.pdf"));
+            std::fs::write(&path, b"%PDF-1.7\n").unwrap();
+            record_recent_pdf_path(&mut recent, &path.to_string_lossy());
+        }
+        assert_eq!(recent.len(), RECENT_PDF_MAX_ITEMS);
+
+        save_recent_pdf_paths_to(&recent_path, &recent).unwrap();
+        let loaded = load_recent_pdf_paths_from(&recent_path);
+        assert_eq!(loaded, recent);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(feature = "real-mupdf"))]
+    #[test]
+    fn gui_open_pdf_without_real_mupdf_keeps_current_document() {
+        let recent_path = temp_recent_file_path("fake-open");
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            recent_files_path: Some(recent_path),
+            ..GuiRunOptions::default()
+        });
+        let initial_row = app.tree.row_label(0);
+
+        app.open_pdf_from_path("fixtures/synthetic/minimal.pdf".to_string());
+
+        assert_eq!(app.tree.row_label(0), initial_row);
+        assert!(app
+            .open_pdf_error
+            .as_deref()
+            .is_some_and(|err| err.contains("requires building pdbg-app")));
+        assert!(app.recent_pdf_paths.is_empty());
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_open_pdf_action_replaces_document_and_records_recent() {
+        let recent_path = temp_recent_file_path("real-open");
+        let path = write_temp_pdf("gui-open-action", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: None,
+            recent_files_path: Some(recent_path.clone()),
+        });
+        assert!(!app.tree.is_real());
+
+        app.open_pdf_from_path(path.to_string_lossy().to_string());
+        wait_for_real_render(&mut app);
+
+        assert!(app.tree.is_real());
+        assert_eq!(app.page_count(), 2);
+        assert!(app.open_pdf_error.is_none());
+        assert!(!app.open_pdf_dialog_open);
+        let canonical = path.canonicalize().unwrap().to_string_lossy().to_string();
+        assert_eq!(app.recent_pdf_paths.first(), Some(&canonical));
+        assert_eq!(
+            load_recent_pdf_paths_from(&recent_path).first(),
+            Some(&canonical)
+        );
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(recent_path);
+    }
+
     #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_gui_model_loads_bounded_tree_and_detail_from_pdf_path() {
@@ -3972,6 +4427,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(fixture.to_string()),
+            recent_files_path: None,
         });
         assert!(app.real_render_job.is_some());
         wait_for_real_render(&mut app);
@@ -4009,6 +4465,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
         let open_elapsed = open_start.elapsed();
@@ -4073,6 +4530,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
 
@@ -4110,6 +4568,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
 
@@ -4149,6 +4608,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
 
@@ -4179,6 +4639,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
 
@@ -4219,6 +4680,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         wait_for_real_render(&mut app);
 
@@ -4247,6 +4709,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         assert!(app.real_render_job.is_some());
 
@@ -4271,6 +4734,7 @@ mod tests {
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: None,
             pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
         });
         assert!(app.real_render_job.is_some());
 
@@ -4309,6 +4773,7 @@ mod tests {
         let app = GuiShellApp::new_with_options(GuiRunOptions {
             smoke_exit_after: Some(Duration::from_millis(250)),
             pdf_path: None,
+            recent_files_path: None,
         });
         assert_eq!(app.smoke_exit_after, Some(Duration::from_millis(250)));
     }
@@ -4353,6 +4818,20 @@ mod tests {
             PdbgTheme::severity_fg(&DiagnosticSeverity::Error),
             PdbgTheme::ERROR_FG
         );
+    }
+
+    fn temp_recent_file_path(prefix: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "pdbg-app-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("recent-files.txt")
     }
 
     #[cfg(feature = "real-mupdf")]
