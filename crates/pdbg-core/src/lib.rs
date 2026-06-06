@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod config;
+pub mod diagnostics;
 pub mod dto;
 pub mod egress;
 pub mod panic_boundary;
@@ -11,6 +12,7 @@ mod wire;
 
 pub use capabilities::{CapabilityDecision, CapabilityFeature};
 pub use config::{RepairPolicy, SafeModeConfig};
+pub use diagnostics::*;
 pub use dto::*;
 pub use egress::{escape_pdf_text, EgressFormat, EscapedText};
 pub use panic_boundary::{catch_ffi_callback, CALLBACK_PANIC_MESSAGE};

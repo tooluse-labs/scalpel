@@ -88,6 +88,11 @@ content-stream operator visualization remain later milestones.
 
 ### M3.4 Diagnostics And Basic Reports
 
+- Initial slice: diagnostics are consolidated into a filterable core model, GUI
+  diagnostics support severity/code filtering plus JSON and Markdown copy
+  export, text-search page errors are promoted into document diagnostics, and
+  the Markdown report covers summary, selected object, diagnostics, and bounded
+  object/text search hits with Markdown escaping.
 - Consolidate document, object, stream, render, and text diagnostics into a
   document-level diagnostics model with severity/code filtering.
 - Extend the real MuPDF/Rust open-error surfaces to emit the diagnostic codes

@@ -3,12 +3,13 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    escape_pdf_text, search_objects, search_text_with_cache, CancelToken, ChildContainer,
-    ChildPage, ChildRange, DiagnosticSeverity, EgressFormat, EscapedText, NodeId,
-    NodePathSegment, ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit,
-    ObjectSearchRequest, ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest,
-    RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary, StreamViewMode,
-    TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
+    build_markdown_report, diagnostics_payload_to_json_string, escape_pdf_text, search_objects,
+    search_text_with_cache, CancelToken, ChildContainer, ChildPage, ChildRange, DiagnosticCode,
+    DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary, DocumentDiagnostics, EgressFormat,
+    EscapedText, MarkdownReportInput, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind,
+    ObjectSearchField, ObjectSearchHit, ObjectSearchRequest, ObjectSearchResult, ObjectSummary,
+    ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary,
+    StreamViewMode, TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
 };
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
@@ -31,6 +32,9 @@ const TEXT_SEARCH_MAX_PAGES: usize = 64;
 const TEXT_SEARCH_MAX_RESULTS: usize = 100;
 const TEXT_SEARCH_MAX_CHARS_PER_PAGE: usize = 512 * 1024;
 const TEXT_SEARCH_MAX_BLOCKS_PER_PAGE: usize = 50_000;
+const MARKDOWN_REPORT_LIMIT_BYTES: usize = 64 * 1024;
+const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
+const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -362,6 +366,8 @@ pub struct GuiShellApp {
     text_search_job: Option<RealTextSearchJob>,
     text_search_cache: TextPageCache,
     selected_text_hit: Option<TextSearchHit>,
+    diagnostic_min_severity: Option<DiagnosticSeverity>,
+    diagnostic_code_filter: String,
     copied_excerpt: Option<EscapedText>,
     status_log: Vec<String>,
 }
@@ -437,6 +443,8 @@ impl GuiShellApp {
                 TEXT_SEARCH_CACHE_MAX_BYTES,
             ),
             selected_text_hit: None,
+            diagnostic_min_severity: None,
+            diagnostic_code_filter: String::new(),
             copied_excerpt: None,
             status_log,
         };
@@ -1110,7 +1118,22 @@ impl GuiShellApp {
         }
     }
 
-    fn real_diagnostics(&self) -> Vec<pdbg_core::DiagnosticSummary> {
+    fn diagnostics_filter(&self) -> DiagnosticFilter {
+        DiagnosticFilter {
+            min_severity: self.diagnostic_min_severity.clone(),
+            code_query: Some(self.diagnostic_code_filter.clone()),
+        }
+    }
+
+    fn diagnostics_model(&self) -> DocumentDiagnostics {
+        DocumentDiagnostics::new(self.collected_diagnostics())
+    }
+
+    fn filtered_diagnostics(&self) -> Vec<DiagnosticSummary> {
+        self.diagnostics_model().filtered(&self.diagnostics_filter())
+    }
+
+    fn collected_diagnostics(&self) -> Vec<DiagnosticSummary> {
         let mut diagnostics = Vec::new();
         if let Ok(state) = &self.state {
             if let Some(summary) = &state.panels.summary {
@@ -1120,7 +1143,62 @@ impl GuiShellApp {
         if let Some(detail) = &self.real_detail {
             diagnostics.extend(detail.diagnostics.clone());
         }
+        if let Some(chunk) = &self.real_stream_chunk {
+            diagnostics.extend(chunk.decode_diagnostics.clone());
+        }
+        if let Some(render) = &self.real_render {
+            diagnostics.extend(render.diagnostics.clone());
+        }
+        if let Some(result) = &self.text_search_result {
+            diagnostics.extend(result.page_errors.iter().map(|error| DiagnosticSummary {
+                severity: DiagnosticSeverity::Warning,
+                code: DiagnosticCode::Unknown,
+                message: format!(
+                    "text extraction failed on page {}: {}",
+                    error.page_index + 1,
+                    error.message
+                ),
+                node: None,
+                page_index: Some(error.page_index),
+                object: None,
+            }));
+        }
         diagnostics
+    }
+
+    fn copy_diagnostics_json(&mut self, ctx: &egui::Context) {
+        let diagnostics = self.filtered_diagnostics();
+        let json = diagnostics_payload_to_json_string(&diagnostics);
+        ctx.copy_text(json);
+        self.status_log.push(format!(
+            "copied diagnostics JSON with {} filtered diagnostics",
+            diagnostics.len()
+        ));
+    }
+
+    fn copy_markdown_report(&mut self, ctx: &egui::Context) {
+        let diagnostics = self.filtered_diagnostics();
+        let report = build_markdown_report(&MarkdownReportInput {
+            document: self
+                .state
+                .as_ref()
+                .ok()
+                .and_then(|state| state.panels.summary.as_ref()),
+            selected_object: self.real_detail.as_ref(),
+            diagnostics: &diagnostics,
+            object_search: self.object_search_result.as_ref(),
+            text_search: self.text_search_result.as_ref(),
+            max_diagnostics: REPORT_DIAGNOSTIC_LIMIT,
+            max_object_hits: REPORT_SEARCH_HIT_LIMIT,
+            max_text_hits: REPORT_SEARCH_HIT_LIMIT,
+            max_bytes: MARKDOWN_REPORT_LIMIT_BYTES,
+        });
+        ctx.copy_text(report.text.clone());
+        self.status_log.push(format!(
+            "copied Markdown diagnostic report{}",
+            if report.truncated { " (truncated)" } else { "" }
+        ));
+        self.copied_excerpt = Some(report);
     }
 }
 
@@ -2292,7 +2370,7 @@ impl GuiShellApp {
         match self.selected_tab {
             InspectorTab::Object => self.draw_object_panel(ui),
             InspectorTab::Stream => self.draw_stream_panel(ui, ctx),
-            InspectorTab::Diagnostics => self.draw_diagnostics_panel(ui),
+            InspectorTab::Diagnostics => self.draw_diagnostics_panel(ui, ctx),
         }
     }
 
@@ -2763,32 +2841,66 @@ impl GuiShellApp {
         }
     }
 
-    fn draw_diagnostics_panel(&mut self, ui: &mut egui::Ui) {
-        if self.tree.is_real() {
-            let diagnostics = self.real_diagnostics();
-            if diagnostics.is_empty() {
-                ui.label(RichText::new("No diagnostics").color(PdbgTheme::MUTED));
-            } else {
-                for diagnostic in diagnostics {
-                    draw_diagnostic_card(ui, &diagnostic);
-                }
-            }
-            return;
-        }
+    fn draw_diagnostics_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let model = self.diagnostics_model();
+        let all_count = model.all().len();
+        let diagnostics = model.filtered(&self.diagnostics_filter());
 
-        if let Ok(state) = &self.state {
-            let diagnostics = state
-                .panels
-                .summary
-                .as_ref()
-                .map(|summary| summary.diagnostics.as_slice())
-                .unwrap_or(&[]);
-            if diagnostics.is_empty() {
-                ui.label(RichText::new("No fake diagnostics").color(PdbgTheme::MUTED));
-            } else {
-                for diagnostic in diagnostics {
-                    draw_diagnostic_card(ui, diagnostic);
+        section_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Severity").small().color(PdbgTheme::MUTED));
+                egui::ComboBox::from_id_salt("diagnostic_min_severity")
+                    .selected_text(match &self.diagnostic_min_severity {
+                        Some(severity) => severity.as_public_str(),
+                        None => "all",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.diagnostic_min_severity, None, "all");
+                        ui.selectable_value(
+                            &mut self.diagnostic_min_severity,
+                            Some(DiagnosticSeverity::Info),
+                            "info+",
+                        );
+                        ui.selectable_value(
+                            &mut self.diagnostic_min_severity,
+                            Some(DiagnosticSeverity::Warning),
+                            "warning+",
+                        );
+                        ui.selectable_value(
+                            &mut self.diagnostic_min_severity,
+                            Some(DiagnosticSeverity::Error),
+                            "error",
+                        );
+                    });
+                ui.label(RichText::new("Code").small().color(PdbgTheme::MUTED));
+                ui.add(
+                    TextEdit::singleline(&mut self.diagnostic_code_filter)
+                        .desired_width(150.0)
+                        .hint_text("code"),
+                );
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{} shown / {} total", diagnostics.len(), all_count))
+                        .small()
+                        .color(PdbgTheme::MUTED),
+                );
+                if ui.button("Copy JSON").clicked() {
+                    self.copy_diagnostics_json(ctx);
                 }
+                if ui.button("Copy Markdown").clicked() {
+                    self.copy_markdown_report(ctx);
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        if diagnostics.is_empty() {
+            ui.label(RichText::new("No diagnostics").color(PdbgTheme::MUTED));
+        } else {
+            for diagnostic in diagnostics {
+                draw_diagnostic_card(ui, &diagnostic);
             }
         }
     }
@@ -3476,6 +3588,31 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("opened text search hit page 1")));
+    }
+
+    #[test]
+    fn diagnostics_model_includes_text_page_errors_and_filters_codes() {
+        let mut app = GuiShellApp::new();
+        app.text_search_result = Some(TextSearchResult {
+            hits: Vec::new(),
+            searched_pages: 1,
+            cache_hits: 0,
+            page_errors: vec![pdbg_core::TextSearchPageError {
+                page_index: 2,
+                message: "limit".to_string(),
+            }],
+            truncated: false,
+        });
+        app.diagnostic_min_severity = Some(DiagnosticSeverity::Warning);
+        app.diagnostic_code_filter = "unknown".to_string();
+
+        let diagnostics = app.filtered_diagnostics();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::Unknown
+                && diagnostic.page_index == Some(2)
+                && diagnostic.message.contains("text extraction failed")
+        }));
     }
 
     #[test]
