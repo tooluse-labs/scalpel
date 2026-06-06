@@ -44,6 +44,7 @@ const MARKDOWN_REPORT_LIMIT_BYTES: usize = 64 * 1024;
 const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
+const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -1248,7 +1249,7 @@ impl GuiShellApp {
         if let Ok(state) = &self.state {
             if let Some(summary) = &state.panels.summary {
                 return (
-                    file_chip_label(&summary.file_path),
+                    display_file_chip_label(&summary.file_path),
                     format!("pages {}", summary.page_count),
                     format!("xref {}", summary.xref_size),
                 );
@@ -1442,9 +1443,29 @@ fn save_recent_pdf_paths_to(path: &Path, paths: &[String]) -> io::Result<()> {
         out.push('\n');
     }
 
-    let tmp_path = path.with_extension("tmp");
+    let tmp_path = unique_recent_tmp_path(path);
     fs::write(&tmp_path, out)?;
-    fs::rename(tmp_path, path)
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(err)
+        }
+    }
+}
+
+fn unique_recent_tmp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("recent-files");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!("{file_name}.{}.{}.tmp", std::process::id(), nonce);
+    path.with_file_name(tmp_name)
 }
 
 fn record_recent_pdf_path(paths: &mut Vec<String>, path: &str) -> bool {
@@ -1549,12 +1570,12 @@ fn initial_status_log(
 ) -> Vec<String> {
     match (state, tree, pdf_path) {
         (Ok(_), TreeModel::Real(tree), Some(path)) => vec![
-            format!("real MuPDF opened {}", file_chip_label(path)),
+            format!("real MuPDF opened {}", display_file_chip_label(path)),
             format!("loaded bounded root page: {}", tree.row_count_label()),
             "real stream bytes available as bounded raw/decoded chunks".to_string(),
         ],
         (Err(err), _, Some(path)) => vec![
-            format!("failed to open {}", file_chip_label(path)),
+            format!("failed to open {}", display_file_chip_label(path)),
             err.clone(),
         ],
         _ => vec![
@@ -1580,6 +1601,19 @@ fn file_chip_label(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(path)
         .to_string()
+}
+
+fn display_file_chip_label(path: &str) -> String {
+    escape_pdf_text(
+        &file_chip_label(path),
+        EgressFormat::PlainText,
+        PATH_DISPLAY_MAX_BYTES,
+    )
+    .text
+}
+
+fn display_path_hover(path: &str) -> String {
+    escape_pdf_text(path, EgressFormat::PlainText, PATH_DISPLAY_MAX_BYTES).text
 }
 
 fn kind_badge_text(kind: &ObjectKind) -> &'static str {
@@ -2177,8 +2211,8 @@ impl GuiShellApp {
                         .show(ui, |ui| {
                             for path in self.recent_pdf_paths.clone() {
                                 if ui
-                                    .selectable_label(false, file_chip_label(&path))
-                                    .on_hover_text(&path)
+                                    .selectable_label(false, display_file_chip_label(&path))
+                                    .on_hover_text(display_path_hover(&path))
                                     .clicked()
                                 {
                                     path_to_open = Some(path);
@@ -2207,8 +2241,10 @@ impl GuiShellApp {
             Ok(state) => state,
             Err(err) => {
                 self.open_pdf_error = Some(err.clone());
-                self.status_log
-                    .push(format!("failed to open {}: {err}", file_chip_label(&path)));
+                self.status_log.push(format!(
+                    "failed to open {}: {err}",
+                    display_file_chip_label(&path)
+                ));
                 return;
             }
         };
@@ -2226,7 +2262,6 @@ impl GuiShellApp {
             return;
         }
 
-        self.cancel_inflight_document_jobs();
         self.apply_opened_pdf_state(state, &path);
         self.open_pdf_path_input = path.clone();
         self.open_pdf_password_input.clear();
@@ -2236,6 +2271,7 @@ impl GuiShellApp {
     }
 
     fn apply_opened_pdf_state(&mut self, state: AppState, path: &str) {
+        self.cancel_inflight_document_jobs();
         let state = Ok(state);
         let tree = TreeModel::from_state(&state, true);
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
@@ -2342,8 +2378,8 @@ impl GuiShellApp {
                     |ui| {
                         for path in self.recent_pdf_paths.clone() {
                             if ui
-                                .button(file_chip_label(&path))
-                                .on_hover_text(&path)
+                                .button(display_file_chip_label(&path))
+                                .on_hover_text(display_path_hover(&path))
                                 .clicked()
                             {
                                 recent_to_open = Some(path);
@@ -4364,6 +4400,9 @@ mod tests {
         let recent_path = temp_recent_file_path("round-trip");
         let dir = recent_path.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
+        let tmp_path = unique_recent_tmp_path(&recent_path);
+        assert_eq!(tmp_path.parent(), recent_path.parent());
+        assert_ne!(tmp_path, recent_path.with_extension("tmp"));
 
         let first = dir.join("first.pdf");
         let second = dir.join("second.pdf");
@@ -4402,6 +4441,19 @@ mod tests {
         assert_eq!(loaded, recent);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn displayed_file_paths_neutralize_controls() {
+        let path = format!("/tmp/report{}fdp.pdf", '\u{202e}');
+        let label = display_file_chip_label(&path);
+        let hover = display_path_hover(&path);
+
+        assert!(!label.contains('\u{202e}'));
+        assert!(!hover.contains('\u{202e}'));
+        assert!(label.contains('\u{fffd}'));
+        assert!(hover.contains('\u{fffd}'));
+        assert_eq!(normalize_recent_pdf_path(&path), Some(path));
     }
 
     #[cfg(not(feature = "real-mupdf"))]
