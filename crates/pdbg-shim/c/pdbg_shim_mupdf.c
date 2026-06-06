@@ -115,6 +115,8 @@ struct pdbg_path_binding {
 #define PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES (64ULL * 1024ULL * 1024ULL)
 #define PDBG_DEFAULT_MAX_FILTER_EXPANSION_RATIO 64U
 #define PDBG_DEFAULT_MAX_OBJECT_DEPTH 128U
+#define PDBG_DEFAULT_MAX_TEXT_CHARS 1000000ULL
+#define PDBG_DEFAULT_MAX_TEXT_BLOCKS 100000ULL
 
 static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
 {
@@ -353,6 +355,150 @@ static void free_image(pdbg_image *image)
     free(image->pixels);
     free_diag_list(image->diagnostics);
     free(image);
+}
+
+static void free_text_page(pdbg_text_page *text)
+{
+    if (!text)
+        return;
+    for (size_t i = 0; i < text->len; i++)
+        free(text->spans[i].text);
+    free(text->spans);
+    free(text);
+}
+
+static size_t encode_utf8_codepoint(int codepoint, char out[4])
+{
+    uint32_t c = (uint32_t)codepoint;
+    if (codepoint < 0 || c > 0x10FFFFU || (c >= 0xD800U && c <= 0xDFFFU))
+        c = 0xFFFDU;
+
+    if (c <= 0x7FU) {
+        out[0] = (char)c;
+        return 1;
+    }
+    if (c <= 0x7FFU) {
+        out[0] = (char)(0xC0U | (c >> 6));
+        out[1] = (char)(0x80U | (c & 0x3FU));
+        return 2;
+    }
+    if (c <= 0xFFFFU) {
+        out[0] = (char)(0xE0U | (c >> 12));
+        out[1] = (char)(0x80U | ((c >> 6) & 0x3FU));
+        out[2] = (char)(0x80U | (c & 0x3FU));
+        return 3;
+    }
+
+    out[0] = (char)(0xF0U | (c >> 18));
+    out[1] = (char)(0x80U | ((c >> 12) & 0x3FU));
+    out[2] = (char)(0x80U | ((c >> 6) & 0x3FU));
+    out[3] = (char)(0x80U | (c & 0x3FU));
+    return 4;
+}
+
+static int append_bytes(char **data, size_t *len, size_t *cap, const char *bytes, size_t byte_len)
+{
+    if (!data || !len || !cap || !bytes)
+        return 0;
+    if (byte_len > SIZE_MAX - *len - 1)
+        return 0;
+
+    size_t needed = *len + byte_len + 1;
+    if (needed > *cap) {
+        size_t next_cap = *cap ? *cap : 32;
+        while (next_cap < needed) {
+            if (next_cap > SIZE_MAX / 2) {
+                next_cap = needed;
+                break;
+            }
+            next_cap *= 2;
+        }
+        char *next = (char *)realloc(*data, next_cap);
+        if (!next)
+            return 0;
+        *data = next;
+        *cap = next_cap;
+    }
+
+    memcpy(*data + *len, bytes, byte_len);
+    *len += byte_len;
+    (*data)[*len] = '\0';
+    return 1;
+}
+
+static fz_rect quad_bounds(fz_quad quad)
+{
+    fz_rect rect;
+    rect.x0 = quad.ul.x;
+    rect.y0 = quad.ul.y;
+    rect.x1 = quad.ul.x;
+    rect.y1 = quad.ul.y;
+
+#define PDBG_EXPAND_POINT(point)            \
+    do {                                    \
+        if ((point).x < rect.x0)            \
+            rect.x0 = (point).x;            \
+        if ((point).y < rect.y0)            \
+            rect.y0 = (point).y;            \
+        if ((point).x > rect.x1)            \
+            rect.x1 = (point).x;            \
+        if ((point).y > rect.y1)            \
+            rect.y1 = (point).y;            \
+    } while (0)
+
+    PDBG_EXPAND_POINT(quad.ur);
+    PDBG_EXPAND_POINT(quad.ll);
+    PDBG_EXPAND_POINT(quad.lr);
+#undef PDBG_EXPAND_POINT
+
+    return rect;
+}
+
+static void union_rect_into(fz_rect *acc, fz_rect rect)
+{
+    if (rect.x0 < acc->x0)
+        acc->x0 = rect.x0;
+    if (rect.y0 < acc->y0)
+        acc->y0 = rect.y0;
+    if (rect.x1 > acc->x1)
+        acc->x1 = rect.x1;
+    if (rect.y1 > acc->y1)
+        acc->y1 = rect.y1;
+}
+
+static int append_text_span(
+    pdbg_text_page *page,
+    uint32_t page_index,
+    char *line_text,
+    size_t text_len,
+    fz_rect bbox,
+    fz_rect page_bounds,
+    int include_coordinates)
+{
+    if (!page || !line_text)
+        return 0;
+
+    pdbg_text_span *items = (pdbg_text_span *)realloc(page->spans, (page->len + 1) * sizeof(pdbg_text_span));
+    if (!items)
+        return 0;
+
+    page->spans = items;
+    pdbg_text_span *span = &page->spans[page->len];
+    memset(span, 0, sizeof(*span));
+    span->text = line_text;
+    span->text_len = text_len;
+    span->page_index = page_index;
+    span->untrusted = 1;
+
+    if (include_coordinates) {
+        span->x = bbox.x0 - page_bounds.x0;
+        span->y = bbox.y0 - page_bounds.y0;
+        span->width = bbox.x1 > bbox.x0 ? bbox.x1 - bbox.x0 : 0.0f;
+        span->height = bbox.y1 > bbox.y0 ? bbox.y1 - bbox.y0 : 0.0f;
+    }
+
+    page->len += 1;
+    return 1;
 }
 
 static void cancel_cookie_scope_init(pdbg_cancel_cookie_scope *scope)
@@ -2317,13 +2463,172 @@ pdbg_status pdbg_page_extract_text(
     pdbg_text_page **out,
     pdbg_error *err)
 {
-    (void)doc;
-    (void)page_index;
-    (void)options;
-    (void)cancel;
-    if (out)
-        *out = NULL;
-    return unsupported(err, "pdbg_page_extract_text");
+    if (!doc || !out) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid text arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before text extraction");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && atomic_load(&cancel->cancelled)) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+
+    size_t max_chars = options && options->max_chars ? options->max_chars : (size_t)PDBG_DEFAULT_MAX_TEXT_CHARS;
+    size_t max_blocks = options && options->max_blocks ? options->max_blocks : (size_t)PDBG_DEFAULT_MAX_TEXT_BLOCKS;
+    int include_coordinates = !options || options->include_coordinates;
+
+    fz_context *ctx = doc->ctx;
+    fz_page *page = NULL;
+    fz_stext_page *stext = NULL;
+    fz_device *device = NULL;
+    pdbg_text_page *text = NULL;
+    pdbg_cancel_cookie_scope cancel_scope;
+    pdbg_status status = PDBG_OK;
+    fz_var(page);
+    fz_var(stext);
+    fz_var(device);
+    fz_var(text);
+    cancel_cookie_scope_init(&cancel_scope);
+    fz_var(cancel_scope);
+    fz_var(status);
+
+    fz_try(ctx)
+    {
+        int page_count = fz_count_pages(ctx, doc->fz_doc);
+        if (page_index >= (uint32_t)page_count) {
+            status = PDBG_ERROR_LIMIT;
+            set_error(err, status, "page index out of range");
+        } else {
+            page = fz_load_page(ctx, doc->fz_doc, (int)page_index);
+            fz_rect page_bounds = fz_bound_page(ctx, page);
+            fz_stext_options stext_options;
+            memset(&stext_options, 0, sizeof(stext_options));
+            stext_options.flags = FZ_STEXT_PRESERVE_WHITESPACE | FZ_STEXT_MEDIABOX_CLIP;
+            stext_options.scale = 1.0f;
+            if (!options || options->sort_by_position)
+                stext_options.flags |= FZ_STEXT_SEGMENT;
+
+            stext = fz_new_stext_page(ctx, page_bounds);
+            device = fz_new_stext_device(ctx, stext, &stext_options);
+            fz_cookie *cookie = prepare_cancel_cookie(&cancel_scope, cancel);
+            fz_run_page(ctx, page, device, fz_identity, cookie);
+            fz_close_device(ctx, device);
+
+            if ((cancel && atomic_load(&cancel->cancelled)) || (cookie && cookie->abort)) {
+                status = PDBG_ERROR_CANCELLED;
+                set_error(err, status, "cancelled");
+            }
+
+            if (status == PDBG_OK) {
+                text = (pdbg_text_page *)calloc(1, sizeof(pdbg_text_page));
+                if (!text) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+            }
+
+            size_t block_count = 0;
+            size_t total_chars = 0;
+            for (fz_stext_block *block = status == PDBG_OK ? stext->first_block : NULL;
+                 block && status == PDBG_OK;
+                 block = block->next) {
+                if (block->type != FZ_STEXT_BLOCK_TEXT)
+                    continue;
+
+                block_count += 1;
+                if (block_count > max_blocks) {
+                    status = PDBG_ERROR_LIMIT;
+                    set_error(err, status, "text extraction exceeded configured block limit");
+                    break;
+                }
+
+                for (fz_stext_line *line = block->u.t.first_line; line && status == PDBG_OK; line = line->next) {
+                    char *line_text = NULL;
+                    size_t line_len = 0;
+                    size_t line_cap = 0;
+                    fz_rect line_bbox;
+                    int has_bbox = 0;
+
+                    for (fz_stext_char *ch = line->first_char; ch && status == PDBG_OK; ch = ch->next) {
+                        if (cancel && atomic_load(&cancel->cancelled)) {
+                            status = PDBG_ERROR_CANCELLED;
+                            set_error(err, status, "cancelled");
+                            break;
+                        }
+                        if (total_chars >= max_chars) {
+                            status = PDBG_ERROR_LIMIT;
+                            set_error(err, status, "text extraction exceeded configured character limit");
+                            break;
+                        }
+
+                        int codepoint = ch->c;
+                        if (ch->flags & (FZ_STEXT_UNICODE_IS_CID | FZ_STEXT_UNICODE_IS_GID))
+                            codepoint = 0xFFFD;
+                        char encoded[4];
+                        size_t encoded_len = encode_utf8_codepoint(codepoint, encoded);
+                        if (!append_bytes(&line_text, &line_len, &line_cap, encoded, encoded_len)) {
+                            status = PDBG_ERROR_OOM;
+                            set_error(err, status, "out of memory");
+                            break;
+                        }
+                        total_chars += 1;
+
+                        fz_rect char_bbox = quad_bounds(ch->quad);
+                        if (!has_bbox) {
+                            line_bbox = char_bbox;
+                            has_bbox = 1;
+                        } else {
+                            union_rect_into(&line_bbox, char_bbox);
+                        }
+                    }
+
+                    if (status == PDBG_OK && line_len > 0) {
+                        if (!append_text_span(
+                                text,
+                                page_index,
+                                line_text,
+                                line_len,
+                                has_bbox ? line_bbox : page_bounds,
+                                page_bounds,
+                                include_coordinates)) {
+                            status = PDBG_ERROR_OOM;
+                            set_error(err, status, "out of memory");
+                        } else {
+                            line_text = NULL;
+                        }
+                    }
+                    free(line_text);
+                }
+            }
+        }
+    }
+    fz_always(ctx)
+    {
+        finish_cancel_cookie(&cancel_scope);
+        if (device)
+            fz_drop_device(ctx, device);
+        if (stext)
+            fz_drop_stext_page(ctx, stext);
+        if (page)
+            fz_drop_page(ctx, page);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status != PDBG_OK) {
+        free_text_page(text);
+        return status;
+    }
+
+    *out = text;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
 }
 
 void pdbg_buffer_drop(pdbg_buffer *buffer)
@@ -2352,12 +2657,7 @@ void pdbg_node_list_drop(pdbg_node_list *list)
 
 void pdbg_text_page_drop(pdbg_text_page *text)
 {
-    if (!text)
-        return;
-    for (size_t i = 0; i < text->len; i++)
-        free(text->spans[i].text);
-    free(text->spans);
-    free(text);
+    free_text_page(text);
 }
 
 void pdbg_document_summary_out_drop(pdbg_document_summary_out *out)

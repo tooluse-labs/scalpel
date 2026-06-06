@@ -1,8 +1,8 @@
 # Milestone 3 Search And Diagnostics Plan
 
-Status: planned on 2026-06-05. Milestone 2 is complete for the required macOS
-real-mupdf developer path; M3 starts from the same opt-in `real-mupdf` feature
-and keeps the default workspace gate MuPDF-free.
+Status: in progress on 2026-06-05. Milestone 2 is complete for the required
+macOS real-mupdf developer path; M3 starts from the same opt-in `real-mupdf`
+feature and keeps the default workspace gate MuPDF-free.
 
 Milestone 3 turns the byte-and-page inspector into a searchable diagnostics
 workbench: real text extraction, object search over the lazy tree, text search
@@ -30,6 +30,9 @@ content-stream operator visualization remain later milestones.
 
 ### M3.1 Real Text Extraction
 
+- Initial slice: real `pdbg_page_extract_text` is wired through MuPDF structured
+  text, returning owned line spans with UTF-8 text, untrusted markers,
+  cooperative cancellation, and bounded character/block copying.
 - Implement real `pdbg_page_extract_text` using MuPDF structured-text output.
 - Return owned `pdbg_text_page` / `pdbg_text_span` data copied out before MuPDF
   handles are dropped.

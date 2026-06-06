@@ -305,6 +305,14 @@ impl OpenDocument {
         self.doc
             .render_page_with_cancel(&self.registry, request, cancel.as_mut_ptr())
     }
+
+    pub fn extract_text_with_cancel_token(
+        &mut self,
+        request: &TextRequest,
+        cancel: &CancelToken,
+    ) -> Result<TextPage, ShimError> {
+        self.doc.extract_text_with_cancel(request, cancel.as_mut_ptr())
+    }
 }
 
 pub struct CancelToken {
@@ -651,6 +659,14 @@ impl PdbgDoc {
     }
 
     fn extract_text(&self, request: &TextRequest) -> Result<TextPage, ShimError> {
+        self.extract_text_with_cancel(request, ptr::null_mut())
+    }
+
+    fn extract_text_with_cancel(
+        &self,
+        request: &TextRequest,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<TextPage, ShimError> {
         unsafe {
             let options = raw::pdbg_text_options {
                 sort_by_position: request.sort_by_position as i32,
@@ -664,7 +680,7 @@ impl PdbgDoc {
                 self.raw.as_ptr(),
                 page_index_to_u32(request.page_index)?,
                 &options,
-                ptr::null_mut(),
+                cancel,
                 &mut text,
                 &mut err,
             );
@@ -1235,6 +1251,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(render_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
 
+        let text_err = doc
+            .extract_text_with_cancel_token(&TextRequest::page(0), &cancel)
+            .unwrap_err();
+        assert_eq!(text_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
         let summary = doc.summary().unwrap();
         assert_eq!(summary.file_path, "fake.pdf");
         let render = doc.render_page(&RenderRequest::page(0)).unwrap();
@@ -1516,6 +1537,57 @@ mod tests {
             &mut pdf,
             &mut offsets,
             "5 0 obj\n<< /Type /EmbeddedFile /Length 5 >>\nstream\nhello\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_text_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let content = "BT\n/F1 12 Tf\n10 60 Td\n(Hello M3) Tj\nET\n";
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            &format!(
+                "5 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
+                content.len(),
+                content
+            ),
         );
 
         let xref_offset = pdf.len();
@@ -2166,6 +2238,71 @@ mod tests {
         let err = doc.render_page(&request).unwrap_err();
         assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
         assert!(err.message.contains("pixel"));
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_extracts_positioned_text() {
+        let path = write_temp_real_pdf("text", &synthetic_text_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+        assert_eq!(text.page_index, 0);
+        assert!(text.spans.iter().any(|span| span.text.contains("Hello M3")));
+        let span = text
+            .spans
+            .iter()
+            .find(|span| span.text.contains("Hello M3"))
+            .unwrap();
+        assert!(span.untrusted);
+        assert!(span.bbox.x >= 0.0);
+        assert!(span.bbox.y >= 0.0);
+        assert!(span.bbox.width > 0.0);
+        assert!(span.bbox.height > 0.0);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_enforces_text_character_limit() {
+        let path = write_temp_real_pdf("text-limit", &synthetic_text_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let mut request = TextRequest::page(0);
+        request.max_chars = 5;
+
+        let err = doc.extract_text(&request).unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("character limit"));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_cancelled_text_returns_clean_error_and_keeps_doc_usable() {
+        let path = write_temp_real_pdf("text-cancel", &synthetic_text_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let cancel = CancelToken::new().unwrap();
+        cancel.cancel();
+
+        let err = doc
+            .extract_text_with_cancel_token(&TextRequest::page(0), &cancel)
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
+        let summary = doc.summary().unwrap();
+        assert_eq!(summary.page_count, 1);
+        let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+        assert!(text.spans.iter().any(|span| span.text.contains("Hello M3")));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "real-mupdf")]
