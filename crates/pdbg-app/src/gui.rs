@@ -362,6 +362,7 @@ pub struct GuiShellApp {
     recent_pdf_paths: Vec<String>,
     open_pdf_dialog_open: bool,
     open_pdf_path_input: String,
+    open_pdf_password_input: String,
     open_pdf_error: Option<String>,
     tree: TreeModel,
     stream: LargeStreamModel,
@@ -419,7 +420,7 @@ impl GuiShellApp {
     }
 
     pub fn new_with_options(options: GuiRunOptions) -> Self {
-        let state = open_app_state(options.pdf_path.as_deref());
+        let state = open_app_state(options.pdf_path.as_deref(), None);
         let tree = TreeModel::from_state(&state, options.pdf_path.is_some());
         let (real_detail, real_detail_error) = load_initial_real_detail(&state, &tree);
         let (real_pages, real_pages_error) = load_initial_real_pages(&state, &tree);
@@ -460,6 +461,7 @@ impl GuiShellApp {
             recent_pdf_paths,
             open_pdf_dialog_open: false,
             open_pdf_path_input: options.pdf_path.unwrap_or_default(),
+            open_pdf_password_input: String::new(),
             open_pdf_error: None,
             tree,
             stream: LargeStreamModel::default(),
@@ -1357,20 +1359,23 @@ impl GuiShellApp {
     }
 }
 
-fn open_app_state(pdf_path: Option<&str>) -> Result<AppState, String> {
+fn open_app_state(pdf_path: Option<&str>, password: Option<&str>) -> Result<AppState, String> {
     if let Some(path) = pdf_path {
         #[cfg(feature = "real-mupdf")]
         {
-            return AppState::new_real_path(path).map_err(|err| err.message);
+            return AppState::new_real_path_with_password(path, password)
+                .map_err(|err| err.message);
         }
         #[cfg(not(feature = "real-mupdf"))]
         {
+            let _ = password;
             let _ = path;
             return Err(
                 "`--pdf` requires building pdbg-app with `--features real-mupdf`".to_string(),
             );
         }
     }
+    let _ = password;
     AppState::new_headless().map_err(|err| err.message)
 }
 
@@ -2130,6 +2135,21 @@ impl GuiShellApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    ui.label(RichText::new("Password").color(PdbgTheme::MUTED));
+                    let response = ui.add(
+                        TextEdit::singleline(&mut self.open_pdf_password_input)
+                            .desired_width(380.0)
+                            .password(true),
+                    );
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        path_to_open = Some(self.open_pdf_path_input.clone());
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
                     let can_open = !self.open_pdf_path_input.trim().is_empty();
                     if ui
                         .add_enabled(can_open, egui::Button::new("Open"))
@@ -2139,6 +2159,7 @@ impl GuiShellApp {
                     }
                     if ui.button("Cancel").clicked() {
                         self.open_pdf_dialog_open = false;
+                        self.open_pdf_password_input.clear();
                     }
                 });
 
@@ -2180,7 +2201,9 @@ impl GuiShellApp {
             return;
         }
 
-        let state = match open_app_state(Some(&path)) {
+        let password_owned = self.open_pdf_password_input.trim().to_string();
+        let password = (!password_owned.is_empty()).then_some(password_owned.as_str());
+        let state = match open_app_state(Some(&path), password) {
             Ok(state) => state,
             Err(err) => {
                 self.open_pdf_error = Some(err.clone());
@@ -2189,10 +2212,24 @@ impl GuiShellApp {
                 return;
             }
         };
+        if state
+            .panels
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.needs_password)
+        {
+            self.open_pdf_path_input = path;
+            self.open_pdf_dialog_open = true;
+            self.open_pdf_error = Some("Password required".to_string());
+            self.status_log
+                .push("document requires a password before inspection".to_string());
+            return;
+        }
 
         self.cancel_inflight_document_jobs();
         self.apply_opened_pdf_state(state, &path);
         self.open_pdf_path_input = path.clone();
+        self.open_pdf_password_input.clear();
         self.open_pdf_dialog_open = false;
         self.open_pdf_error = None;
         self.record_recent_pdf_path(&path);
@@ -4419,6 +4456,40 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_gui_open_pdf_prompts_for_password_and_retries() {
+        let recent_path = temp_recent_file_path("real-password-open");
+        let path = encrypted_minimal_pdf_path("gui-password-open");
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: None,
+            recent_files_path: Some(recent_path.clone()),
+        });
+        let initial_row = app.tree.row_label(0);
+
+        app.open_pdf_from_path(path.to_string_lossy().to_string());
+
+        assert_eq!(app.tree.row_label(0), initial_row);
+        assert_eq!(app.open_pdf_error.as_deref(), Some("Password required"));
+        assert!(app.open_pdf_dialog_open);
+        assert!(app.recent_pdf_paths.is_empty());
+
+        app.open_pdf_password_input = "user".to_string();
+        app.open_pdf_from_path(path.to_string_lossy().to_string());
+        wait_for_real_render(&mut app);
+
+        assert!(app.tree.is_real());
+        assert!(app.open_pdf_error.is_none());
+        assert!(!app.open_pdf_dialog_open);
+        assert!(app.open_pdf_password_input.is_empty());
+        let canonical = path.canonicalize().unwrap().to_string_lossy().to_string();
+        assert_eq!(app.recent_pdf_paths.first(), Some(&canonical));
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(recent_path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_gui_model_loads_bounded_tree_and_detail_from_pdf_path() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -4847,6 +4918,54 @@ mod tests {
         ));
         std::fs::write(&temp_path, bytes).unwrap();
         temp_path
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn mutool_path() -> PathBuf {
+        if let Some(path) = std::env::var_os("PDBG_MUTOOL_PATH") {
+            return PathBuf::from(path);
+        }
+        let source_dir = std::env::var_os("PDBG_MUPDF_SOURCE_DIR")
+            .expect("real encrypted GUI test requires PDBG_MUPDF_SOURCE_DIR or PDBG_MUTOOL_PATH");
+        let path = PathBuf::from(source_dir)
+            .join("build")
+            .join("release")
+            .join("mutool");
+        assert!(
+            path.is_file(),
+            "real encrypted GUI test requires mutool at {}; build it with `make build=release build/release/mutool` or set PDBG_MUTOOL_PATH",
+            path.display()
+        );
+        path
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn encrypted_minimal_pdf_path(prefix: &str) -> PathBuf {
+        let input = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/synthetic/minimal.pdf"
+        );
+        let output = std::env::temp_dir().join(format!(
+            "pdbg-app-{}-{}-{}.pdf",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let status = std::process::Command::new(mutool_path())
+            .args([
+                "clean", "-E", "aes-128", "-O", "owner", "-U", "user", "-P", "0", input,
+            ])
+            .arg(&output)
+            .status()
+            .expect("failed to run mutool");
+        assert!(
+            status.success(),
+            "mutool failed to create encrypted GUI fixture"
+        );
+        output
     }
 
     #[cfg(feature = "real-mupdf")]

@@ -70,10 +70,22 @@ impl AppState {
 
     #[cfg(feature = "real-mupdf")]
     pub fn new_real_path(path: &str) -> Result<Self, ShimError> {
+        Self::new_real_path_with_password(path, None)
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    pub fn new_real_path_with_password(
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<Self, ShimError> {
         let safe_mode = SafeModeConfig::default();
         let capabilities = MuPdfCapabilities::mupdf_only_default();
         let shim = RealMuPdfShim::new()?;
-        let doc = shim.open_document_with_config(path, &safe_mode)?;
+        let doc = if let Some(password) = password {
+            shim.open_document_with_password_and_config(path, password, &safe_mode)?
+        } else {
+            shim.open_document_with_config(path, &safe_mode)?
+        };
         let session = DocumentSession::new(doc);
         Self::from_session(session, safe_mode, capabilities)
     }
@@ -98,9 +110,12 @@ impl AppState {
     pub fn run_headless_command_loop(&mut self) -> Result<(), ShimError> {
         self.command_log.push("refresh_summary".to_string());
         let summary = self.session.summary()?;
+        let needs_password = summary.needs_password;
 
         self.command_log.push("refresh_tree".to_string());
-        let tree = if self.capabilities.gate(CapabilityFeature::InspectStructure)
+        let tree = if needs_password {
+            None
+        } else if self.capabilities.gate(CapabilityFeature::InspectStructure)
             == CapabilityDecision::Enabled
         {
             let root = NodeId::DocumentRoot {
