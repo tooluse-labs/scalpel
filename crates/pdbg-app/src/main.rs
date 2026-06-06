@@ -76,10 +76,12 @@ fn open_app_state(pdf_path: Option<&str>) -> Result<pdbg_app::AppState, String> 
 
 #[cfg(feature = "gui")]
 fn run_gui(options: CliOptions) {
+    let start_empty_when_no_pdf = options.pdf_path.is_none();
     let options = pdbg_app::gui::GuiRunOptions {
         smoke_exit_after: options.gui_smoke_ms.map(std::time::Duration::from_millis),
         pdf_path: options.pdf_path,
         recent_files_path: None,
+        start_empty_when_no_pdf,
     };
     if let Err(err) = pdbg_app::gui::run_gui_with_options(options) {
         eprintln!("pdbg-app GUI failed: {err}");
