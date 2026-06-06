@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "pdbg_shim.h"
 
 #include <mupdf/fitz.h>
@@ -12,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#define PDBG_STEXT_MAX_STRUCT_DEPTH 256
 
 struct pdbg_context {
     fz_context *ctx;
@@ -111,6 +115,11 @@ struct pdbg_path_binding {
     pdf_obj *obj;
 };
 
+typedef struct pdbg_warning_capture {
+    int seen;
+    char message[256];
+} pdbg_warning_capture;
+
 #define PDBG_DEFAULT_MAX_STORE_BYTES (256ULL * 1024ULL * 1024ULL)
 #define PDBG_DEFAULT_MAX_DECODED_STREAM_BYTES (64ULL * 1024ULL * 1024ULL)
 #define PDBG_DEFAULT_MAX_FILTER_EXPANSION_RATIO 64U
@@ -188,14 +197,6 @@ static pdbg_status set_mupdf_error(fz_context *ctx, pdbg_error *err)
     return status;
 }
 
-static pdbg_status unsupported(pdbg_error *err, const char *operation)
-{
-    char message[256];
-    snprintf(message, sizeof(message), "%s is not implemented by the M1 real-mupdf shim", operation);
-    set_error(err, PDBG_ERROR_UNSUPPORTED, message);
-    return PDBG_ERROR_UNSUPPORTED;
-}
-
 static char *copy_string(const char *value)
 {
     size_t len = value ? strlen(value) : 0;
@@ -228,6 +229,15 @@ static void ignore_mupdf_message(void *user, const char *message)
 {
     (void)user;
     (void)message;
+}
+
+static void capture_mupdf_warning(void *user, const char *message)
+{
+    pdbg_warning_capture *capture = (pdbg_warning_capture *)user;
+    if (!capture || capture->seen)
+        return;
+    capture->seen = 1;
+    snprintf(capture->message, sizeof(capture->message), "%s", message ? message : "MuPDF warning");
 }
 
 static void destroy_locks(pdbg_context *ctx)
@@ -501,6 +511,146 @@ static int append_text_span(
     return 1;
 }
 
+static int append_stext_line(
+    pdbg_text_page *text,
+    uint32_t page_index,
+    fz_stext_line *line,
+    fz_rect page_bounds,
+    int include_coordinates,
+    size_t max_chars,
+    size_t *total_chars,
+    pdbg_cancel_token *cancel,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    char *line_text = NULL;
+    size_t line_len = 0;
+    size_t line_cap = 0;
+    fz_rect line_bbox;
+    int has_bbox = 0;
+
+    for (fz_stext_char *ch = line ? line->first_char : NULL; ch && *status == PDBG_OK; ch = ch->next) {
+        if (cancel && atomic_load(&cancel->cancelled)) {
+            *status = PDBG_ERROR_CANCELLED;
+            set_error(err, *status, "cancelled");
+            break;
+        }
+        if (*total_chars >= max_chars) {
+            *status = PDBG_ERROR_LIMIT;
+            set_error(err, *status, "text extraction exceeded configured character limit");
+            break;
+        }
+
+        int codepoint = ch->c;
+        if (ch->flags & (FZ_STEXT_UNICODE_IS_CID | FZ_STEXT_UNICODE_IS_GID))
+            codepoint = 0xFFFD;
+        char encoded[4];
+        size_t encoded_len = encode_utf8_codepoint(codepoint, encoded);
+        if (!append_bytes(&line_text, &line_len, &line_cap, encoded, encoded_len)) {
+            *status = PDBG_ERROR_OOM;
+            set_error(err, *status, "out of memory");
+            break;
+        }
+        *total_chars += 1;
+
+        fz_rect char_bbox = quad_bounds(ch->quad);
+        if (!has_bbox) {
+            line_bbox = char_bbox;
+            has_bbox = 1;
+        } else {
+            union_rect_into(&line_bbox, char_bbox);
+        }
+    }
+
+    if (*status == PDBG_OK && line_len > 0) {
+        if (!append_text_span(
+                text,
+                page_index,
+                line_text,
+                line_len,
+                has_bbox ? line_bbox : page_bounds,
+                page_bounds,
+                include_coordinates)) {
+            *status = PDBG_ERROR_OOM;
+            set_error(err, *status, "out of memory");
+        } else {
+            line_text = NULL;
+        }
+    }
+    free(line_text);
+    return *status == PDBG_OK;
+}
+
+static int append_stext_blocks(
+    pdbg_text_page *text,
+    uint32_t page_index,
+    fz_stext_block *block,
+    fz_rect page_bounds,
+    int include_coordinates,
+    size_t max_chars,
+    size_t max_blocks,
+    size_t *block_count,
+    size_t *total_chars,
+    pdbg_cancel_token *cancel,
+    size_t depth,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    if (depth > PDBG_STEXT_MAX_STRUCT_DEPTH) {
+        *status = PDBG_ERROR_LIMIT;
+        set_error(err, *status, "text structure nesting exceeded configured depth limit");
+        return 0;
+    }
+
+    for (; block && *status == PDBG_OK; block = block->next) {
+        if (block->type == FZ_STEXT_BLOCK_STRUCT) {
+            if (block->u.s.down &&
+                !append_stext_blocks(
+                    text,
+                    page_index,
+                    block->u.s.down->first_block,
+                    page_bounds,
+                    include_coordinates,
+                    max_chars,
+                    max_blocks,
+                    block_count,
+                    total_chars,
+                    cancel,
+                    depth + 1,
+                    status,
+                    err)) {
+                return 0;
+            }
+            continue;
+        }
+
+        if (block->type != FZ_STEXT_BLOCK_TEXT)
+            continue;
+
+        *block_count += 1;
+        if (*block_count > max_blocks) {
+            *status = PDBG_ERROR_LIMIT;
+            set_error(err, *status, "text extraction exceeded configured block limit");
+            break;
+        }
+
+        for (fz_stext_line *line = block->u.t.first_line; line && *status == PDBG_OK; line = line->next)
+            append_stext_line(
+                text,
+                page_index,
+                line,
+                page_bounds,
+                include_coordinates,
+                max_chars,
+                total_chars,
+                cancel,
+                status,
+                err);
+    }
+
+    return *status == PDBG_OK;
+}
+
 static void cancel_cookie_scope_init(pdbg_cancel_cookie_scope *scope)
 {
     if (scope)
@@ -594,7 +744,7 @@ static int fill_stream_filters(fz_context *ctx, pdbg_stream_summary *stream, pdf
     return 1;
 }
 
-static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out);
+static int stream_size_hint(fz_context *ctx, pdf_obj *obj, pdf_obj *key, uint64_t *out);
 
 static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdbg_node_id *node, pdf_obj *obj)
 {
@@ -605,9 +755,15 @@ static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdb
         stream->object = object_id_from_ref(ctx, obj);
 
     uint64_t raw_size = 0;
-    if (stream_raw_size_hint(ctx, obj, &raw_size)) {
+    if (stream_size_hint(ctx, obj, PDF_NAME(Length), &raw_size)) {
         stream->raw_size_hint = raw_size;
         stream->has_raw_size_hint = 1;
+    }
+
+    uint64_t decoded_size = 0;
+    if (stream_size_hint(ctx, obj, PDF_NAME(DL), &decoded_size)) {
+        stream->decoded_size_hint = decoded_size;
+        stream->has_decoded_size_hint = 1;
     }
 
     if (!fill_stream_filters(ctx, stream, pdf_dict_get(ctx, obj, PDF_NAME(Filter))))
@@ -617,21 +773,21 @@ static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdb
     return 1;
 }
 
-static int stream_raw_size_hint(fz_context *ctx, pdf_obj *obj, uint64_t *out)
+static int stream_size_hint(fz_context *ctx, pdf_obj *obj, pdf_obj *key, uint64_t *out)
 {
     if (!out)
         return 0;
     *out = 0;
 
-    pdf_obj *length = pdf_dict_get(ctx, obj, PDF_NAME(Length));
+    pdf_obj *length = pdf_dict_get(ctx, obj, key);
     if (!length || !pdf_is_number(ctx, length))
         return 0;
 
-    int64_t raw_size = pdf_to_int64(ctx, length);
-    if (raw_size < 0)
+    int64_t size = pdf_to_int64(ctx, length);
+    if (size < 0)
         return 0;
 
-    *out = (uint64_t)raw_size;
+    *out = (uint64_t)size;
     return 1;
 }
 
@@ -886,6 +1042,16 @@ static pdbg_object_id object_id_from_ref(fz_context *ctx, pdf_obj *obj)
     id.num = pdf_to_num(ctx, obj);
     id.gen = pdf_to_gen(ctx, obj);
     return id;
+}
+
+static int object_generation_from_xref(fz_context *ctx, pdf_document *doc, int object_num)
+{
+    pdf_xref_entry *entry = pdf_get_xref_entry_no_change(ctx, doc, object_num);
+    if (!entry)
+        return 0;
+    if (entry->type == 'o')
+        return 0;
+    return entry->gen;
 }
 
 static pdbg_node_id direct_node(uint64_t document_id, pdbg_node_kind kind)
@@ -1361,15 +1527,16 @@ static pdbg_node_list *xref_root_children(fz_context *ctx, pdbg_doc *doc, size_t
 
         for (size_t i = 0; ok && i < list->len; i++) {
             int object_num = (int)(offset + i + 1);
+            int object_gen = object_generation_from_xref(ctx, doc->pdf_doc, object_num);
             char key[32];
             char label[64];
             char preview[64];
             snprintf(key, sizeof(key), "%d", object_num);
-            snprintf(label, sizeof(label), "Object %d 0 R", object_num);
-            snprintf(preview, sizeof(preview), "%d 0 R", object_num);
+            snprintf(label, sizeof(label), "Object %d %d R", object_num, object_gen);
+            snprintf(preview, sizeof(preview), "%d %d R", object_num, object_gen);
             pdbg_object_id object;
             object.num = object_num;
-            object.gen = 0;
+            object.gen = object_gen;
             ok = fill_entry_common(
                 ctx,
                 &list->items[i],
@@ -2145,17 +2312,27 @@ pdbg_status pdbg_stream_load(
 
     fz_context *ctx = doc->ctx;
     fz_stream *stream = NULL;
+    pdf_obj *stream_obj = NULL;
     pdbg_buffer *buffer = NULL;
     uint64_t total = 0;
     size_t copied = 0;
     uint64_t request_end = UINT64_MAX;
     unsigned char scratch[8192];
     pdbg_status status = PDBG_OK;
+    pdbg_warning_capture warning_capture;
+    fz_warning_cb *old_warning_cb = NULL;
+    void *old_warning_user = NULL;
+    int warning_capture_installed = 0;
     fz_var(stream);
+    fz_var(stream_obj);
     fz_var(buffer);
     fz_var(total);
     fz_var(copied);
     fz_var(status);
+    fz_var(old_warning_cb);
+    fz_var(old_warning_user);
+    fz_var(warning_capture_installed);
+    memset(&warning_capture, 0, sizeof(warning_capture));
     if ((uint64_t)limit <= UINT64_MAX - offset)
         request_end = offset + (uint64_t)limit;
 
@@ -2179,13 +2356,25 @@ pdbg_status pdbg_stream_load(
 
             if (status == PDBG_OK) {
                 uint64_t measured_raw_size = 0;
+                int has_measured_raw_size = 0;
                 if (decoded && doc->max_filter_expansion_ratio > 0) {
-                    status = measure_raw_stream_size(doc, object.num, cancel, &measured_raw_size, err);
+                    stream_obj = pdf_load_object(ctx, doc->pdf_doc, object.num);
+                    if (stream_size_hint(ctx, stream_obj, PDF_NAME(Length), &measured_raw_size)) {
+                        has_measured_raw_size = 1;
+                    } else {
+                        status = measure_raw_stream_size(doc, object.num, cancel, &measured_raw_size, err);
+                        has_measured_raw_size = status == PDBG_OK;
+                    }
                 }
 
                 if (status == PDBG_OK)
                     stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
                                      : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
+                if (status == PDBG_OK && decoded) {
+                    old_warning_cb = fz_warning_callback(ctx, &old_warning_user);
+                    fz_set_warning_callback(ctx, capture_mupdf_warning, &warning_capture);
+                    warning_capture_installed = 1;
+                }
 
                 while (status == PDBG_OK) {
                     if (cancel && atomic_load(&cancel->cancelled)) {
@@ -2210,12 +2399,7 @@ pdbg_status pdbg_stream_load(
                         set_error(err, status, "decoded stream limit exceeded during decode");
                         break;
                     }
-                    if (decoded && doc->max_filter_expansion_ratio > 0) {
-                        if (measured_raw_size == 0 && chunk_end > 0) {
-                            status = PDBG_ERROR_LIMIT;
-                            set_error(err, status, "decoded stream expansion ratio exceeded");
-                            break;
-                        }
+                    if (decoded && has_measured_raw_size && doc->max_filter_expansion_ratio > 0) {
                         if (measured_raw_size > 0 &&
                             (measured_raw_size > UINT64_MAX / (uint64_t)doc->max_filter_expansion_ratio ||
                              chunk_end > measured_raw_size * (uint64_t)doc->max_filter_expansion_ratio)) {
@@ -2246,14 +2430,33 @@ pdbg_status pdbg_stream_load(
                     if ((uint64_t)copied <= UINT64_MAX - offset)
                         visible_end = offset + (uint64_t)copied;
                     buffer->truncated = offset < total && visible_end < total;
+                    if (decoded && warning_capture.seen) {
+                        buffer->truncated = 1;
+                        if (!attach_single_diag(
+                                &buffer->diagnostics,
+                                PDBG_DIAG_STREAM_DECODE_FAILURE,
+                                warning_capture.message)) {
+                            status = PDBG_ERROR_OOM;
+                            set_error(err, status, "out of memory");
+                        } else {
+                            buffer->diagnostics->items[0].object = object;
+                            buffer->diagnostics->items[0].has_object = 1;
+                        }
+                    }
                 }
             }
         }
     }
     fz_always(ctx)
     {
+        if (warning_capture_installed) {
+            fz_set_warning_callback(ctx, old_warning_cb, old_warning_user);
+            warning_capture_installed = 0;
+        }
         if (stream)
             fz_drop_stream(ctx, stream);
+        if (stream_obj)
+            pdf_drop_obj(ctx, stream_obj);
     }
     fz_catch(ctx)
     {
@@ -2533,77 +2736,21 @@ pdbg_status pdbg_page_extract_text(
 
             size_t block_count = 0;
             size_t total_chars = 0;
-            for (fz_stext_block *block = status == PDBG_OK ? stext->first_block : NULL;
-                 block && status == PDBG_OK;
-                 block = block->next) {
-                if (block->type != FZ_STEXT_BLOCK_TEXT)
-                    continue;
-
-                block_count += 1;
-                if (block_count > max_blocks) {
-                    status = PDBG_ERROR_LIMIT;
-                    set_error(err, status, "text extraction exceeded configured block limit");
-                    break;
-                }
-
-                for (fz_stext_line *line = block->u.t.first_line; line && status == PDBG_OK; line = line->next) {
-                    char *line_text = NULL;
-                    size_t line_len = 0;
-                    size_t line_cap = 0;
-                    fz_rect line_bbox;
-                    int has_bbox = 0;
-
-                    for (fz_stext_char *ch = line->first_char; ch && status == PDBG_OK; ch = ch->next) {
-                        if (cancel && atomic_load(&cancel->cancelled)) {
-                            status = PDBG_ERROR_CANCELLED;
-                            set_error(err, status, "cancelled");
-                            break;
-                        }
-                        if (total_chars >= max_chars) {
-                            status = PDBG_ERROR_LIMIT;
-                            set_error(err, status, "text extraction exceeded configured character limit");
-                            break;
-                        }
-
-                        int codepoint = ch->c;
-                        if (ch->flags & (FZ_STEXT_UNICODE_IS_CID | FZ_STEXT_UNICODE_IS_GID))
-                            codepoint = 0xFFFD;
-                        char encoded[4];
-                        size_t encoded_len = encode_utf8_codepoint(codepoint, encoded);
-                        if (!append_bytes(&line_text, &line_len, &line_cap, encoded, encoded_len)) {
-                            status = PDBG_ERROR_OOM;
-                            set_error(err, status, "out of memory");
-                            break;
-                        }
-                        total_chars += 1;
-
-                        fz_rect char_bbox = quad_bounds(ch->quad);
-                        if (!has_bbox) {
-                            line_bbox = char_bbox;
-                            has_bbox = 1;
-                        } else {
-                            union_rect_into(&line_bbox, char_bbox);
-                        }
-                    }
-
-                    if (status == PDBG_OK && line_len > 0) {
-                        if (!append_text_span(
-                                text,
-                                page_index,
-                                line_text,
-                                line_len,
-                                has_bbox ? line_bbox : page_bounds,
-                                page_bounds,
-                                include_coordinates)) {
-                            status = PDBG_ERROR_OOM;
-                            set_error(err, status, "out of memory");
-                        } else {
-                            line_text = NULL;
-                        }
-                    }
-                    free(line_text);
-                }
-            }
+            if (status == PDBG_OK)
+                append_stext_blocks(
+                    text,
+                    page_index,
+                    stext->first_block,
+                    page_bounds,
+                    include_coordinates,
+                    max_chars,
+                    max_blocks,
+                    &block_count,
+                    &total_chars,
+                    cancel,
+                    0,
+                    &status,
+                    err);
         }
     }
     fz_always(ctx)

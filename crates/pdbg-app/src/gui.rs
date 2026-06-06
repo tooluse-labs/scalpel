@@ -3,13 +3,14 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    build_markdown_report, diagnostics_payload_to_json_string, escape_pdf_text, search_objects,
-    search_text_with_cache, CancelToken, ChildContainer, ChildPage, ChildRange, DiagnosticCode,
-    DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary, DocumentDiagnostics, EgressFormat,
-    EscapedText, MarkdownReportInput, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind,
-    ObjectSearchField, ObjectSearchHit, ObjectSearchRequest, ObjectSearchResult, ObjectSummary,
-    ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode, StreamSummary,
-    StreamViewMode, TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
+    build_markdown_report, diagnostics_payload_to_json_string, escape_pdf_text,
+    search_objects_with_cancel, search_text_with_cache, CancelToken, ChildContainer, ChildPage,
+    ChildRange, DiagnosticCode, DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary,
+    DocumentDiagnostics, EgressFormat, EscapedText, MarkdownReportInput, NodeId, NodePathSegment,
+    ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest,
+    ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest, RenderResult, ShimDocument,
+    StreamChunk, StreamMode, StreamSummary, StreamViewMode, TextPageCache, TextSearchHit,
+    TextSearchRequest, TextSearchResult,
 };
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
@@ -119,6 +120,23 @@ impl Drop for RealTextSearchJob {
 struct RealTextSearchJobOutput {
     query: String,
     result: Result<(TextSearchResult, TextPageCache), String>,
+}
+
+struct RealObjectSearchJob {
+    query: String,
+    cancel: Arc<CancelToken>,
+    receiver: mpsc::Receiver<RealObjectSearchJobOutput>,
+}
+
+impl Drop for RealObjectSearchJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+struct RealObjectSearchJobOutput {
+    query: String,
+    result: Result<ObjectSearchResult, String>,
 }
 
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
@@ -360,6 +378,7 @@ pub struct GuiShellApp {
     object_search_query: String,
     object_search_result: Option<ObjectSearchResult>,
     object_search_error: Option<String>,
+    object_search_job: Option<RealObjectSearchJob>,
     text_search_query: String,
     text_search_result: Option<TextSearchResult>,
     text_search_error: Option<String>,
@@ -434,6 +453,7 @@ impl GuiShellApp {
             object_search_query: String::new(),
             object_search_result: None,
             object_search_error: None,
+            object_search_job: None,
             text_search_query: String::new(),
             text_search_result: None,
             text_search_error: None,
@@ -553,11 +573,29 @@ impl GuiShellApp {
     fn run_object_search(&mut self) {
         let query = self.object_search_query.trim().to_string();
         if query.is_empty() {
+            self.cancel_object_search_job();
             self.object_search_result = None;
             self.object_search_error = None;
             return;
         }
 
+        if let Some(job) = self.object_search_job.take() {
+            job.cancel.cancel();
+        }
+
+        let Ok(state) = self.state.as_ref() else {
+            self.object_search_result = None;
+            self.object_search_error = Some("document is not open".to_string());
+            return;
+        };
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
+            Err(err) => {
+                self.object_search_result = None;
+                self.object_search_error = Some(err.message);
+                return;
+            }
+        };
         let request = ObjectSearchRequest {
             query: query.clone(),
             root: None,
@@ -568,15 +606,60 @@ impl GuiShellApp {
             max_results: OBJECT_SEARCH_MAX_RESULTS,
             inspect_details: false,
         };
-        match self.state.as_ref() {
-            Ok(state) => match state
-                .session
-                .run_task(|document| search_objects(document, &request))
-            {
+        let session = state.session.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = session
+                .run_task(|document| {
+                    search_objects_with_cancel(document, &request, worker_cancel.as_ref())
+                })
+                .map_err(|err| err.message);
+            let _ = sender.send(RealObjectSearchJobOutput { query, result });
+        });
+
+        self.object_search_result = None;
+        self.object_search_error = None;
+        self.object_search_job = Some(RealObjectSearchJob {
+            query: self.object_search_query.trim().to_string(),
+            cancel,
+            receiver,
+        });
+        self.status_log.push(format!(
+            "queued object search {:?}",
+            self.object_search_query.trim()
+        ));
+    }
+
+    fn cancel_object_search_job(&mut self) {
+        if let Some(job) = self.object_search_job.take() {
+            job.cancel.cancel();
+            self.object_search_error = Some("object search cancelled".to_string());
+            self.status_log
+                .push(format!("cancelled object search {:?}", job.query));
+        }
+    }
+
+    fn poll_object_search_job(&mut self) {
+        let Some(polled) =
+            self.object_search_job
+                .as_ref()
+                .and_then(|job| match job.receiver.try_recv() {
+                    Ok(output) => Some(Ok(output)),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.query.clone())),
+                })
+        else {
+            return;
+        };
+
+        self.object_search_job = None;
+        match polled {
+            Ok(output) => match output.result {
                 Ok(result) => {
                     self.status_log.push(format!(
                         "object search {:?}: {} hits across {} nodes{}",
-                        query,
+                        output.query,
                         result.hits.len(),
                         result.searched_nodes,
                         if result.truncated { " (truncated)" } else { "" }
@@ -586,14 +669,16 @@ impl GuiShellApp {
                 }
                 Err(err) => {
                     self.object_search_result = None;
-                    self.object_search_error = Some(err.message.clone());
+                    self.object_search_error = Some(err.clone());
                     self.status_log
-                        .push(format!("object search {:?} failed: {}", query, err.message));
+                        .push(format!("object search {:?} failed: {err}", output.query));
                 }
             },
-            Err(err) => {
+            Err(query) => {
                 self.object_search_result = None;
-                self.object_search_error = Some(err.clone());
+                self.object_search_error = Some("object search worker disconnected".to_string());
+                self.status_log
+                    .push(format!("object search {:?} worker disconnected", query));
             }
         }
     }
@@ -1435,7 +1520,14 @@ fn detail_reference_targets(detail: &ObjectDetail) -> Vec<ObjectId> {
     out
 }
 
-fn object_search_status_label(result: Option<&ObjectSearchResult>, error: Option<&str>) -> String {
+fn object_search_status_label(
+    result: Option<&ObjectSearchResult>,
+    error: Option<&str>,
+    running: bool,
+) -> String {
+    if running {
+        return "searching".to_string();
+    }
     if error.is_some() {
         return "failed".to_string();
     }
@@ -1523,12 +1615,18 @@ fn text_search_status_label(
 }
 
 fn text_search_hit_summary(hit: &TextSearchHit) -> String {
-    format!(
-        "p{} s{}  {}",
-        hit.page_index + 1,
-        hit.span_index,
-        hit.excerpt.replace('\n', " ")
-    )
+    let excerpt = escape_pdf_text(&hit.excerpt, EgressFormat::PlainText, COPY_LIMIT_BYTES)
+        .text
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    format!("p{} s{}  {}", hit.page_index + 1, hit.span_index, excerpt)
 }
 
 fn text_search_hit_hover(hit: &TextSearchHit) -> String {
@@ -1755,9 +1853,11 @@ impl eframe::App for GuiShellApp {
         let ctx = ui.ctx().clone();
         self.poll_real_stream_job();
         self.poll_real_render_job();
+        self.poll_object_search_job();
         self.poll_text_search_job();
         if self.real_stream_job.is_some()
             || self.real_render_job.is_some()
+            || self.object_search_job.is_some()
             || self.text_search_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -1873,29 +1973,39 @@ impl GuiShellApp {
         let status = object_search_status_label(
             self.object_search_result.as_ref(),
             self.object_search_error.as_deref(),
+            self.object_search_job.is_some(),
         );
         section_header(ui, "Object Search", Some(&status));
 
         let mut run_search = false;
+        let mut cancel_search = false;
         let mut clear_search = false;
         section_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                let response = ui.add(
+                let response = ui.add_enabled(
+                    self.object_search_job.is_none(),
                     TextEdit::singleline(&mut self.object_search_query)
                         .desired_width(f32::INFINITY)
                         .hint_text("object, key, name, scalar"),
                 );
                 run_search |=
                     response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                run_search |= ui.button("Search").clicked();
+                if self.object_search_job.is_some() {
+                    cancel_search |= ui.button("Cancel").clicked();
+                } else {
+                    run_search |= ui.button("Search").clicked();
+                }
                 clear_search |= ui.button("Clear").clicked();
             });
         });
 
         if clear_search {
+            self.cancel_object_search_job();
             self.object_search_query.clear();
             self.object_search_result = None;
             self.object_search_error = None;
+        } else if cancel_search {
+            self.cancel_object_search_job();
         } else if run_search {
             self.run_object_search();
         }
@@ -3485,6 +3595,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "real-mupdf"))]
     fn wait_for_text_search(app: &mut GuiShellApp) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.text_search_job.is_some() && Instant::now() < deadline {
@@ -3500,6 +3611,22 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "real-mupdf"))]
+    fn wait_for_object_search(app: &mut GuiShellApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.object_search_job.is_some() && Instant::now() < deadline {
+            app.poll_object_search_job();
+            if app.object_search_job.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        app.poll_object_search_job();
+        assert!(
+            app.object_search_job.is_none(),
+            "object search job did not finish before test timeout"
+        );
+    }
+
     #[test]
     fn virtual_tree_does_not_materialize_rows() {
         let tree = VirtualObjectTree::new(1_000_000);
@@ -3508,12 +3635,15 @@ mod tests {
         assert_eq!(tree.row_label(999_999), "obj 999999 0 R  /FakeNode248");
     }
 
+    #[cfg(not(feature = "real-mupdf"))]
     #[test]
     fn gui_object_search_navigates_headless_fake_hit() {
         let mut app = GuiShellApp::new();
         app.object_search_query = "2 0 R".to_string();
 
         app.run_object_search();
+        assert!(app.object_search_job.is_some());
+        wait_for_object_search(&mut app);
 
         let result = app.object_search_result.as_ref().unwrap();
         assert!(app.object_search_error.is_none());
@@ -3567,6 +3697,24 @@ mod tests {
         assert_eq!(tree.rows[row].depth, 2);
     }
 
+    #[test]
+    fn text_search_hit_summary_egresses_display_controls() {
+        let hit = TextSearchHit {
+            page_index: 0,
+            span_index: 2,
+            excerpt: "A\0B\u{202e}C\nD".to_string(),
+            bbox: None,
+            untrusted: true,
+        };
+
+        let summary = text_search_hit_summary(&hit);
+
+        assert!(summary.contains(&format!("A{}B{}C D", '\u{fffd}', '\u{fffd}')));
+        assert!(!summary.contains('\0'));
+        assert!(!summary.contains('\u{202e}'));
+    }
+
+    #[cfg(not(feature = "real-mupdf"))]
     #[test]
     fn gui_text_search_runs_async_caches_and_selects_hit() {
         let mut app = GuiShellApp::new();

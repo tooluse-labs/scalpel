@@ -1,5 +1,5 @@
 use crate::{
-    ChildContainer, ChildPage, ChildRange, NodeId, ObjectDetail, ObjectId, ObjectKind,
+    CancelToken, ChildContainer, ChildPage, ChildRange, NodeId, ObjectDetail, ObjectId, ObjectKind,
     ObjectSummary, ObjectValue, PageRect, ShimDocument, ShimError, TextPage, TextRequest,
 };
 use pdbg_shim::raw;
@@ -212,6 +212,7 @@ struct SearchState {
 struct SearchContext<'a> {
     query: &'a Query,
     request: &'a ObjectSearchRequest,
+    cancel: Option<&'a CancelToken>,
     detail_range: ChildRange,
     max_nodes: usize,
     max_results: usize,
@@ -235,6 +236,28 @@ pub fn search_objects<D>(
 where
     D: ShimDocument,
 {
+    search_objects_inner(document, request, None)
+}
+
+pub fn search_objects_with_cancel<D>(
+    document: &mut D,
+    request: &ObjectSearchRequest,
+    cancel: &CancelToken,
+) -> Result<ObjectSearchResult, ShimError>
+where
+    D: ShimDocument,
+{
+    search_objects_inner(document, request, Some(cancel))
+}
+
+fn search_objects_inner<D>(
+    document: &mut D,
+    request: &ObjectSearchRequest,
+    cancel: Option<&CancelToken>,
+) -> Result<ObjectSearchResult, ShimError>
+where
+    D: ShimDocument,
+{
     let query = Query::new(&request.query);
     if query.folded.is_empty() {
         return Ok(ObjectSearchResult {
@@ -243,6 +266,7 @@ where
             truncated: false,
         });
     }
+    check_search_cancelled(cancel)?;
 
     let root = match &request.root {
         Some(root) => root.clone(),
@@ -263,6 +287,7 @@ where
     let context = SearchContext {
         query: &query,
         request,
+        cancel,
         detail_range,
         max_nodes,
         max_results,
@@ -284,6 +309,7 @@ where
     let mut visited = HashSet::new();
 
     while let Some(pending) = state.queue.pop_front() {
+        check_search_cancelled(cancel)?;
         if !visited.insert(pending.node.clone()) {
             continue;
         }
@@ -298,6 +324,7 @@ where
                 state.truncated = true;
                 break;
             }
+            check_search_cancelled(cancel)?;
 
             let page = document.children(
                 &pending.node,
@@ -315,6 +342,7 @@ where
             }
 
             consume_child_page(document, &context, pending.depth + 1, page, &mut state)?;
+            check_search_cancelled(cancel)?;
 
             offset += page_len;
             if state.searched_nodes >= max_nodes || state.hits.len() >= max_results {
@@ -336,6 +364,16 @@ where
         searched_nodes: state.searched_nodes,
         truncated: state.truncated,
     })
+}
+
+fn check_search_cancelled(cancel: Option<&CancelToken>) -> Result<(), ShimError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(ShimError::new(
+            raw::pdbg_status::PDBG_ERROR_CANCELLED,
+            "cancelled",
+        ));
+    }
+    Ok(())
 }
 
 pub fn search_text<D>(
@@ -426,6 +464,7 @@ where
     D: ShimDocument,
 {
     for summary in page.items {
+        check_search_cancelled(context.cancel)?;
         if state.searched_nodes >= context.max_nodes || state.hits.len() >= context.max_results {
             state.truncated = true;
             break;
@@ -439,6 +478,7 @@ where
                 break;
             }
         } else if context.request.inspect_details {
+            check_search_cancelled(context.cancel)?;
             let detail = document.object_detail(&summary.id, context.detail_range)?;
             if let Some(hit) = match_detail(context.query, &summary, &detail, depth) {
                 state.hits.push(hit);
@@ -598,21 +638,23 @@ fn append_text_hits(
             return;
         }
 
-        let folded_text = span.text.to_lowercase();
+        let folded_text = FoldedText::from_original(&span.text);
         let mut offset = 0;
-        while offset < folded_text.len() {
-            let Some(relative_match) = folded_text[offset..].find(folded_query) else {
+        while offset < folded_text.text.len() {
+            let Some(relative_match) = folded_text.text[offset..].find(folded_query) else {
                 break;
             };
             let match_start = offset + relative_match;
             let match_end = match_start + folded_query.len();
+            let original_start = folded_text.original_start(match_start);
+            let original_end = folded_text.original_end(match_end);
             result.hits.push(TextSearchHit {
                 page_index: page.page_index,
                 span_index,
                 excerpt: bounded_text_excerpt(
                     &span.text,
-                    match_start,
-                    match_end,
+                    original_start,
+                    original_end,
                     request.max_excerpt_chars,
                 ),
                 bbox: Some(span.bbox.clone()),
@@ -622,8 +664,57 @@ fn append_text_hits(
                 result.truncated = true;
                 return;
             }
-            offset = match_end.max(match_start + 1);
+            offset = match_end;
         }
+    }
+}
+
+struct FoldedText {
+    text: String,
+    original_starts: Vec<usize>,
+    original_ends: Vec<usize>,
+}
+
+impl FoldedText {
+    fn from_original(original: &str) -> Self {
+        let mut text = String::new();
+        let mut original_starts = vec![0];
+        let mut original_ends = vec![0];
+
+        for (original_start, ch) in original.char_indices() {
+            let original_end = original_start + ch.len_utf8();
+            let folded_start = text.len();
+            for folded_ch in ch.to_lowercase() {
+                text.push(folded_ch);
+            }
+            let folded_end = text.len();
+            original_starts.resize(folded_end + 1, original_start);
+            original_ends.resize(folded_end + 1, original_end);
+            for index in folded_start..=folded_end {
+                original_starts[index] = original_start;
+                original_ends[index] = original_end;
+            }
+        }
+
+        Self {
+            text,
+            original_starts,
+            original_ends,
+        }
+    }
+
+    fn original_start(&self, folded_index: usize) -> usize {
+        self.original_starts
+            .get(folded_index)
+            .copied()
+            .unwrap_or_else(|| *self.original_starts.last().unwrap_or(&0))
+    }
+
+    fn original_end(&self, folded_index: usize) -> usize {
+        self.original_ends
+            .get(folded_index)
+            .copied()
+            .unwrap_or_else(|| *self.original_ends.last().unwrap_or(&0))
     }
 }
 
@@ -868,6 +959,24 @@ mod tests {
     }
 
     #[test]
+    fn object_search_observes_cancel_token_between_child_pages() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let request = ObjectSearchRequest {
+            child_page_size: 1,
+            max_child_pages_per_node: 3,
+            max_depth: 1,
+            ..ObjectSearchRequest::new("Key2")
+        };
+        let cancel = CancelToken::new().unwrap();
+        cancel.cancel();
+
+        let err = search_objects_with_cancel(&mut doc, &request, &cancel).unwrap_err();
+
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+    }
+
+    #[test]
     fn text_search_finds_untrusted_fake_text_and_caches_page() {
         let shim = FakeShim::new().unwrap();
         let mut doc = shim.open_document("fake.pdf").unwrap();
@@ -912,6 +1021,24 @@ mod tests {
         assert_eq!(result.searched_pages, 1);
         assert!(result.truncated);
         assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn text_search_maps_unicode_folded_offsets_back_to_original_text() {
+        let mut cache = TextPageCache::new(4, 64 * 1024);
+        let request = TextSearchRequest {
+            max_pages: 1,
+            max_excerpt_chars: 1,
+            ..TextSearchRequest::new("c")
+        };
+
+        let result = search_text_with_cache(1, &mut cache, &request, |text_request| {
+            Ok(text_page(text_request.page_index, "İBCDE"))
+        })
+        .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].excerpt, "...C...");
     }
 
     #[test]

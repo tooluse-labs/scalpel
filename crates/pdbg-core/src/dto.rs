@@ -1,5 +1,8 @@
+use crate::egress::{append_bounded_json_string, append_json_string};
+
 pub const PUBLIC_SCHEMA_VERSION: u32 = 1;
 pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+const DIAGNOSTIC_JSON_FIELD_LIMIT_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DocumentId(pub u64);
@@ -631,7 +634,12 @@ fn push_diagnostic_json(out: &mut String, diagnostic: &DiagnosticSummary) {
     out.push(',');
     push_json_field_str(out, "code", diagnostic.code.as_public_str());
     out.push(',');
-    push_json_field_str(out, "message", &diagnostic.message);
+    push_json_field_str_bounded(
+        out,
+        "message",
+        &diagnostic.message,
+        DIAGNOSTIC_JSON_FIELD_LIMIT_BYTES,
+    );
     out.push_str(",\"node\":");
     if let Some(node) = &diagnostic.node {
         out.push_str(&node.to_serialized().to_json_string());
@@ -671,6 +679,12 @@ fn push_json_field_str(out: &mut String, name: &str, value: &str) {
     push_json_string(out, value);
 }
 
+fn push_json_field_str_bounded(out: &mut String, name: &str, value: &str, max_bytes: usize) {
+    push_json_string(out, name);
+    out.push(':');
+    append_bounded_json_string(out, value, max_bytes);
+}
+
 fn push_object_id_json(out: &mut String, object: ObjectId) {
     out.push_str("{\"num\":");
     out.push_str(&object.num.to_string());
@@ -680,22 +694,7 @@ fn push_object_id_json(out: &mut String, object: ObjectId) {
 }
 
 fn push_json_string(out: &mut String, value: &str) {
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch < ' ' => {
-                out.push_str("\\u");
-                out.push_str(&format!("{:04x}", ch as u32));
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
+    append_json_string(out, value);
 }
 
 #[cfg(test)]
@@ -783,5 +782,23 @@ mod tests {
             diagnostics_payload_to_json_string(&diagnostics),
             "{\"diagnostic_schema_version\":1,\"diagnostics\":[{\"severity\":\"warning\",\"code\":\"repair_warning\",\"message\":\"xref repaired\\nwith fallback\",\"node\":{\"schema_version\":1,\"doc\":9,\"segments\":[{\"tag\":\"page\",\"index\":2}],\"object\":null},\"page_index\":2,\"object\":{\"num\":4,\"gen\":0}}]}"
         );
+    }
+
+    #[test]
+    fn diagnostics_json_bounds_and_escapes_control_message() {
+        let diagnostics = [DiagnosticSummary {
+            severity: DiagnosticSeverity::Warning,
+            code: DiagnosticCode::Unknown,
+            message: format!("A\u{202e}{}", "x".repeat(5000)),
+            node: None,
+            page_index: None,
+            object: None,
+        }];
+
+        let json = diagnostics_payload_to_json_string(&diagnostics);
+
+        assert!(json.contains("\"message\":\"A\\u202e"));
+        assert!(!json.contains('\u{202e}'));
+        assert!(!json.contains(&"x".repeat(4093)));
     }
 }

@@ -2,10 +2,11 @@ use crate::dto::*;
 use crate::session::FakeSharedStore;
 use crate::{wire, ChildContainer, NodeTokenRegistry, SafeModeConfig};
 use pdbg_shim::raw;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -16,7 +17,7 @@ pub struct ShimError {
 }
 
 impl ShimError {
-    fn new(status: raw::pdbg_status, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: raw::pdbg_status, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
@@ -318,6 +319,7 @@ impl OpenDocument {
 
 pub struct CancelToken {
     raw: NonNull<raw::pdbg_cancel_token>,
+    cancelled: AtomicBool,
 }
 
 impl CancelToken {
@@ -333,12 +335,20 @@ impl CancelToken {
                     "pdbg_cancel_token_new returned null",
                 )
             })?;
-            Ok(Self { raw })
+            Ok(Self {
+                raw,
+                cancelled: AtomicBool::new(false),
+            })
         }
     }
 
     pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
         unsafe { raw::pdbg_cancel_token_cancel(self.raw.as_ptr()) }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     fn as_mut_ptr(&self) -> *mut raw::pdbg_cancel_token {
@@ -908,9 +918,15 @@ fn check_open_status(status: raw::pdbg_status, err: &raw::pdbg_error) -> Result<
 }
 
 fn c_char_array_to_string(bytes: &[std::os::raw::c_char]) -> String {
-    unsafe { CStr::from_ptr(bytes.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let bounded = bytes[..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&bounded).into_owned()
 }
 
 unsafe fn convert_document_summary(
@@ -1143,6 +1159,13 @@ fn page_index_to_u32(page_index: usize) -> Result<u32, ShimError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c_char_array_to_string_handles_unterminated_fixed_buffer() {
+        let bytes = [b'A' as std::os::raw::c_char; 4];
+
+        assert_eq!(c_char_array_to_string(&bytes), "AAAA");
+    }
 
     #[cfg(feature = "fake")]
     #[test]
@@ -1620,6 +1643,57 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_cropped_text_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let content = "BT\n/F1 12 Tf\n25 135 Td\n(Crop M3) Tj\nET\n";
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /CropBox [20 50 120 150] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            &format!(
+                "5 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
+                content.len(),
+                content
+            ),
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     fn synthetic_stream_pdf() -> Vec<u8> {
         fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
             offsets.push(pdf.len());
@@ -1687,13 +1761,58 @@ mod tests {
         push_obj(
             &mut pdf,
             &mut offsets,
-            "4 0 obj\n<< /Length 11 /Filter /ASCIIHexDecode >>\nstream\n48656c6c6f>\nendstream\nendobj\n",
+            "4 0 obj\n<< /Length 11 /DL 5 /Filter /ASCIIHexDecode >>\nstream\n48656c6c6f>\nendstream\nendobj\n",
         );
 
         let xref_offset = pdf.len();
         pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
         for offset in offsets {
             pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_generation_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<(usize, u16)>, gen: u16, body: &str) {
+            offsets.push((pdf.len(), gen));
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            0,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            0,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            0,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            7,
+            "4 7 obj\n<< /GenerationMarker true >>\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for (offset, gen) in offsets {
+            pdf.push_str(&format!("{offset:010} {gen:05} n \n"));
         }
         pdf.push_str(&format!(
             "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
@@ -2032,6 +2151,35 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_mupdf_shim_preserves_xref_entry_generation() {
+        let path = write_temp_real_pdf("xref-generation", &synthetic_generation_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+        let xref = NodeId::XrefRoot {
+            doc: summary.doc.clone(),
+        };
+        let range = ChildRange {
+            offset: 3,
+            limit: 1,
+        };
+
+        let xref_entries = doc.children(&xref, range, ChildContainer::Array).unwrap();
+        assert_eq!(xref_entries.items.len(), 1);
+        let entry = &xref_entries.items[0];
+        assert_eq!(entry.object, Some(ObjectId { num: 4, gen: 7 }));
+        assert!(entry.label.contains("4 7 R"));
+        assert!(entry.preview.contains("4 7 R"));
+
+        let detail = doc.object_detail(&entry.id, range).unwrap();
+        assert_eq!(detail.object, Some(ObjectId { num: 4, gen: 7 }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_mupdf_shim_reports_stream_decode_failure_diagnostic() {
         let path = write_temp_real_pdf("stream-decode-failure", &synthetic_stream_pdf());
         let shim = RealMuPdfShim::new().unwrap();
@@ -2058,6 +2206,20 @@ mod tests {
         let path = write_temp_real_pdf("stream-load", &synthetic_ascii_hex_stream_pdf());
         let shim = RealMuPdfShim::new().unwrap();
         let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+        let summary = doc.summary().unwrap();
+        let detail = doc
+            .object_detail(
+                &NodeId::XrefObject {
+                    doc: summary.doc,
+                    object: ObjectId { num: 4, gen: 0 },
+                },
+                ChildRange {
+                    offset: 0,
+                    limit: 16,
+                },
+            )
+            .unwrap();
+        assert_eq!(detail.stream.as_ref().unwrap().decoded_size_hint, Some(5));
 
         let raw = doc
             .stream_load(ObjectId { num: 4, gen: 0 }, StreamMode::Raw, 0, 64)
@@ -2276,6 +2438,37 @@ mod tests {
         assert!(span.untrusted);
         assert!(span.bbox.x >= 0.0);
         assert!(span.bbox.y >= 0.0);
+        assert!(span.bbox.width > 0.0);
+        assert!(span.bbox.height > 0.0);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_normalizes_text_bbox_to_cropbox_top_left_space() {
+        let path = write_temp_real_pdf("text-cropbox", &synthetic_cropped_text_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let text = doc.extract_text(&TextRequest::page(0)).unwrap();
+        let span = text
+            .spans
+            .iter()
+            .find(|span| span.text.contains("Crop M3"))
+            .unwrap();
+
+        assert!(
+            (span.bbox.x - 5.0).abs() < 2.0,
+            "expected CropBox-relative x near 5, got {}",
+            span.bbox.x
+        );
+        assert!(
+            (0.0..30.0).contains(&span.bbox.y),
+            "expected top-left y near the page top, got {}",
+            span.bbox.y
+        );
         assert!(span.bbox.width > 0.0);
         assert!(span.bbox.height > 0.0);
 

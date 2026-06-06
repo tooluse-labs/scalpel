@@ -18,7 +18,7 @@ RAW = ROOT / "crates/pdbg-shim/src/raw.rs"
 
 HEADER_ENUM = re.compile(r"typedef\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}\s*\1\s*;", re.S)
 RUST_ENUM = re.compile(r"pub\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}", re.S)
-VARIANT = re.compile(r"\b([A-Z][A-Z0-9_]+)\s*=\s*([0-9]+)")
+VARIANT_ITEM = re.compile(r"^(?P<name>[A-Z][A-Z0-9_]+)(?:\s*=\s*(?P<value>[0-9]+))?$")
 HEADER_STRUCT = re.compile(r"typedef\s+struct\s+(\w+)\s*\{(?P<body>.*?)\}\s*\1\s*;", re.S)
 HEADER_OPAQUE_STRUCT = re.compile(r"typedef\s+struct\s+(\w+)\s+\1\s*;")
 RUST_STRUCT = re.compile(r"pub\s+struct\s+(\w+)\s*\{(?P<body>.*?)\n\}", re.S)
@@ -38,8 +38,31 @@ def enum_map(text: str, pattern: re.Pattern[str]) -> dict[str, dict[str, int]]:
     for match in pattern.finditer(text):
         name = match.group(1)
         body = match.group("body")
-        out[name] = {variant: int(value) for variant, value in VARIANT.findall(body)}
+        out[name] = enum_variants(name, body)
     return out
+
+
+def enum_variants(enum_name: str, body: str) -> dict[str, int]:
+    variants: dict[str, int] = {}
+    next_value = 0
+    for raw_item in body.split(","):
+        item = strip_enum_item_comments(raw_item).strip()
+        if not item:
+            continue
+        variant_match = VARIANT_ITEM.match(item)
+        if not variant_match:
+            raise ValueError(f"cannot parse enum variant in {enum_name}: {item}")
+        value = variant_match.group("value")
+        if value is not None:
+            next_value = int(value)
+        variants[variant_match.group("name")] = next_value
+        next_value += 1
+    return variants
+
+
+def strip_enum_item_comments(item: str) -> str:
+    item = re.sub(r"/\*.*?\*/", "", item, flags=re.S)
+    return re.sub(r"//.*", "", item)
 
 
 def c_structs(text: str) -> dict[str, list[tuple[str, str]]]:

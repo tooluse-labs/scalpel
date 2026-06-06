@@ -11,6 +11,11 @@ Mark these GitHub Actions jobs as required for M0 branches:
 - `tsan`
 - `fuzz-smoke`
 
+Mark these GitHub Actions jobs as required before merging real-MuPDF work:
+
+- `macos real-mupdf gate`
+- `linux real-mupdf tsan`
+
 The `contract` job runs the local M0 gate:
 
 - `cargo fmt --check`
@@ -24,6 +29,7 @@ The `contract` job runs the local M0 gate:
 
 The sanitizer jobs are checked in as CI definitions. Local M0 verification may
 run the stable local gate only; TSan requires nightly Rust and `rust-src`.
-Real-MuPDF TSan runs should include `scripts/tsan_mupdf.supp` so MuPDF's
-documented asynchronous `fz_cookie.abort` cancellation channel is kept separate
-from ordinary data-race findings.
+The real-MuPDF TSan smoke runs the cloned-context concurrency test against
+TSan-instrumented MuPDF static libraries. It includes `scripts/tsan_mupdf.supp`
+so MuPDF's documented asynchronous `fz_cookie.abort` cancellation channel is
+kept separate from ordinary data-race findings.

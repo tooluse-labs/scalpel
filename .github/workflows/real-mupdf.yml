@@ -1,6 +1,10 @@
 name: real-mupdf
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -31,3 +35,48 @@ jobs:
         env:
           PDBG_MUPDF_SOURCE_DIR: ${{ runner.temp }}/mupdf/mupdf-${{ env.MUPDF_VERSION }}-source
         run: sh scripts/run_real_gate.sh
+
+  linux-real-tsan:
+    name: linux real-mupdf tsan
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CFLAGS: -fsanitize=thread -fno-omit-frame-pointer
+      RUSTFLAGS: -Zsanitizer=thread
+      TSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/tsan_mupdf.supp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nightly Rust toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+      - name: Download pinned MuPDF source
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/mupdf"
+          curl -fsSL "https://casper.mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz" \
+            -o "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source.tar.gz" -C "$RUNNER_TEMP/mupdf"
+      - name: Build TSan-instrumented MuPDF static libraries
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/mupdf/mupdf-${MUPDF_VERSION}-source"
+          make build=release \
+            CC=clang \
+            CXX=clang++ \
+            XCFLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            XCXXFLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            build/release/libmupdf.a \
+            build/release/libmupdf-third.a
+      - name: Real MuPDF TSan smoke
+        env:
+          PDBG_MUPDF_SOURCE_DIR: ${{ runner.temp }}/mupdf/mupdf-${{ env.MUPDF_VERSION }}-source
+        run: >
+          cargo +nightly test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          -p pdbg-core
+          --no-default-features
+          --features real-mupdf
+          real_mupdf_shim_traverses_cloned_contexts_concurrently
