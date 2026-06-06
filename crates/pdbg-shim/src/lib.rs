@@ -303,17 +303,19 @@ mod tests {
     #[cfg(all(feature = "real-mupdf", unix))]
     #[test]
     fn real_mupdf_open_fd_owns_dup_and_preserves_caller_fd() {
+        use std::io::{Read, Seek, SeekFrom};
+
         unsafe {
             let mut ctx: *mut raw::pdbg_context = ptr::null_mut();
             let mut err = raw::pdbg_error::default();
             let status = raw::pdbg_context_new(&mut ctx, &mut err);
             assert_eq!(status, raw::pdbg_status::PDBG_OK);
 
-            let fixture = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/synthetic/minimal.pdf"
+            let temp_path = write_temp_pdf(
+                "open-fd",
+                include_bytes!("../../../fixtures/synthetic/minimal.pdf"),
             );
-            let file = std::fs::File::open(fixture).unwrap();
+            let mut file = std::fs::File::open(&temp_path).unwrap();
             let display_path = CString::new("minimal-fd.pdf").unwrap();
             let options = real_open_options();
 
@@ -333,6 +335,7 @@ mod tests {
             assert!(owned_fd >= 0);
             assert_ne!(owned_fd, file.as_fd().as_raw_fd());
             assert_eq!(raw::pdbg_test_fd_is_open(owned_fd), 1);
+            let owned_fd_identity = fd_file_identity(owned_fd).expect("owned fd identity");
 
             let mut summary = std::mem::zeroed::<raw::pdbg_document_summary_out>();
             let status = raw::pdbg_document_summary(doc, &mut summary, &mut err);
@@ -341,9 +344,27 @@ mod tests {
             raw::pdbg_document_summary_out_drop(&mut summary);
 
             raw::pdbg_document_drop(doc);
-            assert_eq!(raw::pdbg_test_fd_is_open(owned_fd), 0);
-            assert!(file.metadata().is_ok());
+            assert_ne!(fd_file_identity(owned_fd), Some(owned_fd_identity));
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.starts_with(b"%PDF"));
             raw::pdbg_context_drop(ctx);
+            let _ = std::fs::remove_file(temp_path);
         }
+    }
+
+    #[cfg(all(feature = "real-mupdf", unix))]
+    fn fd_file_identity(fd: i32) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+
+        let candidates = [
+            std::path::PathBuf::from(format!("/proc/self/fd/{fd}")),
+            std::path::PathBuf::from(format!("/dev/fd/{fd}")),
+        ];
+        candidates
+            .iter()
+            .find_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| (metadata.dev(), metadata.ino()))
     }
 }
