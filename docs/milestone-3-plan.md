@@ -54,6 +54,10 @@ content-stream operator visualization remain later milestones.
 - Initial slice: core object search walks lazy `ShimDocument` child pages with
   per-node page bounds, max-depth/max-node/max-result limits, and stable hits for
   object refs, dictionary keys, name previews, labels, and scalar previews.
+- GUI slice: the left document panel now runs bounded lazy object search from
+  the open session, displays hit counts/truncation, and routes hits through the
+  existing object navigation and Back/Forward history without materializing the
+  full tree.
 - Add a Rust search model for object number, dictionary key, name object, and
   scalar preview queries.
 - Search bounded lazy pages from the current root/trailer/xref/page tree without

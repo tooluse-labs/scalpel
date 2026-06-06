@@ -3,8 +3,9 @@ use eframe::egui::{
     self, Color32, FontDefinitions, FontFamily, FontId, RichText, ScrollArea, TextEdit, TextStyle,
 };
 use pdbg_core::{
-    escape_pdf_text, CancelToken, ChildContainer, ChildPage, ChildRange, DiagnosticSeverity,
-    EgressFormat, EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind,
+    escape_pdf_text, search_objects, CancelToken, ChildContainer, ChildPage, ChildRange,
+    DiagnosticSeverity, EgressFormat, EscapedText, NodeId, NodePathSegment, ObjectDetail, ObjectId,
+    ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest, ObjectSearchResult,
     ObjectSummary, ObjectValue, RenderRequest, RenderResult, ShimDocument, StreamChunk, StreamMode,
     StreamSummary, StreamViewMode,
 };
@@ -18,6 +19,11 @@ const STREAM_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const HEX_WINDOW_BYTES: usize = 512;
 const COPY_LIMIT_BYTES: usize = 4096;
 const DEFAULT_RENDER_ZOOM: f32 = 2.0;
+const OBJECT_SEARCH_CHILD_PAGE_SIZE: usize = 64;
+const OBJECT_SEARCH_MAX_CHILD_PAGES: usize = 2;
+const OBJECT_SEARCH_MAX_DEPTH: usize = 4;
+const OBJECT_SEARCH_MAX_NODES: usize = 768;
+const OBJECT_SEARCH_MAX_RESULTS: usize = 100;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -323,6 +329,9 @@ pub struct GuiShellApp {
     real_render: Option<RenderResult>,
     real_render_error: Option<String>,
     real_render_texture: Option<egui::TextureHandle>,
+    object_search_query: String,
+    object_search_result: Option<ObjectSearchResult>,
+    object_search_error: Option<String>,
     copied_excerpt: Option<EscapedText>,
     status_log: Vec<String>,
 }
@@ -386,6 +395,9 @@ impl GuiShellApp {
             real_render: None,
             real_render_error: None,
             real_render_texture: None,
+            object_search_query: String::new(),
+            object_search_result: None,
+            object_search_error: None,
             copied_excerpt: None,
             status_log,
         };
@@ -456,6 +468,87 @@ impl GuiShellApp {
             .tree
             .ensure_real_object_row(summary.doc.clone(), object);
         self.follow_reference(row);
+    }
+
+    fn follow_object_search_hit(&mut self, hit: &ObjectSearchHit) {
+        if self.tree.is_real() {
+            if let Some(doc) = self
+                .state
+                .as_ref()
+                .ok()
+                .and_then(|state| state.panels.summary.as_ref())
+                .map(|summary| summary.doc.clone())
+            {
+                if let Some(row) = self.tree.ensure_real_search_hit_row(doc, hit) {
+                    self.follow_reference(row);
+                    self.status_log.push(format!(
+                        "opened object search hit {}",
+                        object_search_hit_summary(hit)
+                    ));
+                    return;
+                }
+            }
+        } else if let Some(row) = virtual_search_hit_row(hit, self.tree.row_count()) {
+            self.follow_reference(row);
+            self.status_log.push(format!(
+                "opened object search hit {}",
+                object_search_hit_summary(hit)
+            ));
+            return;
+        }
+
+        self.status_log.push(format!(
+            "object search hit is not navigable: {}",
+            object_search_hit_summary(hit)
+        ));
+    }
+
+    fn run_object_search(&mut self) {
+        let query = self.object_search_query.trim().to_string();
+        if query.is_empty() {
+            self.object_search_result = None;
+            self.object_search_error = None;
+            return;
+        }
+
+        let request = ObjectSearchRequest {
+            query: query.clone(),
+            root: None,
+            child_page_size: OBJECT_SEARCH_CHILD_PAGE_SIZE,
+            max_child_pages_per_node: OBJECT_SEARCH_MAX_CHILD_PAGES,
+            max_depth: OBJECT_SEARCH_MAX_DEPTH,
+            max_nodes: OBJECT_SEARCH_MAX_NODES,
+            max_results: OBJECT_SEARCH_MAX_RESULTS,
+            inspect_details: false,
+        };
+        match self.state.as_ref() {
+            Ok(state) => match state
+                .session
+                .run_task(|document| search_objects(document, &request))
+            {
+                Ok(result) => {
+                    self.status_log.push(format!(
+                        "object search {:?}: {} hits across {} nodes{}",
+                        query,
+                        result.hits.len(),
+                        result.searched_nodes,
+                        if result.truncated { " (truncated)" } else { "" }
+                    ));
+                    self.object_search_result = Some(result);
+                    self.object_search_error = None;
+                }
+                Err(err) => {
+                    self.object_search_result = None;
+                    self.object_search_error = Some(err.message.clone());
+                    self.status_log
+                        .push(format!("object search {:?} failed: {}", query, err.message));
+                }
+            },
+            Err(err) => {
+                self.object_search_result = None;
+                self.object_search_error = Some(err.clone());
+            }
+        }
     }
 
     fn expand_selected_real_row(&mut self) -> usize {
@@ -1086,6 +1179,70 @@ fn detail_reference_targets(detail: &ObjectDetail) -> Vec<ObjectId> {
     out
 }
 
+fn object_search_status_label(
+    result: Option<&ObjectSearchResult>,
+    error: Option<&str>,
+) -> String {
+    if error.is_some() {
+        return "failed".to_string();
+    }
+    match result {
+        Some(result) => format!(
+            "{} hits / {} nodes{}",
+            result.hits.len(),
+            result.searched_nodes,
+            if result.truncated { " / truncated" } else { "" }
+        ),
+        None => "bounded lazy search".to_string(),
+    }
+}
+
+fn object_search_field_label(field: ObjectSearchField) -> &'static str {
+    match field {
+        ObjectSearchField::ObjectNumber => "object",
+        ObjectSearchField::DictionaryKey => "key",
+        ObjectSearchField::NameObject => "name",
+        ObjectSearchField::ScalarPreview => "scalar",
+        ObjectSearchField::Label => "label",
+    }
+}
+
+fn object_search_hit_summary(hit: &ObjectSearchHit) -> String {
+    let target = hit
+        .object
+        .map(object_ref_text)
+        .unwrap_or_else(|| hit.label.clone());
+    let excerpt = hit.excerpt.trim();
+    if excerpt.is_empty() {
+        format!(
+            "{target}  {}  {}",
+            object_search_field_label(hit.matched_field),
+            hit.label
+        )
+    } else {
+        format!(
+            "{target}  {}  {excerpt}",
+            object_search_field_label(hit.matched_field)
+        )
+    }
+}
+
+fn node_label_for_hit(hit: &ObjectSearchHit) -> String {
+    hit.node
+        .as_ref()
+        .map(node_breadcrumb)
+        .unwrap_or_else(|| hit.label.clone())
+}
+
+fn virtual_search_hit_row(hit: &ObjectSearchHit, row_count: usize) -> Option<usize> {
+    let row = usize::try_from(hit.object?.num).ok()?;
+    (row < row_count).then_some(row)
+}
+
+fn object_ref_text(object: ObjectId) -> String {
+    format!("{} {} R", object.num, object.gen)
+}
+
 fn push_value_reference(out: &mut Vec<ObjectId>, value: &ObjectValue) {
     if let ObjectValue::IndirectRef(object) = value {
         push_unique_object(out, *object);
@@ -1372,6 +1529,8 @@ impl GuiShellApp {
     }
 
     fn draw_tree(&mut self, ui: &mut egui::Ui) {
+        self.draw_object_search(ui);
+        ui.add_space(8.0);
         section_header(ui, "Document Tree", Some(&self.tree.row_count_label()));
 
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
@@ -1384,6 +1543,74 @@ impl GuiShellApp {
                 }
             }
         });
+    }
+
+    fn draw_object_search(&mut self, ui: &mut egui::Ui) {
+        let status = object_search_status_label(
+            self.object_search_result.as_ref(),
+            self.object_search_error.as_deref(),
+        );
+        section_header(ui, "Object Search", Some(&status));
+
+        let mut run_search = false;
+        let mut clear_search = false;
+        section_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    TextEdit::singleline(&mut self.object_search_query)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("object, key, name, scalar"),
+                );
+                run_search |= response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                run_search |= ui.button("Search").clicked();
+                clear_search |= ui.button("Clear").clicked();
+            });
+        });
+
+        if clear_search {
+            self.object_search_query.clear();
+            self.object_search_result = None;
+            self.object_search_error = None;
+        } else if run_search {
+            self.run_object_search();
+        }
+
+        if let Some(err) = &self.object_search_error {
+            ui.add_space(6.0);
+            ui.colored_label(PdbgTheme::ERROR_FG, err);
+        }
+
+        let mut clicked_hit = None;
+        if let Some(result) = &self.object_search_result {
+            if !result.hits.is_empty() {
+                ui.add_space(6.0);
+                ScrollArea::vertical()
+                    .id_salt("object_search_results")
+                    .max_height(170.0)
+                    .show(ui, |ui| {
+                        for hit in &result.hits {
+                            let label = object_search_hit_summary(hit);
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    RichText::new(label).monospace().size(11.0),
+                                )
+                                .on_hover_text(node_label_for_hit(hit))
+                                .clicked()
+                            {
+                                clicked_hit = Some(hit.clone());
+                            }
+                        }
+                    });
+            } else if self.object_search_error.is_none() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("No matches").small().color(PdbgTheme::MUTED));
+            }
+        }
+        if let Some(hit) = clicked_hit {
+            self.follow_object_search_hit(&hit);
+        }
     }
 
     fn draw_page_preview(&mut self, ui: &mut egui::Ui) {
@@ -2322,6 +2549,17 @@ impl TreeModel {
             Self::Virtual(_) => 0,
         }
     }
+
+    fn ensure_real_search_hit_row(
+        &mut self,
+        doc: pdbg_core::DocumentId,
+        hit: &ObjectSearchHit,
+    ) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.ensure_search_hit_row(doc, hit),
+            Self::Virtual(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2469,6 +2707,51 @@ impl RealObjectTree {
             expanded: false,
         });
         self.rows.len() - 1
+    }
+
+    fn row_for_node(&self, node: &NodeId) -> Option<usize> {
+        self.rows.iter().position(|row| row.summary.id == *node)
+    }
+
+    fn ensure_search_hit_row(
+        &mut self,
+        doc: pdbg_core::DocumentId,
+        hit: &ObjectSearchHit,
+    ) -> Option<usize> {
+        if let Some(node) = &hit.node {
+            if let Some(index) = self.row_for_node(node) {
+                return Some(index);
+            }
+            if let Some(object) = hit.object {
+                if let Some(index) = self
+                    .rows
+                    .iter()
+                    .position(|row| row.summary.object == Some(object))
+                {
+                    return Some(index);
+                }
+            }
+            self.rows.push(RealTreeRow {
+                summary: ObjectSummary {
+                    id: node.clone(),
+                    kind: ObjectKind::Unknown,
+                    label: hit.label.clone(),
+                    preview: hit.excerpt.clone(),
+                    object: hit.object,
+                    has_children: true,
+                    has_stream: false,
+                    child_count: None,
+                    byte_size_hint: None,
+                    diagnostics: Vec::new(),
+                },
+                depth: hit.depth.min(8),
+                expanded: false,
+            });
+            return Some(self.rows.len() - 1);
+        }
+
+        hit.object
+            .map(|object| self.ensure_object_row(doc, object))
     }
 
     fn update_row_from_detail(&mut self, row: usize, detail: &ObjectDetail) {
@@ -2740,6 +3023,65 @@ mod tests {
         assert_eq!(tree.row_count(), 1_000_001);
         assert_eq!(tree.row_label(0), "root / catalog");
         assert_eq!(tree.row_label(999_999), "obj 999999 0 R  /FakeNode248");
+    }
+
+    #[test]
+    fn gui_object_search_navigates_headless_fake_hit() {
+        let mut app = GuiShellApp::new();
+        app.object_search_query = "2 0 R".to_string();
+
+        app.run_object_search();
+
+        let result = app.object_search_result.as_ref().unwrap();
+        assert!(app.object_search_error.is_none());
+        assert!(result.searched_nodes > 0);
+        let hit = result
+            .hits
+            .iter()
+            .find(|hit| {
+                hit.matched_field == ObjectSearchField::ObjectNumber
+                    && hit.object == Some(ObjectId { num: 2, gen: 0 })
+            })
+            .cloned()
+            .unwrap();
+
+        app.follow_object_search_hit(&hit);
+
+        assert_eq!(app.selected_row, 2);
+        assert_eq!(app.back_stack, vec![0]);
+        assert!(app.forward_stack.is_empty());
+        assert!(app
+            .status_log
+            .iter()
+            .any(|line| line.starts_with("opened object search hit 2 0 R")));
+    }
+
+    #[test]
+    fn real_tree_search_hit_row_preserves_search_node() {
+        let doc = pdbg_core::DocumentId(7);
+        let node = NodeId::DictEntry {
+            doc: doc.clone(),
+            parent: Box::new(NodeId::DocumentRoot { doc: doc.clone() }),
+            key: "Needs".to_string(),
+        };
+        let hit = ObjectSearchHit {
+            label: "Needs".to_string(),
+            matched_field: ObjectSearchField::DictionaryKey,
+            excerpt: "Needs".to_string(),
+            object: None,
+            node: Some(node.clone()),
+            depth: 2,
+        };
+        let mut tree = RealObjectTree::from_child_page(&pdbg_core::ChildPage {
+            total: Some(0),
+            items: Vec::new(),
+        });
+
+        let row = tree.ensure_search_hit_row(doc, &hit).unwrap();
+
+        assert_eq!(tree.rows[row].summary.id, node);
+        assert_eq!(tree.rows[row].summary.preview, "Needs");
+        assert_eq!(tree.rows[row].depth, 2);
     }
 
     #[test]
