@@ -46,6 +46,21 @@ const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const APP_TITLE: &str = "pdbg Preview";
+const LEFT_PANEL_MIN_WIDTH: f32 = 220.0;
+const LEFT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
+const LEFT_PANEL_MAX_WIDTH: f32 = 520.0;
+const COMPACT_LEFT_PANEL_MIN_WIDTH: f32 = 200.0;
+const COMPACT_LEFT_PANEL_DEFAULT_WIDTH: f32 = 280.0;
+const RIGHT_PANEL_MIN_WIDTH: f32 = 280.0;
+const RIGHT_PANEL_DEFAULT_WIDTH: f32 = 440.0;
+const RIGHT_PANEL_MAX_WIDTH: f32 = 680.0;
+const COMPACT_RIGHT_PANEL_MIN_WIDTH: f32 = 260.0;
+const COMPACT_RIGHT_PANEL_DEFAULT_WIDTH: f32 = 340.0;
+const COMPACT_LAYOUT_WIDTH: f32 = 1180.0;
+const PAGE_PREVIEW_MIN_WIDTH: f32 = 360.0;
+const PAGE_PREVIEW_MIN_HEIGHT: f32 = 320.0;
+const WORKSPACE_SPLITTER_WIDTH: f32 = 6.0;
+const WORKSPACE_MIN_CENTER_WIDTH: f32 = 360.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -348,12 +363,298 @@ fn section_header(ui: &mut egui::Ui, title: &str, detail: Option<&str>) {
                 .color(PdbgTheme::TEXT),
         );
         if let Some(detail) = detail {
+            let detail_width = ui.available_width().max(0.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(detail).small().color(PdbgTheme::MUTED));
+                truncated_label(
+                    ui,
+                    RichText::new(detail).small().color(PdbgTheme::MUTED),
+                    detail_width,
+                    Some(detail),
+                );
             });
         }
     });
     ui.add_space(4.0);
+}
+
+fn truncated_label(
+    ui: &mut egui::Ui,
+    text: RichText,
+    max_width: f32,
+    hover_text: Option<&str>,
+) -> egui::Response {
+    let width = max_width.max(24.0);
+    let response = ui.add_sized(
+        egui::vec2(width, ui.text_style_height(&TextStyle::Body)),
+        egui::Label::new(text).truncate(),
+    );
+    if let Some(hover_text) = hover_text.filter(|text| !text.is_empty()) {
+        response.on_hover_text(hover_text)
+    } else {
+        response
+    }
+}
+
+fn truncated_monospace(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    let text = text.into();
+    let width = ui.available_width().max(24.0);
+    let response = ui.add_sized(
+        egui::vec2(width, ui.text_style_height(&TextStyle::Monospace)),
+        egui::Label::new(RichText::new(text.as_str()).monospace()).truncate(),
+    );
+    response.on_hover_text(text)
+}
+
+#[derive(Default)]
+struct SearchControlsOutput {
+    submit: bool,
+    cancel: bool,
+    clear: bool,
+}
+
+fn draw_search_controls(
+    ui: &mut egui::Ui,
+    query: &mut String,
+    hint: &str,
+    busy: bool,
+) -> SearchControlsOutput {
+    let mut output = SearchControlsOutput::default();
+    let height = ui.spacing().interact_size.y;
+    let spacing = ui.spacing().item_spacing.x;
+    let action_label = if busy { "Cancel" } else { "Search" };
+    let action_width = if busy { 70.0 } else { 66.0 };
+    let clear_width = 56.0;
+    let min_edit_width = 96.0;
+    let available_width = ui.available_width();
+    let inline_min_width = min_edit_width + action_width + clear_width + spacing * 2.0;
+
+    if available_width >= inline_min_width {
+        ui.horizontal(|ui| {
+            let edit_width =
+                (ui.available_width() - action_width - clear_width - spacing * 2.0).max(24.0);
+            let response = ui
+                .add_enabled_ui(!busy, |ui| {
+                    ui.add_sized(
+                        egui::vec2(edit_width, height),
+                        TextEdit::singleline(query).hint_text(hint),
+                    )
+                })
+                .inner;
+            output.submit |=
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if busy {
+                output.cancel |= ui
+                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .clicked();
+            } else {
+                output.submit |= ui
+                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .clicked();
+            }
+            output.clear |= ui
+                .add_sized(egui::vec2(clear_width, height), egui::Button::new("Clear"))
+                .clicked();
+        });
+    } else {
+        let edit_width = ui.available_width().max(24.0);
+        let response = ui
+            .add_enabled_ui(!busy, |ui| {
+                ui.add_sized(
+                    egui::vec2(edit_width, height),
+                    TextEdit::singleline(query).hint_text(hint),
+                )
+            })
+            .inner;
+        output.submit |=
+            response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        ui.horizontal_wrapped(|ui| {
+            if busy {
+                output.cancel |= ui
+                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .clicked();
+            } else {
+                output.submit |= ui
+                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .clicked();
+            }
+            output.clear |= ui
+                .add_sized(egui::vec2(clear_width, height), egui::Button::new("Clear"))
+                .clicked();
+        });
+    }
+
+    output
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelWidthSpec {
+    min: f32,
+    default: f32,
+    max: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspacePanelLayout {
+    left: PanelWidthSpec,
+    right: PanelWidthSpec,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceRects {
+    left: egui::Rect,
+    left_splitter: egui::Rect,
+    center: egui::Rect,
+    right_splitter: egui::Rect,
+    right: egui::Rect,
+}
+
+fn workspace_panel_layout(available_width: f32) -> WorkspacePanelLayout {
+    let compact = available_width < COMPACT_LAYOUT_WIDTH;
+    let left = if compact {
+        PanelWidthSpec {
+            min: COMPACT_LEFT_PANEL_MIN_WIDTH,
+            default: COMPACT_LEFT_PANEL_DEFAULT_WIDTH,
+            max: LEFT_PANEL_MAX_WIDTH,
+        }
+    } else {
+        PanelWidthSpec {
+            min: LEFT_PANEL_MIN_WIDTH,
+            default: LEFT_PANEL_DEFAULT_WIDTH,
+            max: LEFT_PANEL_MAX_WIDTH,
+        }
+    };
+    let right = if compact {
+        PanelWidthSpec {
+            min: COMPACT_RIGHT_PANEL_MIN_WIDTH,
+            default: COMPACT_RIGHT_PANEL_DEFAULT_WIDTH,
+            max: RIGHT_PANEL_MAX_WIDTH,
+        }
+    } else {
+        PanelWidthSpec {
+            min: RIGHT_PANEL_MIN_WIDTH,
+            default: RIGHT_PANEL_DEFAULT_WIDTH,
+            max: RIGHT_PANEL_MAX_WIDTH,
+        }
+    };
+
+    WorkspacePanelLayout { left, right }
+}
+
+fn workspace_min_center_width(total_width: f32) -> f32 {
+    WORKSPACE_MIN_CENTER_WIDTH.min((total_width * 0.35).max(220.0))
+}
+
+fn clamp_workspace_widths(
+    left_width: &mut f32,
+    right_width: &mut f32,
+    layout: WorkspacePanelLayout,
+    total_width: f32,
+) {
+    *left_width = left_width.clamp(layout.left.min, layout.left.max);
+    *right_width = right_width.clamp(layout.right.min, layout.right.max);
+
+    let splitters = WORKSPACE_SPLITTER_WIDTH * 2.0;
+    let side_budget = (total_width - workspace_min_center_width(total_width) - splitters).max(0.0);
+    let side_width = *left_width + *right_width;
+    if side_width <= side_budget || side_width <= f32::EPSILON {
+        return;
+    }
+
+    let overflow = side_width - side_budget;
+    let left_shrink_room = (*left_width - layout.left.min).max(0.0);
+    let right_shrink_room = (*right_width - layout.right.min).max(0.0);
+    let shrink_room = left_shrink_room + right_shrink_room;
+    if shrink_room <= f32::EPSILON {
+        return;
+    }
+
+    *left_width -= overflow * (left_shrink_room / shrink_room);
+    *right_width -= overflow * (right_shrink_room / shrink_room);
+}
+
+fn workspace_rects(
+    available_rect: egui::Rect,
+    left_width: f32,
+    right_width: f32,
+) -> WorkspaceRects {
+    let left = egui::Rect::from_min_max(
+        available_rect.min,
+        egui::pos2(
+            (available_rect.left() + left_width).min(available_rect.right()),
+            available_rect.bottom(),
+        ),
+    );
+    let left_splitter = egui::Rect::from_min_max(
+        egui::pos2(left.right(), available_rect.top()),
+        egui::pos2(
+            (left.right() + WORKSPACE_SPLITTER_WIDTH).min(available_rect.right()),
+            available_rect.bottom(),
+        ),
+    );
+    let right = egui::Rect::from_min_max(
+        egui::pos2(
+            (available_rect.right() - right_width).max(available_rect.left()),
+            available_rect.top(),
+        ),
+        available_rect.max,
+    );
+    let right_splitter = egui::Rect::from_min_max(
+        egui::pos2(
+            (right.left() - WORKSPACE_SPLITTER_WIDTH).max(available_rect.left()),
+            available_rect.top(),
+        ),
+        egui::pos2(right.left(), available_rect.bottom()),
+    );
+    let center = egui::Rect::from_min_max(
+        egui::pos2(left_splitter.right(), available_rect.top()),
+        egui::pos2(
+            right_splitter.left().max(left_splitter.right()),
+            available_rect.bottom(),
+        ),
+    );
+
+    WorkspaceRects {
+        left,
+        left_splitter,
+        center,
+        right_splitter,
+        right,
+    }
+}
+
+fn show_framed_child<R>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    frame: egui::Frame,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.set_clip_rect(rect);
+    child.expand_to_include_rect(rect);
+    frame
+        .show(&mut child, |ui| {
+            ui.set_min_size(ui.available_size());
+            add_contents(ui)
+        })
+        .inner
+}
+
+fn draw_workspace_splitter(ui: &mut egui::Ui, rect: egui::Rect, response: &egui::Response) {
+    let fill = if response.dragged() {
+        PdbgTheme::ACCENT
+    } else if response.hovered() {
+        PdbgTheme::STRONG_BORDER
+    } else {
+        PdbgTheme::BORDER
+    };
+    ui.painter().rect_filled(rect, 0.0, fill);
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
 }
 
 fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
@@ -394,6 +695,8 @@ pub struct GuiShellApp {
     open_pdf_password_input: String,
     open_pdf_error: Option<String>,
     open_pdf_job: Option<OpenPdfJob>,
+    left_panel_width: Option<f32>,
+    right_panel_width: Option<f32>,
     tree: TreeModel,
     stream: LargeStreamModel,
     real_stream_mode: StreamMode,
@@ -492,6 +795,7 @@ impl GuiShellApp {
             }
         }
         let smoke_exit_after = options.smoke_exit_after;
+        let selected_row = tree.initial_selected_row();
         let mut app = Self {
             state,
             empty_workspace: start_empty,
@@ -504,6 +808,8 @@ impl GuiShellApp {
             open_pdf_password_input: String::new(),
             open_pdf_error: None,
             open_pdf_job: None,
+            left_panel_width: None,
+            right_panel_width: None,
             tree,
             stream: LargeStreamModel::default(),
             real_stream_mode: StreamMode::Raw,
@@ -518,7 +824,7 @@ impl GuiShellApp {
                 DECODED_STREAM_CACHE_MAX_ITEMS,
                 DECODED_STREAM_CACHE_MAX_BYTES,
             ),
-            selected_row: 0,
+            selected_row,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             selected_tab: InspectorTab::Object,
@@ -563,11 +869,13 @@ impl GuiShellApp {
 
     fn select_row_from_tree(&mut self, row: usize) {
         if self.selected_row == row {
+            self.sync_render_page_for_tree_row(row);
             return;
         }
         self.selected_row = row;
         self.forward_stack.clear();
         self.refresh_real_detail_for_selection();
+        self.sync_render_page_for_tree_row(row);
         self.status_log
             .push(format!("selected {}", self.tree.row_label(row)));
     }
@@ -581,6 +889,7 @@ impl GuiShellApp {
         self.selected_row = row;
         self.selected_tab = InspectorTab::Object;
         self.refresh_real_detail_for_selection();
+        self.sync_render_page_for_tree_row(row);
         self.status_log.push(format!(
             "resolved reference to {}",
             self.tree.row_label(row)
@@ -592,6 +901,7 @@ impl GuiShellApp {
             self.forward_stack.push(self.selected_row);
             self.selected_row = row;
             self.refresh_real_detail_for_selection();
+            self.sync_render_page_for_tree_row(row);
             self.status_log
                 .push(format!("back to {}", self.tree.row_label(row)));
         }
@@ -602,6 +912,7 @@ impl GuiShellApp {
             self.back_stack.push(self.selected_row);
             self.selected_row = row;
             self.refresh_real_detail_for_selection();
+            self.sync_render_page_for_tree_row(row);
             self.status_log
                 .push(format!("forward to {}", self.tree.row_label(row)));
         }
@@ -907,19 +1218,93 @@ impl GuiShellApp {
     }
 
     fn expand_selected_real_row(&mut self) -> usize {
-        let Some(detail) = self.real_detail.clone() else {
-            return 0;
-        };
-        let inserted = match &mut self.tree {
-            TreeModel::Real(tree) => tree.expand_row_from_detail(self.selected_row, &detail),
-            TreeModel::Virtual(_) => 0,
-        };
+        let inserted = self.expand_real_tree_row(self.selected_row);
         if inserted > 0 {
             self.status_log.push(format!(
                 "expanded {} bounded children under {}",
                 inserted,
                 self.tree.row_label(self.selected_row)
             ));
+        }
+        inserted
+    }
+
+    fn toggle_real_tree_row(&mut self, row: usize) {
+        let expanded = match &self.tree {
+            TreeModel::Real(tree) => tree.row_is_expanded(row),
+            TreeModel::Virtual(_) => false,
+        };
+        if expanded {
+            self.collapse_real_tree_row(row);
+        } else {
+            self.expand_real_tree_row(row);
+        }
+    }
+
+    fn collapse_real_tree_row(&mut self, row: usize) -> usize {
+        let removed = match &mut self.tree {
+            TreeModel::Real(tree) => tree.collapse_row(row),
+            TreeModel::Virtual(_) => 0,
+        };
+        if removed == 0 {
+            return 0;
+        }
+
+        let old_selected = self.selected_row;
+        if old_selected > row && old_selected <= row + removed {
+            self.selected_row = row;
+            self.refresh_real_detail_for_selection();
+        } else if old_selected > row + removed {
+            self.selected_row = old_selected - removed;
+        }
+        self.status_log.push(format!(
+            "collapsed {} visible children under {}",
+            removed,
+            self.tree.row_label(row)
+        ));
+        removed
+    }
+
+    fn expand_real_tree_row(&mut self, row: usize) -> usize {
+        let root_inserted = match &mut self.tree {
+            TreeModel::Real(tree) => tree.expand_cached_document_root(row),
+            TreeModel::Virtual(_) => 0,
+        };
+        if root_inserted > 0 {
+            return root_inserted;
+        }
+
+        let Some(id) = (match &self.tree {
+            TreeModel::Real(tree) => tree.summary(row).map(|summary| summary.id.clone()),
+            TreeModel::Virtual(_) => None,
+        }) else {
+            return 0;
+        };
+        let Ok(state) = &self.state else {
+            return 0;
+        };
+        let detail = match load_object_detail(state, &id) {
+            Ok(detail) => detail,
+            Err(err) => {
+                if self.selected_row == row {
+                    self.real_detail = None;
+                    self.real_detail_error = Some(err.clone());
+                }
+                self.status_log
+                    .push(format!("expand {} failed: {err}", self.tree.row_label(row)));
+                return 0;
+            }
+        };
+        let inserted = match &mut self.tree {
+            TreeModel::Real(tree) => {
+                tree.update_row_from_detail(row, &detail);
+                tree.expand_row_from_detail(row, &detail)
+            }
+            TreeModel::Virtual(_) => 0,
+        };
+        if self.selected_row == row {
+            self.real_detail = Some(detail);
+            self.real_detail_error = None;
         }
         inserted
     }
@@ -1122,6 +1507,13 @@ impl GuiShellApp {
             .and_then(|state| state.panels.summary.as_ref())
             .map(|summary| summary.page_count)
             .unwrap_or(0)
+    }
+
+    fn sync_render_page_for_tree_row(&mut self, row: usize) {
+        let Some(page_index) = self.tree.real_row_page_index(row) else {
+            return;
+        };
+        self.set_render_page(page_index);
     }
 
     fn current_render_key(&self) -> Option<RealRenderKey> {
@@ -2190,6 +2582,23 @@ fn node_breadcrumb(id: &NodeId) -> String {
         .join("/")
 }
 
+fn page_index_for_node(id: &NodeId) -> Option<usize> {
+    match id {
+        NodeId::Page { index, .. } => Some(*index),
+        NodeId::ResourceGroup { page_index, .. } => Some(*page_index),
+        NodeId::ArrayEntry { parent, index, .. } if is_page_root_node(parent) => Some(*index),
+        NodeId::DictEntry { parent, .. } | NodeId::ArrayEntry { parent, .. } => {
+            page_index_for_node(parent)
+        }
+        _ => None,
+    }
+}
+
+fn is_page_root_node(id: &NodeId) -> bool {
+    matches!(id, NodeId::PageRoot { .. })
+        || matches!(id, NodeId::DictEntry { key, .. } if key == "Pages")
+}
+
 fn segment_label(segment: &NodePathSegment) -> String {
     match segment {
         NodePathSegment::DocumentRoot => "Root".to_string(),
@@ -2249,27 +2658,7 @@ impl eframe::App for GuiShellApp {
             )
             .show_inside(ui, |ui| self.draw_log(ui));
 
-        egui::Panel::left("document_tree")
-            .resizable(true)
-            .default_size(320.0)
-            .size_range(220.0..=520.0)
-            .frame(panel_frame())
-            .show_inside(ui, |ui| self.draw_tree(ui));
-
-        egui::Panel::right("inspector")
-            .resizable(true)
-            .default_size(440.0)
-            .size_range(320.0..=680.0)
-            .frame(panel_frame())
-            .show_inside(ui, |ui| self.draw_inspector(ui, &ctx));
-
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(PdbgTheme::CANVAS)
-                    .inner_margin(egui::Margin::symmetric(10, 10)),
-            )
-            .show_inside(ui, |ui| self.draw_page_preview(ui));
+        self.draw_workspace(ui, &ctx);
 
         self.draw_open_pdf_dialog(&ctx);
 
@@ -2283,6 +2672,67 @@ impl eframe::App for GuiShellApp {
 }
 
 impl GuiShellApp {
+    fn draw_workspace(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let available_rect = ui.available_rect_before_wrap();
+        if available_rect.width() <= 0.0 || available_rect.height() <= 0.0 {
+            return;
+        }
+
+        let layout = workspace_panel_layout(available_rect.width());
+        let mut left_width = self.left_panel_width.unwrap_or(layout.left.default);
+        let mut right_width = self.right_panel_width.unwrap_or(layout.right.default);
+        clamp_workspace_widths(
+            &mut left_width,
+            &mut right_width,
+            layout,
+            available_rect.width(),
+        );
+
+        let rects = workspace_rects(available_rect, left_width, right_width);
+        let left_splitter_response = ui.interact(
+            rects.left_splitter,
+            egui::Id::new("workspace_left_splitter"),
+            egui::Sense::drag(),
+        );
+        let right_splitter_response = ui.interact(
+            rects.right_splitter,
+            egui::Id::new("workspace_right_splitter"),
+            egui::Sense::drag(),
+        );
+        let pointer_delta_x = ui.input(|input| input.pointer.delta().x);
+        if left_splitter_response.dragged() {
+            left_width += pointer_delta_x;
+        }
+        if right_splitter_response.dragged() {
+            right_width -= pointer_delta_x;
+        }
+        clamp_workspace_widths(
+            &mut left_width,
+            &mut right_width,
+            layout,
+            available_rect.width(),
+        );
+        self.left_panel_width = Some(left_width);
+        self.right_panel_width = Some(right_width);
+
+        let rects = workspace_rects(available_rect, left_width, right_width);
+        show_framed_child(ui, rects.left, panel_frame(), |ui| self.draw_tree(ui));
+        show_framed_child(
+            ui,
+            rects.center,
+            egui::Frame::new()
+                .fill(PdbgTheme::CANVAS)
+                .inner_margin(egui::Margin::symmetric(10, 10)),
+            |ui| self.draw_page_preview(ui),
+        );
+        show_framed_child(ui, rects.right, panel_frame(), |ui| {
+            self.draw_inspector(ui, ctx)
+        });
+        draw_workspace_splitter(ui, rects.left_splitter, &left_splitter_response);
+        draw_workspace_splitter(ui, rects.right_splitter, &right_splitter_response);
+        ui.advance_cursor_after_rect(available_rect);
+    }
+
     fn draw_recent_file_list(
         &self,
         ui: &mut egui::Ui,
@@ -2541,7 +2991,7 @@ impl GuiShellApp {
             DECODED_STREAM_CACHE_MAX_ITEMS,
             DECODED_STREAM_CACHE_MAX_BYTES,
         );
-        self.selected_row = 0;
+        self.selected_row = self.tree.initial_selected_row();
         self.back_stack.clear();
         self.forward_stack.clear();
         self.selected_tab = InspectorTab::Object;
@@ -2675,6 +3125,11 @@ impl GuiShellApp {
         ui.add_space(8.0);
         section_header(ui, "Document Tree", Some(&self.tree.row_count_label()));
 
+        if self.tree.is_real() {
+            self.draw_real_tree_rows(ui);
+            return;
+        }
+
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
         ScrollArea::vertical().show_rows(ui, row_height, self.tree.row_count(), |ui, range| {
             for row in range {
@@ -2685,6 +3140,66 @@ impl GuiShellApp {
                 }
             }
         });
+    }
+
+    fn draw_real_tree_rows(&mut self, ui: &mut egui::Ui) {
+        let mut clicked_row = None;
+        let mut toggled_row = None;
+        ScrollArea::vertical()
+            .id_salt("real_document_tree_rows")
+            .show(ui, |ui| {
+                for row in 0..self.tree.row_count() {
+                    let selected = row == self.selected_row;
+                    let depth = self.tree.real_row_depth(row).unwrap_or(0);
+                    let marker = self.tree.real_row_tree_marker(row).unwrap_or(" ");
+                    let job = self.tree.row_layout_job(row, selected);
+                    let row_label = self.tree.row_label(row);
+
+                    ui.horizontal(|ui| {
+                        ui.add_space((depth as f32) * 18.0);
+                        let marker_response = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(marker).monospace().size(11.0).color(
+                                        if selected {
+                                            PdbgTheme::ACCENT
+                                        } else {
+                                            PdbgTheme::MUTED
+                                        },
+                                    ),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Expand or collapse");
+                        if marker_response.clicked() && marker != " " {
+                            toggled_row = Some(row);
+                        }
+
+                        let row_width = ui.available_width().max(24.0);
+                        let row_response = ui
+                            .add_sized(
+                                egui::vec2(row_width, ui.text_style_height(&TextStyle::Body) + 4.0),
+                                egui::Button::selectable(selected, ())
+                                    .left_text(job)
+                                    .truncate(),
+                            )
+                            .on_hover_text(row_label);
+                        if row_response.double_clicked() {
+                            toggled_row = Some(row);
+                        } else if row_response.clicked() {
+                            clicked_row = Some(row);
+                        }
+                    });
+                }
+            });
+        if let Some(row) = toggled_row {
+            if self.selected_row != row {
+                self.select_row_from_tree(row);
+            }
+            self.toggle_real_tree_row(row);
+        } else if let Some(row) = clicked_row {
+            self.select_row_from_tree(row);
+        }
     }
 
     fn draw_empty_tree_panel(&mut self, ui: &mut egui::Ui) {
@@ -2714,22 +3229,15 @@ impl GuiShellApp {
         let mut cancel_search = false;
         let mut clear_search = false;
         section_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let response = ui.add_enabled(
-                    self.object_search_job.is_none(),
-                    TextEdit::singleline(&mut self.object_search_query)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("object, key, name, scalar"),
-                );
-                run_search |=
-                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if self.object_search_job.is_some() {
-                    cancel_search |= ui.button("Cancel").clicked();
-                } else {
-                    run_search |= ui.button("Search").clicked();
-                }
-                clear_search |= ui.button("Clear").clicked();
-            });
+            let controls = draw_search_controls(
+                ui,
+                &mut self.object_search_query,
+                "object, key, name, scalar",
+                self.object_search_job.is_some(),
+            );
+            run_search |= controls.submit;
+            cancel_search |= controls.cancel;
+            clear_search |= controls.clear;
         });
 
         if clear_search {
@@ -2794,22 +3302,15 @@ impl GuiShellApp {
         let mut cancel_search = false;
         let mut clear_search = false;
         section_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let response = ui.add_enabled(
-                    self.text_search_job.is_none(),
-                    TextEdit::singleline(&mut self.text_search_query)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("page text"),
-                );
-                run_search |=
-                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if self.text_search_job.is_some() {
-                    cancel_search |= ui.button("Cancel").clicked();
-                } else {
-                    run_search |= ui.button("Search").clicked();
-                }
-                clear_search |= ui.button("Clear").clicked();
-            });
+            let controls = draw_search_controls(
+                ui,
+                &mut self.text_search_query,
+                "page text",
+                self.text_search_job.is_some(),
+            );
+            run_search |= controls.submit;
+            cancel_search |= controls.cancel;
+            clear_search |= controls.clear;
         });
 
         if clear_search {
@@ -2993,7 +3494,10 @@ impl GuiShellApp {
         self.draw_real_page_list(ui);
         if self.real_render_job.is_some() {
             let available = ui.available_size();
-            let desired = egui::vec2(available.x.max(320.0), available.y.max(320.0));
+            let desired = egui::vec2(
+                available.x.max(PAGE_PREVIEW_MIN_WIDTH),
+                available.y.max(PAGE_PREVIEW_MIN_HEIGHT),
+            );
             let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 0.0, PdbgTheme::CANVAS);
@@ -3029,14 +3533,25 @@ impl GuiShellApp {
         };
 
         let available = ui.available_size();
+        let texture_id = texture.id();
         let texture_size = texture.size_vec2();
+        let render_page_index = render.page_index;
+        let render_width = render.width;
+        let render_height = render.height;
+        let render_stride = render.stride;
+        let selected_hit = self
+            .selected_text_hit
+            .as_ref()
+            .filter(|hit| hit.page_index == render_page_index)
+            .cloned();
+
         let scale = (available.x / texture_size.x)
             .min(available.y / texture_size.y)
             .max(0.1);
         let display_size = texture_size * scale;
         ui.vertical_centered(|ui| {
             ui.add(
-                egui::Image::new((texture.id(), display_size))
+                egui::Image::new((texture_id, display_size))
                     .bg_fill(PdbgTheme::PAGE)
                     .corner_radius(3),
             );
@@ -3044,19 +3559,15 @@ impl GuiShellApp {
             ui.label(
                 RichText::new(format!(
                     "page {} / {}x{} / stride {}",
-                    render.page_index + 1,
-                    render.width,
-                    render.height,
-                    render.stride
+                    render_page_index + 1,
+                    render_width,
+                    render_height,
+                    render_stride
                 ))
                 .monospace()
                 .color(PdbgTheme::MUTED),
             );
-            if let Some(hit) = self
-                .selected_text_hit
-                .as_ref()
-                .filter(|hit| hit.page_index == render.page_index)
-            {
+            if let Some(hit) = &selected_hit {
                 ui.label(
                     RichText::new(text_search_hit_summary(hit))
                         .monospace()
@@ -3328,7 +3839,7 @@ impl GuiShellApp {
                 section_frame().show(ui, |ui| {
                     ui.label(RichText::new("Preview").small().color(PdbgTheme::MUTED));
                     ui.add_space(3.0);
-                    ui.monospace(preview);
+                    truncated_monospace(ui, preview);
                 });
             }
             if let Some(summary) = &state.panels.summary {
@@ -3346,13 +3857,13 @@ impl GuiShellApp {
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("hash");
-                            ui.monospace(option_text(summary.file_hash.as_deref()));
+                            truncated_monospace(ui, option_text(summary.file_hash.as_deref()));
                             ui.end_row();
                             ui.label("version");
-                            ui.monospace(option_text(summary.pdf_version.as_deref()));
+                            truncated_monospace(ui, option_text(summary.pdf_version.as_deref()));
                             ui.end_row();
                             ui.label("permissions");
-                            ui.monospace(format!(
+                            truncated_monospace(ui, format!(
                                 "print={} copy={} modify={}",
                                 summary.permissions.print,
                                 summary.permissions.copy,
@@ -3381,11 +3892,19 @@ impl GuiShellApp {
         section_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 type_badge(ui, &detail.kind);
-                ui.label(
+                let label_width = if detail.object.is_some() {
+                    (ui.available_width() - 88.0).max(24.0)
+                } else {
+                    ui.available_width().max(24.0)
+                };
+                truncated_label(
+                    ui,
                     RichText::new(&detail.label)
                         .monospace()
                         .strong()
                         .color(PdbgTheme::TEXT),
+                    label_width,
+                    Some(&detail.label),
                 );
                 if let Some(object) = detail.object {
                     ui.label(
@@ -3402,13 +3921,13 @@ impl GuiShellApp {
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("kind");
-                    ui.monospace(object_kind_label(&detail.kind));
+                    truncated_monospace(ui, object_kind_label(&detail.kind));
                     ui.end_row();
                     ui.label("value");
-                    ui.monospace(object_value_preview(&detail.value, &detail.preview));
+                    truncated_monospace(ui, object_value_preview(&detail.value, &detail.preview));
                     ui.end_row();
                     ui.label("path");
-                    ui.monospace(node_breadcrumb(&detail.id));
+                    truncated_monospace(ui, node_breadcrumb(&detail.id));
                     ui.end_row();
                 });
         });
@@ -3467,7 +3986,7 @@ impl GuiShellApp {
                         for entry in &entries.items {
                             ui.monospace(format!("/{}", entry.key));
                             type_badge(ui, &entry.value.kind);
-                            ui.monospace(summary_inline_text(&entry.value));
+                            truncated_monospace(ui, summary_inline_text(&entry.value));
                             ui.end_row();
                         }
                     });
@@ -3490,7 +4009,7 @@ impl GuiShellApp {
                         for (index, entry) in entries.items.iter().enumerate() {
                             ui.monospace(format!("[{index}]"));
                             type_badge(ui, &entry.kind);
-                            ui.monospace(summary_inline_text(entry));
+                            truncated_monospace(ui, summary_inline_text(entry));
                             ui.end_row();
                         }
                     });
@@ -3888,6 +4407,13 @@ impl TreeModel {
         }
     }
 
+    fn initial_selected_row(&self) -> usize {
+        match self {
+            Self::Virtual(_) => 0,
+            Self::Real(tree) => tree.initial_selected_row(),
+        }
+    }
+
     fn row_count_label(&self) -> String {
         match self {
             Self::Virtual(tree) => format!("{} rows", tree.row_count()),
@@ -3906,6 +4432,27 @@ impl TreeModel {
         match self {
             Self::Virtual(tree) => tree.row_layout_job(row, selected),
             Self::Real(tree) => tree.row_layout_job(row, selected),
+        }
+    }
+
+    fn real_row_depth(&self, row: usize) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.row_depth(row),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_row_tree_marker(&self, row: usize) -> Option<&'static str> {
+        match self {
+            Self::Real(tree) => tree.row_tree_marker(row),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_row_page_index(&self, row: usize) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.row_page_index(row),
+            Self::Virtual(_) => None,
         }
     }
 
@@ -3938,6 +4485,7 @@ impl TreeModel {
 #[derive(Clone, Debug)]
 struct RealObjectTree {
     rows: Vec<RealTreeRow>,
+    root_children: Vec<ObjectSummary>,
     total: Option<usize>,
 }
 
@@ -3950,17 +4498,36 @@ struct RealTreeRow {
 
 impl RealObjectTree {
     fn from_child_page(page: &pdbg_core::ChildPage<ObjectSummary>) -> Self {
+        let mut rows = Vec::new();
+        if let Some(first) = page.items.first() {
+            rows.push(RealTreeRow {
+                summary: ObjectSummary {
+                    id: NodeId::DocumentRoot {
+                        doc: first.id.document_id(),
+                    },
+                    kind: ObjectKind::Unknown,
+                    label: "Document".to_string(),
+                    preview: "PDF object graph".to_string(),
+                    object: None,
+                    has_children: true,
+                    has_stream: false,
+                    child_count: page.total,
+                    byte_size_hint: None,
+                    diagnostics: Vec::new(),
+                },
+                depth: 0,
+                expanded: true,
+            });
+        }
+        rows.extend(page.items.iter().cloned().map(|summary| RealTreeRow {
+            summary,
+            depth: 1,
+            expanded: false,
+        }));
+
         Self {
-            rows: page
-                .items
-                .iter()
-                .cloned()
-                .map(|summary| RealTreeRow {
-                    summary,
-                    depth: 0,
-                    expanded: false,
-                })
-                .collect(),
+            rows,
+            root_children: page.items.clone(),
             total: page.total,
         }
     }
@@ -3969,10 +4536,30 @@ impl RealObjectTree {
         self.rows.len().max(1)
     }
 
+    fn loaded_child_count(&self) -> usize {
+        self.rows
+            .len()
+            .saturating_sub(self.has_document_root_row() as usize)
+    }
+
+    fn has_document_root_row(&self) -> bool {
+        self.rows
+            .first()
+            .is_some_and(|row| matches!(row.summary.id, NodeId::DocumentRoot { .. }))
+    }
+
+    fn initial_selected_row(&self) -> usize {
+        if self.has_document_root_row() && self.rows.len() > 1 {
+            1
+        } else {
+            0
+        }
+    }
+
     fn row_count_label(&self) -> String {
         match self.total {
-            Some(total) => format!("{} loaded / {total} total", self.rows.len()),
-            None => format!("{} loaded", self.rows.len()),
+            Some(total) => format!("{} loaded / {total} total", self.loaded_child_count()),
+            None => format!("{} loaded", self.loaded_child_count()),
         }
     }
 
@@ -3996,6 +4583,32 @@ impl RealObjectTree {
         self.summary(row)
             .map(summary_inline_text)
             .unwrap_or_else(|| "no real rows loaded".to_string())
+    }
+
+    fn row_depth(&self, row: usize) -> Option<usize> {
+        self.rows.get(row).map(|row| row.depth)
+    }
+
+    fn row_tree_marker(&self, row: usize) -> Option<&'static str> {
+        let row = self.rows.get(row)?;
+        if !row.summary.has_children {
+            return Some(" ");
+        }
+        if row.expanded {
+            Some("-")
+        } else {
+            Some("+")
+        }
+    }
+
+    fn row_is_expanded(&self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|row| row.expanded)
+    }
+
+    fn row_page_index(&self, row: usize) -> Option<usize> {
+        self.rows
+            .get(row)
+            .and_then(|row| page_index_for_node(&row.summary.id))
     }
 
     fn row_layout_job(&self, row: usize, selected: bool) -> egui::text::LayoutJob {
@@ -4024,8 +4637,6 @@ impl RealObjectTree {
         } else {
             PdbgTheme::WARN_FG
         };
-        let indent = "  ".repeat(row.depth);
-        job.append(&indent, 0.0, tree_text_format(muted));
         job.append(
             kind_badge_text(&row.summary.kind),
             0.0,
@@ -4042,11 +4653,6 @@ impl RealObjectTree {
                 0.0,
                 tree_text_format(PdbgTheme::ACCENT),
             );
-        }
-        let preview = row.summary.preview.trim();
-        if !preview.is_empty() && preview != row.summary.label {
-            job.append("  ", 0.0, tree_text_format(muted));
-            job.append(preview, 0.0, tree_text_format(muted));
         }
         if row.summary.has_stream {
             job.append("  stream", 0.0, tree_text_format(PdbgTheme::OPERATOR));
@@ -4076,7 +4682,7 @@ impl RealObjectTree {
                 byte_size_hint: None,
                 diagnostics: Vec::new(),
             },
-            depth: 0,
+            depth: if self.has_document_root_row() { 1 } else { 0 },
             expanded: false,
         });
         self.rows.len() - 1
@@ -4117,7 +4723,10 @@ impl RealObjectTree {
                     byte_size_hint: None,
                     diagnostics: Vec::new(),
                 },
-                depth: hit.depth.min(8),
+                depth: hit
+                    .depth
+                    .saturating_add(self.has_document_root_row() as usize)
+                    .min(8),
                 expanded: false,
             });
             return Some(self.rows.len() - 1);
@@ -4131,8 +4740,6 @@ impl RealObjectTree {
             return;
         };
         row.summary.kind = detail.kind.clone();
-        row.summary.label = detail.label.clone();
-        row.summary.preview = detail.preview.clone();
         row.summary.object = detail.object;
         row.summary.has_stream = detail.stream.is_some();
         row.summary.has_children =
@@ -4179,6 +4786,51 @@ impl RealObjectTree {
         let inserted = children.len();
         self.rows.splice(row + 1..row + 1, children);
         inserted
+    }
+
+    fn expand_cached_document_root(&mut self, row: usize) -> usize {
+        let Some(parent) = self.rows.get_mut(row) else {
+            return 0;
+        };
+        if parent.expanded || !matches!(parent.summary.id, NodeId::DocumentRoot { .. }) {
+            return 0;
+        }
+        parent.expanded = true;
+        let child_depth = parent.depth + 1;
+        let children = self
+            .root_children
+            .iter()
+            .cloned()
+            .map(|summary| RealTreeRow {
+                summary,
+                depth: child_depth,
+                expanded: false,
+            })
+            .collect::<Vec<_>>();
+        let inserted = children.len();
+        self.rows.splice(row + 1..row + 1, children);
+        inserted
+    }
+
+    fn collapse_row(&mut self, row: usize) -> usize {
+        let Some(parent) = self.rows.get_mut(row) else {
+            return 0;
+        };
+        if !parent.expanded || !parent.summary.has_children {
+            return 0;
+        }
+        parent.expanded = false;
+        let parent_depth = parent.depth;
+        let end = self.rows[row + 1..]
+            .iter()
+            .position(|child| child.depth <= parent_depth)
+            .map(|offset| row + 1 + offset)
+            .unwrap_or(self.rows.len());
+        let removed = end.saturating_sub(row + 1);
+        if removed > 0 {
+            self.rows.drain(row + 1..end);
+        }
+        removed
     }
 }
 
@@ -4356,6 +5008,27 @@ fn fake_stream_byte(index: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_layout_preserves_initial_preview_width_on_retina_sized_window() {
+        let layout = workspace_panel_layout(1024.0);
+
+        assert!(layout.left.default + layout.right.default <= 1024.0 - PAGE_PREVIEW_MIN_WIDTH);
+        assert!(layout.left.default < LEFT_PANEL_DEFAULT_WIDTH);
+        assert!(layout.right.default < RIGHT_PANEL_DEFAULT_WIDTH);
+        assert_eq!(layout.left.max, LEFT_PANEL_MAX_WIDTH);
+        assert_eq!(layout.right.max, RIGHT_PANEL_MAX_WIDTH);
+    }
+
+    #[test]
+    fn workspace_layout_keeps_wide_window_side_panels_roomy() {
+        let layout = workspace_panel_layout(1920.0);
+
+        assert_eq!(layout.left.default, LEFT_PANEL_DEFAULT_WIDTH);
+        assert_eq!(layout.right.default, RIGHT_PANEL_DEFAULT_WIDTH);
+        assert_eq!(layout.left.max, LEFT_PANEL_MAX_WIDTH);
+        assert_eq!(layout.right.max, RIGHT_PANEL_MAX_WIDTH);
+    }
 
     #[cfg(feature = "real-mupdf")]
     fn wait_for_real_render(app: &mut GuiShellApp) {
@@ -4709,11 +5382,65 @@ mod tests {
         });
 
         assert_eq!(tree.row_count_label(), "1 loaded / 1 total");
-        assert!(tree.row_label(0).contains("[12 0 R]"));
-        let job = tree.row_layout_job(0, false);
+        assert_eq!(tree.row_depth(0), Some(0));
+        assert_eq!(tree.row_depth(1), Some(1));
+        assert_eq!(tree.row_tree_marker(0), Some("-"));
+        assert!(tree.row_label(1).contains("[12 0 R]"));
+        let job = tree.row_layout_job(1, false);
         let row_text = job.text;
         assert!(row_text.contains("<> Info (3) [12 0 R]"));
+        assert!(!row_text.contains("preview"));
         assert!(row_text.contains("stream"));
+    }
+
+    #[test]
+    fn real_tree_detail_refresh_keeps_structural_label_stable() {
+        let id = NodeId::DocumentRoot {
+            doc: pdbg_core::DocumentId(7),
+        };
+        let summary = ObjectSummary {
+            id: id.clone(),
+            kind: ObjectKind::Unknown,
+            label: "Trailer".to_string(),
+            preview: "PDF trailer dictionary".to_string(),
+            object: None,
+            has_children: true,
+            has_stream: false,
+            child_count: Some(4),
+            byte_size_hint: None,
+            diagnostics: Vec::new(),
+        };
+        let mut tree = RealObjectTree {
+            rows: vec![RealTreeRow {
+                summary,
+                depth: 0,
+                expanded: false,
+            }],
+            root_children: Vec::new(),
+            total: Some(1),
+        };
+        let detail = ObjectDetail {
+            id,
+            kind: ObjectKind::Trailer,
+            object: None,
+            label: "Object".to_string(),
+            preview: "<object preview exceeds max depth>".to_string(),
+            value: ObjectValue::Container,
+            dictionary_entries: Some(pdbg_core::ChildPage {
+                total: Some(4),
+                items: Vec::new(),
+            }),
+            array_entries: None,
+            stream: None,
+            diagnostics: Vec::new(),
+        };
+
+        tree.update_row_from_detail(0, &detail);
+
+        let row_text = tree.row_layout_job(0, false).text;
+        assert!(row_text.contains("trl Trailer (4)"));
+        assert!(!row_text.contains("Object"));
+        assert_eq!(tree.row_label(0), "PDF trailer dictionary");
     }
 
     #[test]
@@ -4731,6 +5458,52 @@ mod tests {
         };
 
         assert_eq!(node_breadcrumb(&id), "Pages/[0]/Contents");
+    }
+
+    #[test]
+    fn page_index_for_node_follows_page_children() {
+        let id = NodeId::DictEntry {
+            doc: pdbg_core::DocumentId(1),
+            parent: Box::new(NodeId::ArrayEntry {
+                doc: pdbg_core::DocumentId(1),
+                parent: Box::new(NodeId::Page {
+                    doc: pdbg_core::DocumentId(1),
+                    index: 3,
+                }),
+                index: 0,
+            }),
+            key: "Contents".to_string(),
+        };
+
+        assert_eq!(page_index_for_node(&id), Some(3));
+        assert_eq!(
+            page_index_for_node(&NodeId::ArrayEntry {
+                doc: pdbg_core::DocumentId(1),
+                parent: Box::new(NodeId::DictEntry {
+                    doc: pdbg_core::DocumentId(1),
+                    parent: Box::new(NodeId::Catalog {
+                        doc: pdbg_core::DocumentId(1),
+                    }),
+                    key: "Pages".to_string(),
+                }),
+                index: 1,
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            page_index_for_node(&NodeId::ResourceGroup {
+                doc: pdbg_core::DocumentId(1),
+                page_index: 2,
+                group: pdbg_core::ResourceGroup::XObjects,
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            page_index_for_node(&NodeId::Trailer {
+                doc: pdbg_core::DocumentId(1),
+            }),
+            None
+        );
     }
 
     #[test]
@@ -5203,6 +5976,51 @@ mod tests {
             .status_log
             .iter()
             .any(|line| line.starts_with("rendered page 2 @ 100%")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_gui_selecting_page_tree_row_refreshes_preview_page() {
+        let path = write_temp_pdf("gui-tree-page-sync", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
+            start_empty_when_no_pdf: false,
+        });
+        wait_for_real_render(&mut app);
+
+        let page_root_row = match &app.tree {
+            TreeModel::Real(tree) => tree
+                .rows
+                .iter()
+                .position(|row| {
+                    matches!(
+                        &row.summary.id,
+                        NodeId::DictEntry { key, .. } if key == "Pages"
+                    ) || matches!(&row.summary.id, NodeId::PageRoot { .. })
+                })
+                .unwrap(),
+            TreeModel::Virtual(_) => panic!("expected real tree"),
+        };
+        app.select_row_from_tree(page_root_row);
+        app.expand_selected_real_row();
+        let page_two_row = match &app.tree {
+            TreeModel::Real(tree) => tree
+                .rows
+                .iter()
+                .position(|row| page_index_for_node(&row.summary.id) == Some(1))
+                .unwrap(),
+            TreeModel::Virtual(_) => panic!("expected real tree"),
+        };
+
+        app.select_row_from_tree(page_two_row);
+        wait_for_real_render(&mut app);
+
+        assert_eq!(app.render_page_index, 1);
+        assert_eq!(app.real_render.as_ref().unwrap().page_index, 1);
 
         let _ = std::fs::remove_file(path);
     }
