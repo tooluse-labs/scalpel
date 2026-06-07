@@ -8,9 +8,10 @@ use pdbg_core::{
     ChildRange, DiagnosticCode, DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary,
     DocumentDiagnostics, EgressFormat, EscapedText, MarkdownReportInput, NodeId, NodePathSegment,
     ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest,
-    ObjectSearchResult, ObjectSummary, ObjectValue, RenderRequest, RenderResult, RenderResultCache,
-    ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary, StreamViewMode,
-    TextPageCache, TextSearchHit, TextSearchRequest, TextSearchResult,
+    ObjectSearchResult, ObjectSummary, ObjectValue, PageRect, RenderRequest, RenderResult,
+    RenderResultCache, ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary,
+    StreamViewMode, TextPage, TextPageCache, TextRequest, TextSearchHit, TextSearchRequest,
+    TextSearchResult, TextSpan,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -45,6 +46,7 @@ const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
+const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const APP_TITLE: &str = "pdbg Preview";
 const LEFT_PANEL_MIN_WIDTH: f32 = 220.0;
 const LEFT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
@@ -800,6 +802,63 @@ fn preview_click_from_pos(
         normalized_x,
         normalized_y,
     })
+}
+
+fn text_hit_from_page_click(
+    page: &TextPage,
+    click: PagePreviewClick,
+    zoom: f32,
+) -> Option<TextSearchHit> {
+    let (page_x, page_y) = page_point_from_preview_click(click, zoom)?;
+    page.spans
+        .iter()
+        .enumerate()
+        .filter(|(_, span)| {
+            !span.text.trim().is_empty() && span.bbox.width > 0.0 && span.bbox.height > 0.0
+        })
+        .filter_map(|(index, span)| {
+            let distance_sq = rect_distance_sq_to_point(&span.bbox, page_x, page_y);
+            (distance_sq <= TEXT_CLICK_BBOX_TOLERANCE_PT * TEXT_CLICK_BBOX_TOLERANCE_PT)
+                .then_some((index, span, distance_sq))
+        })
+        .min_by(|left, right| {
+            left.2
+                .partial_cmp(&right.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, span, _)| text_span_to_hit(page.page_index, index, span))
+}
+
+fn page_point_from_preview_click(click: PagePreviewClick, zoom: f32) -> Option<(f32, f32)> {
+    (zoom > 0.0).then_some((click.render_x / zoom, click.render_y / zoom))
+}
+
+fn rect_distance_sq_to_point(rect: &PageRect, x: f32, y: f32) -> f32 {
+    let dx = if x < rect.x {
+        rect.x - x
+    } else if x > rect.x + rect.width {
+        x - (rect.x + rect.width)
+    } else {
+        0.0
+    };
+    let dy = if y < rect.y {
+        rect.y - y
+    } else if y > rect.y + rect.height {
+        y - (rect.y + rect.height)
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
+fn text_span_to_hit(page_index: usize, span_index: usize, span: &TextSpan) -> TextSearchHit {
+    TextSearchHit {
+        page_index,
+        span_index,
+        excerpt: span.text.clone(),
+        bbox: Some(span.bbox.clone()),
+        untrusted: span.untrusted,
+    }
 }
 
 pub struct GuiShellApp {
@@ -1660,6 +1719,59 @@ impl GuiShellApp {
         self.render_page_index = page_index;
         self.preview_click = None;
         self.refresh_real_render();
+    }
+
+    fn select_text_hit_for_preview_click(&mut self, click: PagePreviewClick) {
+        self.selected_text_hit = None;
+        if self.render_rotation_degrees != 0 {
+            self.status_log
+                .push("preview text bbox hit-test is only available at 0 deg rotation".to_string());
+            return;
+        }
+
+        let page = if let Some(page) = self.text_search_cache.get(click.page_index) {
+            page
+        } else {
+            let Ok(state) = self.state.as_ref() else {
+                self.status_log
+                    .push("preview text bbox hit-test skipped: document is not open".to_string());
+                return;
+            };
+            let mut request = TextRequest::page(click.page_index);
+            request.max_chars = TEXT_SEARCH_MAX_CHARS_PER_PAGE;
+            request.max_blocks = TEXT_SEARCH_MAX_BLOCKS_PER_PAGE;
+            match state
+                .session
+                .run_task(|document| document.extract_text(&request))
+            {
+                Ok(page) => {
+                    self.text_search_cache.insert(page.clone());
+                    page
+                }
+                Err(err) => {
+                    self.status_log.push(format!(
+                        "preview text bbox hit-test page {} failed: {}",
+                        click.page_index + 1,
+                        err.message
+                    ));
+                    return;
+                }
+            }
+        };
+
+        if let Some(hit) = text_hit_from_page_click(&page, click, self.render_zoom) {
+            self.status_log.push(format!(
+                "selected text bbox page {} span {}",
+                hit.page_index + 1,
+                hit.span_index
+            ));
+            self.selected_text_hit = Some(hit);
+        } else {
+            self.status_log.push(format!(
+                "no text bbox at page {} preview click",
+                click.page_index + 1
+            ));
+        }
     }
 
     fn refresh_real_render(&mut self) {
@@ -3738,13 +3850,17 @@ impl GuiShellApp {
                     let image_rect = response.rect;
                     if response.clicked() {
                         if let Some(pos) = response.interact_pointer_pos() {
-                            self.preview_click = preview_click_from_pos(
+                            let click = preview_click_from_pos(
                                 pos,
                                 image_rect,
                                 render_width,
                                 render_height,
                                 render_page_index,
                             );
+                            self.preview_click = click;
+                            if let Some(click) = click {
+                                self.select_text_hit_for_preview_click(click);
+                            }
                             self.selected_tab = InspectorTab::Object;
                         }
                     }
@@ -4211,7 +4327,7 @@ impl GuiShellApp {
                     ui.end_row();
 
                     ui.label("object bbox");
-                    truncated_monospace(ui, "not available from current MuPDF API");
+                    truncated_monospace(ui, "not wired in current pdbg shim");
                     ui.end_row();
                 });
         });
@@ -5387,6 +5503,41 @@ mod tests {
         assert_eq!(click.page_index, 4);
         assert!((click.render_x - 450.0).abs() < f32::EPSILON);
         assert!((click.render_y - 900.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn preview_click_hit_tests_text_span_bbox_in_page_space() {
+        let page = TextPage {
+            page_index: 1,
+            spans: vec![TextSpan {
+                text: "Abstract".to_string(),
+                bbox: PageRect {
+                    x: 100.0,
+                    y: 50.0,
+                    width: 200.0,
+                    height: 24.0,
+                },
+                untrusted: false,
+            }],
+        };
+        let click = PagePreviewClick {
+            page_index: 1,
+            render_x: 300.0,
+            render_y: 120.0,
+            normalized_x: 0.0,
+            normalized_y: 0.0,
+        };
+        let hit = text_hit_from_page_click(&page, click, 2.0).unwrap();
+        assert_eq!(hit.page_index, 1);
+        assert_eq!(hit.span_index, 0);
+        assert_eq!(hit.excerpt, "Abstract");
+
+        let miss = PagePreviewClick {
+            render_x: 20.0,
+            render_y: 20.0,
+            ..click
+        };
+        assert!(text_hit_from_page_click(&page, miss, 2.0).is_none());
     }
 
     #[cfg(not(feature = "real-mupdf"))]
