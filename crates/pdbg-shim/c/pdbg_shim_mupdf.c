@@ -1,4 +1,6 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "pdbg_shim.h"
 
@@ -7,21 +9,82 @@
 #include <mupdf/pdf/javascript.h>
 
 #include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <io.h>
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+typedef CRITICAL_SECTION pdbg_mutex_t;
+
+static int pdbg_mutex_init(pdbg_mutex_t *mutex)
+{
+    InitializeCriticalSection(mutex);
+    return 0;
+}
+
+static void pdbg_mutex_destroy(pdbg_mutex_t *mutex)
+{
+    DeleteCriticalSection(mutex);
+}
+
+static void pdbg_mutex_lock(pdbg_mutex_t *mutex)
+{
+    EnterCriticalSection(mutex);
+}
+
+static void pdbg_mutex_unlock(pdbg_mutex_t *mutex)
+{
+    LeaveCriticalSection(mutex);
+}
+
+#define pdbg_dup_fd _dup
+#define pdbg_close_fd _close
+#define pdbg_fdopen _fdopen
+#else
+typedef pthread_mutex_t pdbg_mutex_t;
+
+static int pdbg_mutex_init(pdbg_mutex_t *mutex)
+{
+    return pthread_mutex_init(mutex, NULL);
+}
+
+static void pdbg_mutex_destroy(pdbg_mutex_t *mutex)
+{
+    pthread_mutex_destroy(mutex);
+}
+
+static void pdbg_mutex_lock(pdbg_mutex_t *mutex)
+{
+    pthread_mutex_lock(mutex);
+}
+
+static void pdbg_mutex_unlock(pdbg_mutex_t *mutex)
+{
+    pthread_mutex_unlock(mutex);
+}
+
+#define pdbg_dup_fd dup
+#define pdbg_close_fd close
+#define pdbg_fdopen fdopen
+#endif
 
 #define PDBG_STEXT_MAX_STRUCT_DEPTH 256
 
 struct pdbg_context {
     fz_context *ctx;
     fz_locks_context lock_ctx;
-    pthread_mutex_t locks[FZ_LOCK_MAX];
-    pthread_mutex_t open_mutex;
+    pdbg_mutex_t locks[FZ_LOCK_MAX];
+    pdbg_mutex_t open_mutex;
     int locks_initialized;
     int open_mutex_initialized;
 };
@@ -87,7 +150,7 @@ struct pdbg_text_page {
 
 struct pdbg_cancel_token {
     atomic_int cancelled;
-    pthread_mutex_t mutex;
+    pdbg_mutex_t mutex;
     int mutex_initialized;
     /* Protected by mutex. The pointed fz_cookie objects are stack-owned by active
        MuPDF calls and are unlinked before returning. The abort field itself is
@@ -214,7 +277,7 @@ static void lock_mutex(void *user, int lock)
     pdbg_context *ctx = (pdbg_context *)user;
     if (!ctx || lock < 0 || lock >= FZ_LOCK_MAX)
         return;
-    pthread_mutex_lock(&ctx->locks[lock]);
+    pdbg_mutex_lock(&ctx->locks[lock]);
 }
 
 static void unlock_mutex(void *user, int lock)
@@ -222,7 +285,7 @@ static void unlock_mutex(void *user, int lock)
     pdbg_context *ctx = (pdbg_context *)user;
     if (!ctx || lock < 0 || lock >= FZ_LOCK_MAX)
         return;
-    pthread_mutex_unlock(&ctx->locks[lock]);
+    pdbg_mutex_unlock(&ctx->locks[lock]);
 }
 
 static void ignore_mupdf_message(void *user, const char *message)
@@ -245,19 +308,19 @@ static void destroy_locks(pdbg_context *ctx)
     if (!ctx)
         return;
     for (int i = 0; i < ctx->locks_initialized; i++)
-        pthread_mutex_destroy(&ctx->locks[i]);
+        pdbg_mutex_destroy(&ctx->locks[i]);
     ctx->locks_initialized = 0;
     if (ctx->open_mutex_initialized) {
-        pthread_mutex_destroy(&ctx->open_mutex);
+        pdbg_mutex_destroy(&ctx->open_mutex);
         ctx->open_mutex_initialized = 0;
     }
 }
 
 static int clone_doc_context(pdbg_context *owner, pdbg_doc *doc, pdbg_error *err)
 {
-    pthread_mutex_lock(&owner->open_mutex);
+    pdbg_mutex_lock(&owner->open_mutex);
     doc->ctx = fz_clone_context(owner->ctx);
-    pthread_mutex_unlock(&owner->open_mutex);
+    pdbg_mutex_unlock(&owner->open_mutex);
     if (!doc->ctx) {
         set_error(err, PDBG_ERROR_OOM, "failed to clone MuPDF context");
         return 0;
@@ -669,14 +732,14 @@ static fz_cookie *prepare_cancel_cookie(pdbg_cancel_cookie_scope *scope, pdbg_ca
     if (!cancel->mutex_initialized)
         return &scope->cookie;
 
-    pthread_mutex_lock(&cancel->mutex);
+    pdbg_mutex_lock(&cancel->mutex);
     if (atomic_load(&cancel->cancelled))
         scope->cookie.abort = 1;
     scope->link.cookie = &scope->cookie;
     scope->link.next = cancel->active_cookies;
     cancel->active_cookies = &scope->link;
     scope->registered = 1;
-    pthread_mutex_unlock(&cancel->mutex);
+    pdbg_mutex_unlock(&cancel->mutex);
 
     return &scope->cookie;
 }
@@ -687,7 +750,7 @@ static void finish_cancel_cookie(pdbg_cancel_cookie_scope *scope)
         return;
 
     pdbg_cancel_token *token = scope->token;
-    pthread_mutex_lock(&token->mutex);
+    pdbg_mutex_lock(&token->mutex);
     struct pdbg_active_cookie **cursor = &token->active_cookies;
     while (*cursor) {
         if (*cursor == &scope->link) {
@@ -696,7 +759,7 @@ static void finish_cancel_cookie(pdbg_cancel_cookie_scope *scope)
         }
         cursor = &(*cursor)->next;
     }
-    pthread_mutex_unlock(&token->mutex);
+    pdbg_mutex_unlock(&token->mutex);
 
     scope->registered = 0;
     scope->token = NULL;
@@ -1635,7 +1698,7 @@ pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
         return PDBG_ERROR_OOM;
     }
 
-    if (pthread_mutex_init(&ctx->open_mutex, NULL) != 0) {
+    if (pdbg_mutex_init(&ctx->open_mutex) != 0) {
         free(ctx);
         set_error(err, PDBG_ERROR_GENERIC, "failed to initialize MuPDF open lock");
         return PDBG_ERROR_GENERIC;
@@ -1643,7 +1706,7 @@ pdbg_status pdbg_context_new(pdbg_context **out, pdbg_error *err)
     ctx->open_mutex_initialized = 1;
 
     for (int i = 0; i < FZ_LOCK_MAX; i++) {
-        if (pthread_mutex_init(&ctx->locks[i], NULL) != 0) {
+        if (pdbg_mutex_init(&ctx->locks[i]) != 0) {
             destroy_locks(ctx);
             free(ctx);
             set_error(err, PDBG_ERROR_GENERIC, "failed to initialize MuPDF lock");
@@ -1710,7 +1773,7 @@ pdbg_status pdbg_cancel_token_new(pdbg_cancel_token **out, pdbg_error *err)
         set_error(err, PDBG_ERROR_OOM, "out of memory");
         return PDBG_ERROR_OOM;
     }
-    if (pthread_mutex_init(&token->mutex, NULL) != 0) {
+    if (pdbg_mutex_init(&token->mutex) != 0) {
         free(token);
         set_error(err, PDBG_ERROR_GENERIC, "failed to initialize cancel token mutex");
         return PDBG_ERROR_GENERIC;
@@ -1727,14 +1790,14 @@ void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
     if (token) {
         atomic_store(&token->cancelled, 1);
         if (token->mutex_initialized) {
-            pthread_mutex_lock(&token->mutex);
+            pdbg_mutex_lock(&token->mutex);
             for (struct pdbg_active_cookie *active = token->active_cookies; active; active = active->next) {
                 if (active->cookie) {
                     /* Intentional MuPDF async-abort write; lifetime is mutex-protected above. */
                     active->cookie->abort = 1;
                 }
             }
-            pthread_mutex_unlock(&token->mutex);
+            pdbg_mutex_unlock(&token->mutex);
         }
     }
 }
@@ -1742,7 +1805,7 @@ void pdbg_cancel_token_cancel(pdbg_cancel_token *token)
 void pdbg_cancel_token_drop(pdbg_cancel_token *token)
 {
     if (token && token->mutex_initialized)
-        pthread_mutex_destroy(&token->mutex);
+        pdbg_mutex_destroy(&token->mutex);
     free(token);
 }
 
@@ -1860,16 +1923,16 @@ pdbg_status pdbg_document_open_fd(
     }
     *out = NULL;
 
-    int dup_fd = dup(fd);
+    int dup_fd = pdbg_dup_fd(fd);
     if (dup_fd < 0) {
         set_error(err, PDBG_ERROR_GENERIC, strerror(errno));
         return PDBG_ERROR_GENERIC;
     }
 
-    FILE *file = fdopen(dup_fd, "rb");
+    FILE *file = pdbg_fdopen(dup_fd, "rb");
     if (!file) {
         int saved_errno = errno;
-        close(dup_fd);
+        pdbg_close_fd(dup_fd);
         set_error(err, PDBG_ERROR_GENERIC, strerror(saved_errno));
         return PDBG_ERROR_GENERIC;
     }
@@ -3010,5 +3073,9 @@ int pdbg_test_fd_is_open(int fd)
 {
     if (fd < 0)
         return 0;
+#ifdef _WIN32
+    return _get_osfhandle(fd) == -1 ? 0 : 1;
+#else
     return fcntl(fd, F_GETFD) == -1 ? 0 : 1;
+#endif
 }

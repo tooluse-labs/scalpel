@@ -61,6 +61,22 @@ const PAGE_PREVIEW_MIN_WIDTH: f32 = 360.0;
 const PAGE_PREVIEW_MIN_HEIGHT: f32 = 320.0;
 const WORKSPACE_SPLITTER_WIDTH: f32 = 6.0;
 const WORKSPACE_MIN_CENTER_WIDTH: f32 = 360.0;
+const PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT: f32 = 64.0;
+const CJK_FONT_NAME: &str = "pdbg-cjk";
+
+const CJK_FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\Deng.ttf",
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\simsunb.ttf",
+    "C:\\Windows\\Fonts\\simkai.ttf",
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\msyhbd.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+];
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiRunOptions {
@@ -225,25 +241,77 @@ fn pdbg_fonts() -> FontDefinitions {
         egui::FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"))
             .into(),
     );
-    fonts.families.insert(
-        FontFamily::Name("pdbg-sans".into()),
-        vec![
-            "InterVariable".to_string(),
-            "Ubuntu-Light".to_string(),
-            "NotoEmoji-Regular".to_string(),
-            "emoji-icon-font".to_string(),
-        ],
-    );
-    fonts.families.insert(
-        FontFamily::Name("pdbg-mono".into()),
-        vec![
-            "JetBrainsMono-Regular".to_string(),
-            "Hack".to_string(),
-            "Ubuntu-Light".to_string(),
-            "NotoEmoji-Regular".to_string(),
-        ],
-    );
+    let has_runtime_cjk_font = add_runtime_cjk_font(&mut fonts);
+    let mut sans_fonts = vec![
+        "InterVariable".to_string(),
+        "Ubuntu-Light".to_string(),
+        "NotoEmoji-Regular".to_string(),
+        "emoji-icon-font".to_string(),
+    ];
+    if has_runtime_cjk_font {
+        sans_fonts.insert(1, CJK_FONT_NAME.to_string());
+    }
     fonts
+        .families
+        .insert(FontFamily::Name("pdbg-sans".into()), sans_fonts);
+    let mut mono_fonts = vec![
+        "JetBrainsMono-Regular".to_string(),
+        "Hack".to_string(),
+        "Ubuntu-Light".to_string(),
+        "NotoEmoji-Regular".to_string(),
+    ];
+    if has_runtime_cjk_font {
+        mono_fonts.insert(1, CJK_FONT_NAME.to_string());
+        insert_font_fallback(fonts.families.entry(FontFamily::Proportional).or_default());
+        insert_font_fallback(fonts.families.entry(FontFamily::Monospace).or_default());
+    }
+    fonts
+        .families
+        .insert(FontFamily::Name("pdbg-mono".into()), mono_fonts);
+    fonts
+}
+
+fn insert_font_fallback(family: &mut Vec<String>) {
+    if !family.iter().any(|font| font == CJK_FONT_NAME) {
+        family.push(CJK_FONT_NAME.to_string());
+    }
+}
+
+fn add_runtime_cjk_font(fonts: &mut FontDefinitions) -> bool {
+    if let Some(bytes) = CJK_FONT_CANDIDATES
+        .iter()
+        .map(Path::new)
+        .find_map(|path| fs::read(path).ok())
+    {
+        fonts.font_data.insert(
+            CJK_FONT_NAME.to_string(),
+            egui::FontData::from_owned(bytes).into(),
+        );
+        return true;
+    }
+    false
+}
+
+fn page_preview_display_size(
+    texture_size: egui::Vec2,
+    available_size: egui::Vec2,
+    reserved_footer_height: f32,
+    visual_zoom: f32,
+) -> egui::Vec2 {
+    if texture_size.x <= 0.0 || texture_size.y <= 0.0 {
+        return egui::Vec2::ZERO;
+    }
+    let visual_zoom = visual_zoom.max(0.1);
+    let base_texture_size = texture_size / visual_zoom;
+    let image_available_height = (available_size.y - reserved_footer_height).max(1.0);
+    let scale = (available_size.x / base_texture_size.x)
+        .min(image_available_height / base_texture_size.y)
+        .max(0.1);
+    base_texture_size * scale * visual_zoom
+}
+
+fn page_preview_leading_space(available_width: f32, display_width: f32) -> f32 {
+    ((available_width - display_width) * 0.5).max(0.0)
 }
 
 fn pdbg_style() -> egui::Style {
@@ -444,11 +512,17 @@ fn draw_search_controls(
                 response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if busy {
                 output.cancel |= ui
-                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .add_sized(
+                        egui::vec2(action_width, height),
+                        egui::Button::new(action_label),
+                    )
                     .clicked();
             } else {
                 output.submit |= ui
-                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .add_sized(
+                        egui::vec2(action_width, height),
+                        egui::Button::new(action_label),
+                    )
                     .clicked();
             }
             output.clear |= ui
@@ -470,11 +544,17 @@ fn draw_search_controls(
         ui.horizontal_wrapped(|ui| {
             if busy {
                 output.cancel |= ui
-                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .add_sized(
+                        egui::vec2(action_width, height),
+                        egui::Button::new(action_label),
+                    )
                     .clicked();
             } else {
                 output.submit |= ui
-                    .add_sized(egui::vec2(action_width, height), egui::Button::new(action_label))
+                    .add_sized(
+                        egui::vec2(action_width, height),
+                        egui::Button::new(action_label),
+                    )
                     .clicked();
             }
             output.clear |= ui
@@ -675,12 +755,51 @@ fn top_bar_chip(ui: &mut egui::Ui, label: &str, bg: Color32, fg: Color32) {
         .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(7, 3))
         .show(ui, |ui| {
-            ui.label(RichText::new(label).size(11.0).strong().color(fg));
+            ui.label(
+                RichText::new(label)
+                    .font(FontId::new(11.0, FontFamily::Name("pdbg-sans".into())))
+                    .strong()
+                    .color(fg),
+            );
         });
 }
 
 fn option_text(value: Option<&str>) -> &str {
     value.unwrap_or("-")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PagePreviewClick {
+    page_index: usize,
+    render_x: f32,
+    render_y: f32,
+    normalized_x: f32,
+    normalized_y: f32,
+}
+
+fn real_preview_pager_label(page_index: usize, page_count: usize) -> String {
+    format!("Page {} / {}", page_index + 1, page_count.max(1))
+}
+
+fn preview_click_from_pos(
+    pos: egui::Pos2,
+    image_rect: egui::Rect,
+    render_width: u32,
+    render_height: u32,
+    page_index: usize,
+) -> Option<PagePreviewClick> {
+    if !image_rect.contains(pos) || render_width == 0 || render_height == 0 {
+        return None;
+    }
+    let normalized_x = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+    let normalized_y = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+    Some(PagePreviewClick {
+        page_index,
+        render_x: normalized_x * render_width as f32,
+        render_y: normalized_y * render_height as f32,
+        normalized_x,
+        normalized_y,
+    })
 }
 
 pub struct GuiShellApp {
@@ -735,6 +854,7 @@ pub struct GuiShellApp {
     text_search_job: Option<RealTextSearchJob>,
     text_search_cache: TextPageCache,
     selected_text_hit: Option<TextSearchHit>,
+    preview_click: Option<PagePreviewClick>,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
     copied_excerpt: Option<EscapedText>,
@@ -854,6 +974,7 @@ impl GuiShellApp {
                 TEXT_SEARCH_CACHE_MAX_BYTES,
             ),
             selected_text_hit: None,
+            preview_click: None,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
             copied_excerpt: None,
@@ -1537,6 +1658,7 @@ impl GuiShellApp {
             return;
         }
         self.render_page_index = page_index;
+        self.preview_click = None;
         self.refresh_real_render();
     }
 
@@ -2184,6 +2306,25 @@ fn kind_badge_text(kind: &ObjectKind) -> &'static str {
     }
 }
 
+fn tree_kind_badge_text(summary: &ObjectSummary) -> &'static str {
+    if (matches!(summary.kind, ObjectKind::Page) && is_page_list_summary(summary))
+        || is_xref_object_summary(summary)
+    {
+        return kind_badge_text(&ObjectKind::Dict);
+    }
+    kind_badge_text(&summary.kind)
+}
+
+fn is_page_list_summary(summary: &ObjectSummary) -> bool {
+    matches!(&summary.id, NodeId::Page { .. })
+        || matches!(&summary.id, NodeId::ArrayEntry { parent, .. } if is_page_root_node(parent))
+}
+
+fn is_xref_object_summary(summary: &ObjectSummary) -> bool {
+    matches!(&summary.id, NodeId::XrefObject { .. })
+        || (matches!(summary.kind, ObjectKind::XrefEntry) && summary.object.is_some())
+}
+
 fn object_kind_label(kind: &ObjectKind) -> &'static str {
     match kind {
         ObjectKind::Null => "null",
@@ -2413,6 +2554,30 @@ fn text_hits_same_position(left: &TextSearchHit, right: &TextSearchHit) -> bool 
     left.page_index == right.page_index
         && left.span_index == right.span_index
         && left.excerpt == right.excerpt
+}
+
+fn text_hit_bbox_image_rect(
+    hit: &TextSearchHit,
+    image_rect: egui::Rect,
+    render_width: u32,
+    render_height: u32,
+    zoom: f32,
+    rotation_degrees: i32,
+) -> Option<egui::Rect> {
+    if rotation_degrees != 0 || render_width == 0 || render_height == 0 || zoom <= 0.0 {
+        return None;
+    }
+    let bbox = hit.bbox.as_ref()?;
+    let left = image_rect.left() + (bbox.x * zoom / render_width as f32) * image_rect.width();
+    let top = image_rect.top() + (bbox.y * zoom / render_height as f32) * image_rect.height();
+    let right = image_rect.left()
+        + ((bbox.x + bbox.width) * zoom / render_width as f32) * image_rect.width();
+    let bottom = image_rect.top()
+        + ((bbox.y + bbox.height) * zoom / render_height as f32) * image_rect.height();
+    Some(egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(right, bottom),
+    ))
 }
 
 fn push_value_reference(out: &mut Vec<ObjectId>, value: &ObjectValue) {
@@ -3016,6 +3181,7 @@ impl GuiShellApp {
         self.text_search_cache =
             TextPageCache::new(TEXT_SEARCH_CACHE_MAX_PAGES, TEXT_SEARCH_CACHE_MAX_BYTES);
         self.selected_text_hit = None;
+        self.preview_click = None;
         self.copied_excerpt = None;
         self.status_log = model.status_log;
         self.refresh_real_render();
@@ -3491,7 +3657,6 @@ impl GuiShellApp {
 
     fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
         self.draw_real_render_controls(ui);
-        self.draw_real_page_list(ui);
         if self.real_render_job.is_some() {
             let available = ui.available_size();
             let desired = egui::vec2(
@@ -3538,44 +3703,111 @@ impl GuiShellApp {
         let render_page_index = render.page_index;
         let render_width = render.width;
         let render_height = render.height;
-        let render_stride = render.stride;
+        let render_zoom = self.render_zoom;
+        let render_rotation = self.render_rotation_degrees;
+        let preview_click = self.preview_click;
         let selected_hit = self
             .selected_text_hit
             .as_ref()
             .filter(|hit| hit.page_index == render_page_index)
             .cloned();
 
-        let scale = (available.x / texture_size.x)
-            .min(available.y / texture_size.y)
-            .max(0.1);
-        let display_size = texture_size * scale;
-        ui.vertical_centered(|ui| {
-            ui.add(
-                egui::Image::new((texture_id, display_size))
-                    .bg_fill(PdbgTheme::PAGE)
-                    .corner_radius(3),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!(
-                    "page {} / {}x{} / stride {}",
-                    render_page_index + 1,
-                    render_width,
-                    render_height,
-                    render_stride
-                ))
-                .monospace()
-                .color(PdbgTheme::MUTED),
-            );
-            if let Some(hit) = &selected_hit {
+        let display_size = page_preview_display_size(
+            texture_size,
+            available,
+            PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT,
+            render_zoom,
+        );
+        let image_area_height = (available.y - PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT).max(1.0);
+        ScrollArea::both()
+            .id_salt("real_page_preview_scroll")
+            .max_height(image_area_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(page_preview_leading_space(
+                        ui.available_width(),
+                        display_size.x,
+                    ));
+                    let response = ui.add(
+                        egui::Image::new((texture_id, display_size))
+                            .bg_fill(PdbgTheme::PAGE)
+                            .corner_radius(3)
+                            .sense(egui::Sense::click()),
+                    );
+                    let image_rect = response.rect;
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            self.preview_click = preview_click_from_pos(
+                                pos,
+                                image_rect,
+                                render_width,
+                                render_height,
+                                render_page_index,
+                            );
+                            self.selected_tab = InspectorTab::Object;
+                        }
+                    }
+                    let painter = ui.painter_at(image_rect);
+                    if let Some(hit) = &selected_hit {
+                        if let Some(rect) = text_hit_bbox_image_rect(
+                            hit,
+                            image_rect,
+                            render_width,
+                            render_height,
+                            render_zoom,
+                            render_rotation,
+                        ) {
+                            painter.rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(2.0, PdbgTheme::OPERATOR),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
+                    if let Some(click) =
+                        preview_click.filter(|click| click.page_index == render_page_index)
+                    {
+                        let marker = egui::pos2(
+                            image_rect.left() + click.normalized_x * image_rect.width(),
+                            image_rect.top() + click.normalized_y * image_rect.height(),
+                        );
+                        painter.circle_stroke(
+                            marker,
+                            5.0,
+                            egui::Stroke::new(1.5, PdbgTheme::ACCENT),
+                        );
+                        painter.line_segment(
+                            [
+                                marker + egui::vec2(-8.0, 0.0),
+                                marker + egui::vec2(8.0, 0.0),
+                            ],
+                            egui::Stroke::new(1.0, PdbgTheme::ACCENT),
+                        );
+                        painter.line_segment(
+                            [
+                                marker + egui::vec2(0.0, -8.0),
+                                marker + egui::vec2(0.0, 8.0),
+                            ],
+                            egui::Stroke::new(1.0, PdbgTheme::ACCENT),
+                        );
+                    }
+                });
+            });
+        ui.add_space(8.0);
+        self.draw_real_preview_pager(ui);
+        if let Some(hit) = &selected_hit {
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new(text_search_hit_summary(hit))
                         .monospace()
                         .color(PdbgTheme::ACCENT),
                 )
                 .on_hover_text(text_search_hit_hover(hit));
-            }
-        });
+            });
+        }
         true
     }
 
@@ -3587,45 +3819,6 @@ impl GuiShellApp {
 
         let mut rerender = false;
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(self.render_page_index > 0, egui::Button::new("Prev"))
-                .clicked()
-            {
-                self.render_page_index -= 1;
-                rerender = true;
-            }
-            ui.label(
-                RichText::new(format!(
-                    "Page {} / {page_count}",
-                    self.render_page_index + 1
-                ))
-                .small()
-                .color(PdbgTheme::MUTED),
-            );
-            let mut page_number = self.render_page_index + 1;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut page_number)
-                        .range(1..=page_count)
-                        .speed(1),
-                )
-                .changed()
-            {
-                self.render_page_index = page_number.saturating_sub(1).min(page_count - 1);
-                rerender = true;
-            }
-            if ui
-                .add_enabled(
-                    self.render_page_index + 1 < page_count,
-                    egui::Button::new("Next"),
-                )
-                .clicked()
-            {
-                self.render_page_index += 1;
-                rerender = true;
-            }
-
-            ui.separator();
             egui::ComboBox::from_id_salt("render_zoom")
                 .selected_text(format!("{:.0}%", self.render_zoom * 100.0))
                 .show_ui(ui, |ui| {
@@ -3677,86 +3870,34 @@ impl GuiShellApp {
         ui.add_space(6.0);
     }
 
-    fn draw_real_page_list(&mut self, ui: &mut egui::Ui) {
-        if self.real_pages.is_none() && self.real_pages_error.is_none() {
+    fn draw_real_preview_pager(&mut self, ui: &mut egui::Ui) {
+        let page_count = self.page_count();
+        if page_count == 0 {
             return;
         }
-
-        let mut clicked_page = None;
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Pages").small().color(PdbgTheme::MUTED));
-            if let Some(err) = &self.real_pages_error {
-                ui.colored_label(PdbgTheme::ERROR_FG, err);
-                return;
-            }
-
-            let Some(pages) = &self.real_pages else {
-                return;
-            };
-            let selected_page = self.render_page_index;
-            let loaded_pages = pages.items.len();
-            let visible_pages = loaded_pages.min(12);
-            let first_visible_page = if selected_page < loaded_pages {
-                selected_page
-                    .saturating_add(1)
-                    .saturating_sub(visible_pages)
-            } else {
-                0
-            };
-            for (index, page) in pages
-                .items
-                .iter()
-                .enumerate()
-                .skip(first_visible_page)
-                .take(visible_pages)
+        ui.horizontal_centered(|ui| {
+            if ui
+                .add_enabled(self.render_page_index > 0, egui::Button::new("Prev"))
+                .clicked()
             {
-                let selected = index == selected_page;
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(&page.label).monospace().size(11.0).color(
-                            if selected {
-                                PdbgTheme::ACCENT
-                            } else {
-                                PdbgTheme::TEXT
-                            },
-                        ))
-                        .fill(if selected {
-                            PdbgTheme::SELECTED_BG
-                        } else {
-                            PdbgTheme::CHIP_BG
-                        })
-                        .stroke(egui::Stroke::new(
-                            if selected { 1.5 } else { 1.0 },
-                            if selected {
-                                PdbgTheme::ACCENT
-                            } else {
-                                PdbgTheme::BORDER
-                            },
-                        )),
-                    )
-                    .clicked()
-                {
-                    clicked_page = Some(index);
-                }
+                self.set_render_page(self.render_page_index - 1);
             }
             ui.label(
-                RichText::new(child_page_detail(pages.total, pages.items.len()))
-                    .small()
-                    .color(PdbgTheme::MUTED),
+                RichText::new(real_preview_pager_label(self.render_page_index, page_count))
+                    .monospace()
+                    .strong()
+                    .color(PdbgTheme::TEXT),
             );
-            if let Some(total) = pages.total.filter(|total| *total > visible_pages) {
-                ui.label(
-                    RichText::new(format!("+{} more, use page control", total - visible_pages))
-                        .small()
-                        .color(PdbgTheme::MUTED),
-                );
+            if ui
+                .add_enabled(
+                    self.render_page_index + 1 < page_count,
+                    egui::Button::new("Next"),
+                )
+                .clicked()
+            {
+                self.set_render_page(self.render_page_index + 1);
             }
         });
-        if let Some(page_index) = clicked_page {
-            self.set_render_page(page_index);
-        }
-        ui.add_space(6.0);
     }
 
     fn draw_inspector(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -3863,12 +4004,15 @@ impl GuiShellApp {
                             truncated_monospace(ui, option_text(summary.pdf_version.as_deref()));
                             ui.end_row();
                             ui.label("permissions");
-                            truncated_monospace(ui, format!(
-                                "print={} copy={} modify={}",
-                                summary.permissions.print,
-                                summary.permissions.copy,
-                                summary.permissions.modify
-                            ));
+                            truncated_monospace(
+                                ui,
+                                format!(
+                                    "print={} copy={} modify={}",
+                                    summary.permissions.print,
+                                    summary.permissions.copy,
+                                    summary.permissions.modify
+                                ),
+                            );
                             ui.end_row();
                         });
                 });
@@ -3879,6 +4023,8 @@ impl GuiShellApp {
     }
 
     fn draw_real_object_panel(&mut self, ui: &mut egui::Ui) {
+        self.draw_preview_click_panel(ui);
+
         if let Some(err) = &self.real_detail_error {
             ui.colored_label(PdbgTheme::ERROR_FG, err);
             return;
@@ -4015,6 +4161,61 @@ impl GuiShellApp {
                     });
             });
         }
+    }
+
+    fn draw_preview_click_panel(&self, ui: &mut egui::Ui) {
+        let Some(click) = self.preview_click else {
+            return;
+        };
+
+        section_frame().show(ui, |ui| {
+            ui.label(RichText::new("Preview hit").small().color(PdbgTheme::MUTED));
+            ui.add_space(3.0);
+            egui::Grid::new("preview_click_grid")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("page");
+                    truncated_monospace(ui, format!("{}", click.page_index + 1));
+                    ui.end_row();
+
+                    ui.label("render px");
+                    truncated_monospace(
+                        ui,
+                        format!("{:.1}, {:.1}", click.render_x, click.render_y),
+                    );
+                    ui.end_row();
+
+                    ui.label("normalized");
+                    truncated_monospace(
+                        ui,
+                        format!("{:.4}, {:.4}", click.normalized_x, click.normalized_y),
+                    );
+                    ui.end_row();
+
+                    ui.label("text bbox");
+                    let text_bbox = self
+                        .selected_text_hit
+                        .as_ref()
+                        .filter(|hit| hit.page_index == click.page_index)
+                        .and_then(|hit| hit.bbox.as_ref())
+                        .map(|bbox| {
+                            format!(
+                                "x={:.1} y={:.1} w={:.1} h={:.1}",
+                                bbox.x, bbox.y, bbox.width, bbox.height
+                            )
+                        })
+                        .unwrap_or_else(|| "-".to_string());
+                    truncated_monospace(ui, text_bbox);
+                    ui.end_row();
+
+                    ui.label("object bbox");
+                    truncated_monospace(ui, "not available from current MuPDF API");
+                    ui.end_row();
+                });
+        });
+        ui.add_space(8.0);
     }
 
     fn draw_stream_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -4638,7 +4839,7 @@ impl RealObjectTree {
             PdbgTheme::WARN_FG
         };
         job.append(
-            kind_badge_text(&row.summary.kind),
+            tree_kind_badge_text(&row.summary),
             0.0,
             tree_text_format(accent),
         );
@@ -5117,6 +5318,77 @@ mod tests {
         assert_eq!(tree.row_label(999_999), "obj 999999 0 R  /FakeNode248");
     }
 
+    #[test]
+    fn font_families_include_cjk_fallback_for_pdf_names() {
+        let fonts = pdbg_fonts();
+        assert!(fonts.font_data.contains_key(CJK_FONT_NAME));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Name("pdbg-sans".into()))
+            .unwrap()
+            .iter()
+            .any(|name| name == "pdbg-cjk"));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Name("pdbg-mono".into()))
+            .unwrap()
+            .iter()
+            .any(|name| name == "pdbg-cjk"));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .unwrap()
+            .iter()
+            .any(|name| name == "pdbg-cjk"));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Monospace)
+            .unwrap()
+            .iter()
+            .any(|name| name == "pdbg-cjk"));
+    }
+
+    #[test]
+    fn real_preview_pager_label_uses_current_and_total_only() {
+        assert_eq!(real_preview_pager_label(0, 517), "Page 1 / 517");
+        assert_eq!(real_preview_pager_label(516, 517), "Page 517 / 517");
+    }
+
+    #[test]
+    fn page_preview_display_size_reserves_footer_space() {
+        let texture_size = egui::vec2(900.0, 1400.0);
+        let available = egui::vec2(900.0, 1000.0);
+        let display_size = page_preview_display_size(texture_size, available, 80.0, 1.0);
+        assert!(display_size.y <= 920.0);
+        assert!(available.y - display_size.y >= 80.0);
+    }
+
+    #[test]
+    fn page_preview_display_size_applies_visual_zoom() {
+        let base_texture_size = egui::vec2(900.0, 1400.0);
+        let available = egui::vec2(900.0, 1000.0);
+        let fit_size = page_preview_display_size(base_texture_size, available, 80.0, 1.0);
+        let zoomed_size = page_preview_display_size(base_texture_size * 2.0, available, 80.0, 2.0);
+        assert!(zoomed_size.y > fit_size.y * 1.9);
+    }
+
+    #[test]
+    fn page_preview_leading_space_does_not_hide_wide_image_left_edge() {
+        assert_eq!(page_preview_leading_space(900.0, 1400.0), 0.0);
+        assert_eq!(page_preview_leading_space(900.0, 700.0), 100.0);
+    }
+
+    #[test]
+    fn preview_click_maps_to_render_pixel_coordinates() {
+        let image_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(300.0, 600.0));
+        let click =
+            preview_click_from_pos(egui::pos2(250.0, 340.0), image_rect, 900, 1800, 4).unwrap();
+        assert_eq!(click.page_index, 4);
+        assert!((click.render_x - 450.0).abs() < f32::EPSILON);
+        assert!((click.render_y - 900.0).abs() < f32::EPSILON);
+    }
+
     #[cfg(not(feature = "real-mupdf"))]
     #[test]
     fn gui_object_search_navigates_headless_fake_hit() {
@@ -5441,6 +5713,63 @@ mod tests {
         assert!(row_text.contains("trl Trailer (4)"));
         assert!(!row_text.contains("Object"));
         assert_eq!(tree.row_label(0), "PDF trailer dictionary");
+    }
+
+    #[test]
+    fn real_tree_page_rows_use_dictionary_badge_before_detail_load() {
+        let doc = pdbg_core::DocumentId(9);
+        let summary = ObjectSummary {
+            id: NodeId::ArrayEntry {
+                doc: doc.clone(),
+                parent: Box::new(NodeId::PageRoot { doc: doc.clone() }),
+                index: 3,
+            },
+            kind: ObjectKind::Page,
+            label: "Page 4".to_string(),
+            preview: String::new(),
+            object: None,
+            has_children: true,
+            has_stream: false,
+            child_count: None,
+            byte_size_hint: None,
+            diagnostics: Vec::new(),
+        };
+        let tree = RealObjectTree::from_child_page(&pdbg_core::ChildPage {
+            total: Some(1),
+            items: vec![summary],
+        });
+
+        let row_text = tree.row_layout_job(1, false).text;
+        assert!(row_text.starts_with("<> Page 4"));
+        assert!(!row_text.starts_with("page Page 4"));
+    }
+
+    #[test]
+    fn real_tree_xref_object_rows_use_object_badge_before_detail_load() {
+        let doc = pdbg_core::DocumentId(10);
+        let summary = ObjectSummary {
+            id: NodeId::XrefObject {
+                doc,
+                object: ObjectId { num: 4, gen: 0 },
+            },
+            kind: ObjectKind::XrefEntry,
+            label: "Object 4 0 R".to_string(),
+            preview: String::new(),
+            object: Some(ObjectId { num: 4, gen: 0 }),
+            has_children: true,
+            has_stream: false,
+            child_count: Some(5),
+            byte_size_hint: None,
+            diagnostics: Vec::new(),
+        };
+        let tree = RealObjectTree::from_child_page(&pdbg_core::ChildPage {
+            total: Some(1),
+            items: vec![summary],
+        });
+
+        let row_text = tree.row_layout_job(1, false).text;
+        assert!(row_text.starts_with("<> Object 4 0 R"));
+        assert!(!row_text.starts_with("xref Object 4 0 R"));
     }
 
     #[test]

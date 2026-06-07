@@ -6,7 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 struct pdbg_context {
     uint64_t id;
@@ -58,6 +62,14 @@ struct pdbg_text_page {
 
 static atomic_uint_fast64_t next_context_id = 1;
 static atomic_uint_fast64_t next_document_id = 1;
+
+#ifdef _WIN32
+#define pdbg_dup_fd _dup
+#define pdbg_close_fd _close
+#else
+#define pdbg_dup_fd dup
+#define pdbg_close_fd close
+#endif
 
 #define PDBG_FAKE_TEXT_CHARS 4U
 #define PDBG_FAKE_TEXT_BLOCKS 2U
@@ -325,7 +337,7 @@ pdbg_status pdbg_document_open_fd(
         return PDBG_ERROR_GENERIC;
     }
 
-    int dup_fd = dup(fd);
+    int dup_fd = pdbg_dup_fd(fd);
     if (dup_fd < 0) {
         set_error(err, PDBG_ERROR_GENERIC, strerror(errno));
         return PDBG_ERROR_GENERIC;
@@ -333,7 +345,7 @@ pdbg_status pdbg_document_open_fd(
 
     pdbg_status status = pdbg_document_open(ctx, display_path, password, options, out, err);
     if (status != PDBG_OK) {
-        close(dup_fd);
+        pdbg_close_fd(dup_fd);
         return status;
     }
 
@@ -347,7 +359,7 @@ void pdbg_document_drop(pdbg_doc *doc)
     if (!doc)
         return;
     if (doc->owns_fd && doc->fd_dup >= 0)
-        close(doc->fd_dup);
+        pdbg_close_fd(doc->fd_dup);
     free(doc);
 }
 
@@ -507,7 +519,11 @@ int pdbg_test_fd_is_open(int fd)
 {
     if (fd < 0)
         return 0;
+#ifdef _WIN32
+    return _get_osfhandle(fd) == -1 ? 0 : 1;
+#else
     return fcntl(fd, F_GETFD) == -1 ? 0 : 1;
+#endif
 }
 
 pdbg_status pdbg_page_render(
