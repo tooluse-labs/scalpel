@@ -202,6 +202,26 @@ pub(crate) unsafe fn text_span(span: &raw::pdbg_text_span) -> TextSpan {
     }
 }
 
+pub(crate) unsafe fn visual_element(element: &raw::pdbg_visual_element) -> VisualElement {
+    VisualElement {
+        kind: match element.kind {
+            raw::pdbg_visual_kind::PDBG_VISUAL_TEXT => VisualElementKind::Text,
+            raw::pdbg_visual_kind::PDBG_VISUAL_IMAGE => VisualElementKind::Image,
+            raw::pdbg_visual_kind::PDBG_VISUAL_VECTOR => VisualElementKind::Vector,
+            raw::pdbg_visual_kind::PDBG_VISUAL_GRID => VisualElementKind::Grid,
+            raw::pdbg_visual_kind::PDBG_VISUAL_UNKNOWN => VisualElementKind::Unknown,
+        },
+        bbox: PageRect {
+            x: element.x,
+            y: element.y,
+            width: element.width,
+            height: element.height,
+        },
+        object: optional_object_id(element.object, element.has_object),
+        untrusted: element.untrusted != 0,
+    }
+}
+
 pub(crate) unsafe fn diagnostic_list(
     list: *const raw::pdbg_diagnostic_list,
     resolve_node: &dyn Fn(&raw::pdbg_node_id) -> Option<NodeId>,

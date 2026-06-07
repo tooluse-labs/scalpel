@@ -36,6 +36,11 @@ pub struct pdbg_text_page {
 }
 
 #[repr(C)]
+pub struct pdbg_visual_page {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct pdbg_cancel_token {
     _private: [u8; 0],
 }
@@ -276,6 +281,39 @@ pub struct pdbg_text_span {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum pdbg_visual_kind {
+    PDBG_VISUAL_TEXT = 0,
+    PDBG_VISUAL_IMAGE = 1,
+    PDBG_VISUAL_VECTOR = 2,
+    PDBG_VISUAL_GRID = 3,
+    PDBG_VISUAL_UNKNOWN = 255,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct pdbg_visual_options {
+    pub include_text: c_int,
+    pub include_images: c_int,
+    pub include_vectors: c_int,
+    pub max_elements: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct pdbg_visual_element {
+    pub kind: pdbg_visual_kind,
+    pub x: c_float,
+    pub y: c_float,
+    pub width: c_float,
+    pub height: c_float,
+    pub page_index: u32,
+    pub object: pdbg_object_id,
+    pub has_object: c_int,
+    pub untrusted: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum pdbg_repair_policy {
     PDBG_REPAIR_DEFAULT = 0,
     PDBG_REPAIR_NEVER = 1,
@@ -465,10 +503,20 @@ unsafe extern "C" {
         err: *mut pdbg_error,
     ) -> pdbg_status;
 
+    pub fn pdbg_page_extract_visuals(
+        doc: *mut pdbg_doc,
+        page_index: u32,
+        options: *const pdbg_visual_options,
+        cancel: *mut pdbg_cancel_token,
+        out: *mut *mut pdbg_visual_page,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+
     pub fn pdbg_buffer_drop(buffer: *mut pdbg_buffer);
     pub fn pdbg_image_drop(image: *mut pdbg_image);
     pub fn pdbg_node_list_drop(list: *mut pdbg_node_list);
     pub fn pdbg_text_page_drop(text: *mut pdbg_text_page);
+    pub fn pdbg_visual_page_drop(visuals: *mut pdbg_visual_page);
     pub fn pdbg_document_summary_out_drop(out: *mut pdbg_document_summary_out);
     pub fn pdbg_object_detail_out_drop(out: *mut pdbg_object_detail_out);
 
@@ -519,6 +567,14 @@ unsafe extern "C" {
         text: *const pdbg_text_page,
         index: usize,
         out: *mut pdbg_text_span,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+
+    pub fn pdbg_visual_page_element_count(visuals: *const pdbg_visual_page) -> usize;
+    pub fn pdbg_visual_page_element_get(
+        visuals: *const pdbg_visual_page,
+        index: usize,
+        out: *mut pdbg_visual_element,
         err: *mut pdbg_error,
     ) -> pdbg_status;
 

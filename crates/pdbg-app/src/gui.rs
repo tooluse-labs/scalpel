@@ -11,9 +11,9 @@ use pdbg_core::{
     ObjectSearchResult, ObjectSummary, ObjectValue, PageRect, RenderRequest, RenderResult,
     RenderResultCache, ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary,
     StreamViewMode, TextPage, TextPageCache, TextRequest, TextSearchHit, TextSearchRequest,
-    TextSearchResult, TextSpan,
+    TextSearchResult, TextSpan, VisualElement, VisualElementKind, VisualPage, VisualRequest,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,12 +41,16 @@ const TEXT_SEARCH_MAX_PAGES: usize = 64;
 const TEXT_SEARCH_MAX_RESULTS: usize = 100;
 const TEXT_SEARCH_MAX_CHARS_PER_PAGE: usize = 512 * 1024;
 const TEXT_SEARCH_MAX_BLOCKS_PER_PAGE: usize = 50_000;
+const VISUAL_CLICK_MAX_ELEMENTS_PER_PAGE: usize = 200_000;
+const VISUAL_CLICK_CACHE_MAX_PAGES: usize = 8;
+const VISUAL_CLICK_CACHE_MAX_ELEMENTS: usize = 400_000;
 const MARKDOWN_REPORT_LIMIT_BYTES: usize = 64 * 1024;
 const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
+const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
 const APP_TITLE: &str = "pdbg Preview";
 const LEFT_PANEL_MIN_WIDTH: f32 = 220.0;
 const LEFT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
@@ -779,6 +783,85 @@ struct PagePreviewClick {
     normalized_y: f32,
 }
 
+#[derive(Clone, Debug)]
+struct PreviewVisualHit {
+    page_index: usize,
+    element_index: usize,
+    kind: VisualElementKind,
+    bbox: PageRect,
+    object: Option<ObjectId>,
+    untrusted: bool,
+    contains_click: bool,
+}
+
+#[derive(Clone, Debug)]
+struct VisualPageCache {
+    entries: VecDeque<VisualPageCacheEntry>,
+    max_pages: usize,
+    max_elements: usize,
+    current_elements: usize,
+}
+
+#[derive(Clone, Debug)]
+struct VisualPageCacheEntry {
+    page: VisualPage,
+    element_count: usize,
+}
+
+impl VisualPageCache {
+    fn new(max_pages: usize, max_elements: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_pages: max_pages.max(1),
+            max_elements: max_elements.max(1),
+            current_elements: 0,
+        }
+    }
+
+    fn get(&mut self, page_index: usize) -> Option<VisualPage> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.page.page_index == page_index)?;
+        let entry = self.entries.remove(index)?;
+        let page = entry.page.clone();
+        self.entries.push_back(entry);
+        Some(page)
+    }
+
+    fn insert(&mut self, page: VisualPage) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.page.page_index == page.page_index)
+        {
+            if let Some(entry) = self.entries.remove(index) {
+                self.current_elements = self.current_elements.saturating_sub(entry.element_count);
+            }
+        }
+
+        let element_count = page.elements.len();
+        if element_count > self.max_elements {
+            return;
+        }
+        self.current_elements += element_count;
+        self.entries.push_back(VisualPageCacheEntry {
+            page,
+            element_count,
+        });
+        self.evict_to_budget();
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.max_pages || self.current_elements > self.max_elements {
+            let Some(entry) = self.entries.pop_front() else {
+                break;
+            };
+            self.current_elements = self.current_elements.saturating_sub(entry.element_count);
+        }
+    }
+}
+
 fn real_preview_pager_label(page_index: usize, page_count: usize) -> String {
     format!("Page {} / {}", page_index + 1, page_count.max(1))
 }
@@ -829,8 +912,59 @@ fn text_hit_from_page_click(
         .map(|(index, span, _)| text_span_to_hit(page.page_index, index, span))
 }
 
+fn visual_hit_from_page_click(
+    page: &VisualPage,
+    click: PagePreviewClick,
+    zoom: f32,
+) -> Option<PreviewVisualHit> {
+    let (page_x, page_y) = page_point_from_preview_click(click, zoom)?;
+    page.elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| element.bbox.width > 0.0 && element.bbox.height > 0.0)
+        .filter_map(|(index, element)| {
+            let contains = rect_contains_point(&element.bbox, page_x, page_y);
+            let distance_sq = rect_distance_sq_to_point(&element.bbox, page_x, page_y);
+            let tolerance_sq = VISUAL_CLICK_BBOX_TOLERANCE_PT * VISUAL_CLICK_BBOX_TOLERANCE_PT;
+            (contains || distance_sq <= tolerance_sq).then_some((
+                index,
+                element,
+                contains,
+                distance_sq,
+                rect_area(&element.bbox),
+            ))
+        })
+        .min_by(|left, right| {
+            let left_contains = left.2 as u8;
+            let right_contains = right.2 as u8;
+            right_contains
+                .cmp(&left_contains)
+                .then_with(|| {
+                    left.4
+                        .partial_cmp(&right.4)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    left.3
+                        .partial_cmp(&right.3)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+        .map(|(index, element, contains_click, _, _)| {
+            visual_element_to_hit(page.page_index, index, element, contains_click)
+        })
+}
+
 fn page_point_from_preview_click(click: PagePreviewClick, zoom: f32) -> Option<(f32, f32)> {
     (zoom > 0.0).then_some((click.render_x / zoom, click.render_y / zoom))
+}
+
+fn rect_contains_point(rect: &PageRect, x: f32, y: f32) -> bool {
+    x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+}
+
+fn rect_area(rect: &PageRect) -> f32 {
+    (rect.width.max(0.0)) * (rect.height.max(0.0))
 }
 
 fn rect_distance_sq_to_point(rect: &PageRect, x: f32, y: f32) -> f32 {
@@ -858,6 +992,23 @@ fn text_span_to_hit(page_index: usize, span_index: usize, span: &TextSpan) -> Te
         excerpt: span.text.clone(),
         bbox: Some(span.bbox.clone()),
         untrusted: span.untrusted,
+    }
+}
+
+fn visual_element_to_hit(
+    page_index: usize,
+    element_index: usize,
+    element: &VisualElement,
+    contains_click: bool,
+) -> PreviewVisualHit {
+    PreviewVisualHit {
+        page_index,
+        element_index,
+        kind: element.kind,
+        bbox: element.bbox.clone(),
+        object: element.object,
+        untrusted: element.untrusted,
+        contains_click,
     }
 }
 
@@ -912,7 +1063,9 @@ pub struct GuiShellApp {
     text_search_error: Option<String>,
     text_search_job: Option<RealTextSearchJob>,
     text_search_cache: TextPageCache,
+    visual_page_cache: VisualPageCache,
     selected_text_hit: Option<TextSearchHit>,
+    selected_visual_hit: Option<PreviewVisualHit>,
     preview_click: Option<PagePreviewClick>,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
@@ -1032,7 +1185,12 @@ impl GuiShellApp {
                 TEXT_SEARCH_CACHE_MAX_PAGES,
                 TEXT_SEARCH_CACHE_MAX_BYTES,
             ),
+            visual_page_cache: VisualPageCache::new(
+                VISUAL_CLICK_CACHE_MAX_PAGES,
+                VISUAL_CLICK_CACHE_MAX_ELEMENTS,
+            ),
             selected_text_hit: None,
+            selected_visual_hit: None,
             preview_click: None,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
@@ -1266,6 +1424,7 @@ impl GuiShellApp {
             self.text_search_result = None;
             self.text_search_error = None;
             self.selected_text_hit = None;
+            self.selected_visual_hit = None;
             return;
         }
 
@@ -1322,6 +1481,7 @@ impl GuiShellApp {
         self.text_search_result = None;
         self.text_search_error = None;
         self.selected_text_hit = None;
+        self.selected_visual_hit = None;
         self.text_search_job = Some(RealTextSearchJob {
             query: self.text_search_query.trim().to_string(),
             cancel,
@@ -1388,8 +1548,9 @@ impl GuiShellApp {
     }
 
     fn follow_text_search_hit(&mut self, hit: &TextSearchHit) {
-        self.selected_text_hit = Some(hit.clone());
         self.set_render_page(hit.page_index);
+        self.selected_text_hit = Some(hit.clone());
+        self.selected_visual_hit = None;
         self.status_log.push(format!(
             "opened text search hit page {} span {}",
             hit.page_index + 1,
@@ -1718,6 +1879,8 @@ impl GuiShellApp {
         }
         self.render_page_index = page_index;
         self.preview_click = None;
+        self.selected_text_hit = None;
+        self.selected_visual_hit = None;
         self.refresh_real_render();
     }
 
@@ -1769,6 +1932,59 @@ impl GuiShellApp {
         } else {
             self.status_log.push(format!(
                 "no text bbox at page {} preview click",
+                click.page_index + 1
+            ));
+        }
+    }
+
+    fn select_visual_hit_for_preview_click(&mut self, click: PagePreviewClick) {
+        self.selected_visual_hit = None;
+        if self.render_rotation_degrees != 0 {
+            self.status_log.push(
+                "preview visual bbox hit-test is only available at 0 deg rotation".to_string(),
+            );
+            return;
+        }
+
+        let page = if let Some(page) = self.visual_page_cache.get(click.page_index) {
+            page
+        } else {
+            let Ok(state) = self.state.as_ref() else {
+                self.status_log
+                    .push("preview visual bbox hit-test skipped: document is not open".to_string());
+                return;
+            };
+            let mut request = VisualRequest::page(click.page_index);
+            request.max_elements = VISUAL_CLICK_MAX_ELEMENTS_PER_PAGE;
+            match state
+                .session
+                .run_task(|document| document.extract_visuals(&request))
+            {
+                Ok(page) => {
+                    self.visual_page_cache.insert(page.clone());
+                    page
+                }
+                Err(err) => {
+                    self.status_log.push(format!(
+                        "preview visual bbox hit-test page {} failed: {}",
+                        click.page_index + 1,
+                        err.message
+                    ));
+                    return;
+                }
+            }
+        };
+
+        if let Some(hit) = visual_hit_from_page_click(&page, click, self.render_zoom) {
+            self.status_log.push(format!(
+                "selected visual bbox page {} element {}",
+                hit.page_index + 1,
+                hit.element_index
+            ));
+            self.selected_visual_hit = Some(hit);
+        } else {
+            self.status_log.push(format!(
+                "no visual bbox at page {} preview click",
                 click.page_index + 1
             ));
         }
@@ -2597,6 +2813,16 @@ fn object_ref_text(object: ObjectId) -> String {
     format!("{} {} R", object.num, object.gen)
 }
 
+fn visual_object_text(hit: Option<&PreviewVisualHit>) -> String {
+    match hit {
+        None => "-".to_string(),
+        Some(hit) => hit
+            .object
+            .map(object_ref_text)
+            .unwrap_or_else(|| "not extracted by visual shim".to_string()),
+    }
+}
+
 fn text_search_status_label(
     result: Option<&TextSearchResult>,
     error: Option<&str>,
@@ -2680,6 +2906,33 @@ fn text_hit_bbox_image_rect(
         return None;
     }
     let bbox = hit.bbox.as_ref()?;
+    page_bbox_image_rect(bbox, image_rect, render_width, render_height, zoom)
+}
+
+fn visual_hit_bbox_image_rect(
+    hit: &PreviewVisualHit,
+    image_rect: egui::Rect,
+    render_width: u32,
+    render_height: u32,
+    zoom: f32,
+    rotation_degrees: i32,
+) -> Option<egui::Rect> {
+    if rotation_degrees != 0 || render_width == 0 || render_height == 0 || zoom <= 0.0 {
+        return None;
+    }
+    page_bbox_image_rect(&hit.bbox, image_rect, render_width, render_height, zoom)
+}
+
+fn page_bbox_image_rect(
+    bbox: &PageRect,
+    image_rect: egui::Rect,
+    render_width: u32,
+    render_height: u32,
+    zoom: f32,
+) -> Option<egui::Rect> {
+    if bbox.width <= 0.0 || bbox.height <= 0.0 {
+        return None;
+    }
     let left = image_rect.left() + (bbox.x * zoom / render_width as f32) * image_rect.width();
     let top = image_rect.top() + (bbox.y * zoom / render_height as f32) * image_rect.height();
     let right = image_rect.left()
@@ -3292,7 +3545,12 @@ impl GuiShellApp {
         self.text_search_error = None;
         self.text_search_cache =
             TextPageCache::new(TEXT_SEARCH_CACHE_MAX_PAGES, TEXT_SEARCH_CACHE_MAX_BYTES);
+        self.visual_page_cache = VisualPageCache::new(
+            VISUAL_CLICK_CACHE_MAX_PAGES,
+            VISUAL_CLICK_CACHE_MAX_ELEMENTS,
+        );
         self.selected_text_hit = None;
+        self.selected_visual_hit = None;
         self.preview_click = None;
         self.copied_excerpt = None;
         self.status_log = model.status_log;
@@ -3597,6 +3855,7 @@ impl GuiShellApp {
             self.text_search_result = None;
             self.text_search_error = None;
             self.selected_text_hit = None;
+            self.selected_visual_hit = None;
         } else if cancel_search {
             self.cancel_text_search_job();
         } else if run_search {
@@ -3823,6 +4082,11 @@ impl GuiShellApp {
             .as_ref()
             .filter(|hit| hit.page_index == render_page_index)
             .cloned();
+        let selected_visual_hit = self
+            .selected_visual_hit
+            .as_ref()
+            .filter(|hit| hit.page_index == render_page_index)
+            .cloned();
 
         let display_size = page_preview_display_size(
             texture_size,
@@ -3860,11 +4124,29 @@ impl GuiShellApp {
                             self.preview_click = click;
                             if let Some(click) = click {
                                 self.select_text_hit_for_preview_click(click);
+                                self.select_visual_hit_for_preview_click(click);
                             }
                             self.selected_tab = InspectorTab::Object;
                         }
                     }
                     let painter = ui.painter_at(image_rect);
+                    if let Some(hit) = &selected_visual_hit {
+                        if let Some(rect) = visual_hit_bbox_image_rect(
+                            hit,
+                            image_rect,
+                            render_width,
+                            render_height,
+                            render_zoom,
+                            render_rotation,
+                        ) {
+                            painter.rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(2.0, PdbgTheme::ACCENT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
                     if let Some(hit) = &selected_hit {
                         if let Some(rect) = text_hit_bbox_image_rect(
                             hit,
@@ -4326,8 +4608,48 @@ impl GuiShellApp {
                     truncated_monospace(ui, text_bbox);
                     ui.end_row();
 
-                    ui.label("object bbox");
-                    truncated_monospace(ui, "not wired in current pdbg shim");
+                    let visual_hit = self
+                        .selected_visual_hit
+                        .as_ref()
+                        .filter(|hit| hit.page_index == click.page_index);
+
+                    ui.label("visual kind");
+                    truncated_monospace(
+                        ui,
+                        visual_hit
+                            .map(|hit| {
+                                format!(
+                                    "{} #{}{}{}",
+                                    hit.kind.as_public_str(),
+                                    hit.element_index,
+                                    if hit.contains_click {
+                                        " contains"
+                                    } else {
+                                        " near"
+                                    },
+                                    if hit.untrusted { " untrusted" } else { "" }
+                                )
+                            })
+                            .unwrap_or_else(|| "-".to_string()),
+                    );
+                    ui.end_row();
+
+                    ui.label("visual bbox");
+                    truncated_monospace(
+                        ui,
+                        visual_hit
+                            .map(|hit| {
+                                format!(
+                                    "x={:.1} y={:.1} w={:.1} h={:.1}",
+                                    hit.bbox.x, hit.bbox.y, hit.bbox.width, hit.bbox.height
+                                )
+                            })
+                            .unwrap_or_else(|| "-".to_string()),
+                    );
+                    ui.end_row();
+
+                    ui.label("object attribution");
+                    truncated_monospace(ui, visual_object_text(visual_hit));
                     ui.end_row();
                 });
         });
@@ -5538,6 +5860,132 @@ mod tests {
             ..click
         };
         assert!(text_hit_from_page_click(&page, miss, 2.0).is_none());
+    }
+
+    #[test]
+    fn preview_click_hit_tests_visual_bbox_in_page_space() {
+        let page = VisualPage {
+            page_index: 2,
+            elements: vec![
+                VisualElement {
+                    kind: VisualElementKind::Text,
+                    bbox: PageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 500.0,
+                        height: 500.0,
+                    },
+                    object: None,
+                    untrusted: true,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Image,
+                    bbox: PageRect {
+                        x: 100.0,
+                        y: 50.0,
+                        width: 200.0,
+                        height: 80.0,
+                    },
+                    object: Some(ObjectId { num: 12, gen: 0 }),
+                    untrusted: false,
+                },
+            ],
+        };
+        let click = PagePreviewClick {
+            page_index: 2,
+            render_x: 300.0,
+            render_y: 140.0,
+            normalized_x: 0.0,
+            normalized_y: 0.0,
+        };
+
+        let hit = visual_hit_from_page_click(&page, click, 2.0).unwrap();
+        assert_eq!(hit.page_index, 2);
+        assert_eq!(hit.element_index, 1);
+        assert_eq!(hit.kind, VisualElementKind::Image);
+        assert_eq!(hit.object, Some(ObjectId { num: 12, gen: 0 }));
+        assert!(hit.contains_click);
+
+        let miss = PagePreviewClick {
+            render_x: 2.0,
+            render_y: 2.0,
+            ..click
+        };
+        assert!(visual_hit_from_page_click(&page, miss, 2.0).is_none());
+    }
+
+    #[test]
+    fn visual_page_cache_reuses_lru_and_respects_element_budget() {
+        let mut cache = VisualPageCache::new(2, 3);
+        cache.insert(VisualPage {
+            page_index: 1,
+            elements: vec![visual_test_element(1.0)],
+        });
+        cache.insert(VisualPage {
+            page_index: 2,
+            elements: vec![visual_test_element(2.0)],
+        });
+
+        assert!(cache.get(1).is_some());
+        cache.insert(VisualPage {
+            page_index: 3,
+            elements: vec![visual_test_element(3.0)],
+        });
+
+        assert!(cache.get(2).is_none());
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(3).is_some());
+
+        cache.insert(VisualPage {
+            page_index: 4,
+            elements: vec![
+                visual_test_element(4.0),
+                visual_test_element(5.0),
+                visual_test_element(6.0),
+                visual_test_element(7.0),
+            ],
+        });
+        assert!(cache.get(4).is_none());
+    }
+
+    #[test]
+    fn visual_object_text_distinguishes_unextracted_from_absent_hit() {
+        let mut hit = PreviewVisualHit {
+            page_index: 0,
+            element_index: 0,
+            kind: VisualElementKind::Text,
+            bbox: PageRect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            object: None,
+            untrusted: true,
+            contains_click: true,
+        };
+
+        assert_eq!(visual_object_text(None), "-");
+        assert_eq!(
+            visual_object_text(Some(&hit)),
+            "not extracted by visual shim"
+        );
+        hit.object = Some(ObjectId { num: 12, gen: 0 });
+        assert_eq!(visual_object_text(Some(&hit)), "12 0 R");
+    }
+
+    fn visual_test_element(x: f32) -> VisualElement {
+        VisualElement {
+            kind: VisualElementKind::Text,
+            bbox: PageRect {
+                x,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            object: None,
+            untrusted: true,
+        }
     }
 
     #[cfg(not(feature = "real-mupdf"))]

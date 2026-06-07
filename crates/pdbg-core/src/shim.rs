@@ -71,6 +71,7 @@ pub trait ShimDocument {
     ) -> Result<StreamChunk, ShimError>;
     fn render_page(&mut self, request: &RenderRequest) -> Result<RenderResult, ShimError>;
     fn extract_text(&mut self, request: &TextRequest) -> Result<TextPage, ShimError>;
+    fn extract_visuals(&mut self, request: &VisualRequest) -> Result<VisualPage, ShimError>;
 }
 
 pub struct FakeShim {
@@ -265,6 +266,10 @@ impl ShimDocument for OpenDocument {
     fn extract_text(&mut self, request: &TextRequest) -> Result<TextPage, ShimError> {
         self.doc.extract_text(request)
     }
+
+    fn extract_visuals(&mut self, request: &VisualRequest) -> Result<VisualPage, ShimError> {
+        self.doc.extract_visuals(request)
+    }
 }
 
 impl OpenDocument {
@@ -314,6 +319,15 @@ impl OpenDocument {
     ) -> Result<TextPage, ShimError> {
         self.doc
             .extract_text_with_cancel(request, cancel.as_mut_ptr())
+    }
+
+    pub fn extract_visuals_with_cancel_token(
+        &mut self,
+        request: &VisualRequest,
+        cancel: &CancelToken,
+    ) -> Result<VisualPage, ShimError> {
+        self.doc
+            .extract_visuals_with_cancel(request, cancel.as_mut_ptr())
     }
 }
 
@@ -694,6 +708,38 @@ impl PdbgDoc {
             Ok(text.to_text_page(request.page_index))
         }
     }
+
+    fn extract_visuals(&self, request: &VisualRequest) -> Result<VisualPage, ShimError> {
+        self.extract_visuals_with_cancel(request, ptr::null_mut())
+    }
+
+    fn extract_visuals_with_cancel(
+        &self,
+        request: &VisualRequest,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<VisualPage, ShimError> {
+        unsafe {
+            let options = raw::pdbg_visual_options {
+                include_text: request.include_text as i32,
+                include_images: request.include_images as i32,
+                include_vectors: request.include_vectors as i32,
+                max_elements: request.max_elements,
+            };
+            let mut visuals = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_page_extract_visuals(
+                self.raw.as_ptr(),
+                page_index_to_u32(request.page_index)?,
+                &options,
+                cancel,
+                &mut visuals,
+                &mut err,
+            );
+            check_status(status, &err)?;
+            let visuals = PdbgVisualPage::new(visuals)?;
+            Ok(visuals.to_visual_page(request.page_index))
+        }
+    }
 }
 
 impl Drop for PdbgDoc {
@@ -885,6 +931,46 @@ impl PdbgTextPage {
 impl Drop for PdbgTextPage {
     fn drop(&mut self) {
         unsafe { raw::pdbg_text_page_drop(self.raw.as_ptr()) }
+    }
+}
+
+struct PdbgVisualPage {
+    raw: NonNull<raw::pdbg_visual_page>,
+}
+
+impl PdbgVisualPage {
+    fn new(raw: *mut raw::pdbg_visual_page) -> Result<Self, ShimError> {
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "visual page accessor returned null",
+            )
+        })?;
+        Ok(Self { raw })
+    }
+
+    unsafe fn to_visual_page(&self, page_index: usize) -> VisualPage {
+        let len = raw::pdbg_visual_page_element_count(self.raw.as_ptr());
+        let mut elements = Vec::with_capacity(len);
+        for index in 0..len {
+            let mut element = std::mem::zeroed::<raw::pdbg_visual_element>();
+            let mut err = raw::pdbg_error::default();
+            if raw::pdbg_visual_page_element_get(self.raw.as_ptr(), index, &mut element, &mut err)
+                == raw::pdbg_status::PDBG_OK
+            {
+                elements.push(wire::visual_element(&element));
+            }
+        }
+        VisualPage {
+            page_index,
+            elements,
+        }
+    }
+}
+
+impl Drop for PdbgVisualPage {
+    fn drop(&mut self) {
+        unsafe { raw::pdbg_visual_page_drop(self.raw.as_ptr()) }
     }
 }
 
@@ -1242,6 +1328,17 @@ mod tests {
         let text = doc.extract_text(&TextRequest::page(0)).unwrap();
         assert_eq!(text.spans[0].text.as_bytes(), b"A\0B");
         assert!(text.spans[0].untrusted);
+
+        let visuals = doc.extract_visuals(&VisualRequest::page(0)).unwrap();
+        assert_eq!(visuals.page_index, 0);
+        assert!(visuals
+            .elements
+            .iter()
+            .any(|element| element.kind == VisualElementKind::Text));
+        assert!(visuals
+            .elements
+            .iter()
+            .any(|element| element.kind == VisualElementKind::Image));
     }
 
     #[cfg(all(feature = "fake", not(feature = "real-mupdf")))]
@@ -1273,6 +1370,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(text_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
 
+        let visual_err = doc
+            .extract_visuals_with_cancel_token(&VisualRequest::page(0), &cancel)
+            .unwrap_err();
+        assert_eq!(visual_err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+
         let summary = doc.summary().unwrap();
         assert_eq!(summary.file_path, "fake.pdf");
         let render = doc.render_page(&RenderRequest::page(0)).unwrap();
@@ -1301,6 +1403,24 @@ mod tests {
         default_block_limit.max_blocks = 0;
         let text = doc.extract_text(&default_block_limit).unwrap();
         assert_eq!(text.spans.len(), 2);
+    }
+
+    #[cfg(all(feature = "fake", not(feature = "real-mupdf")))]
+    #[test]
+    fn fake_visual_options_enforce_element_limit() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+
+        let mut limited = VisualRequest::page(0);
+        limited.max_elements = 2;
+        let err = doc.extract_visuals(&limited).unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
+        assert!(err.message.contains("element limit"));
+
+        let mut default_limit = VisualRequest::page(0);
+        default_limit.max_elements = 0;
+        let visuals = doc.extract_visuals(&default_limit).unwrap();
+        assert_eq!(visuals.elements.len(), 3);
     }
 
     #[cfg(feature = "fake")]

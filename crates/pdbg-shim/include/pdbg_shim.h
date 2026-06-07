@@ -35,6 +35,7 @@ typedef struct pdbg_image pdbg_image;
 typedef struct pdbg_node_list pdbg_node_list;
 typedef struct pdbg_diagnostic_list pdbg_diagnostic_list;
 typedef struct pdbg_text_page pdbg_text_page;
+typedef struct pdbg_visual_page pdbg_visual_page;
 typedef struct pdbg_cancel_token pdbg_cancel_token;
 
 typedef struct pdbg_object_id {
@@ -206,6 +207,33 @@ typedef struct pdbg_text_span {
     int untrusted;
 } pdbg_text_span;
 
+typedef enum pdbg_visual_kind {
+    PDBG_VISUAL_TEXT = 0,
+    PDBG_VISUAL_IMAGE = 1,
+    PDBG_VISUAL_VECTOR = 2,
+    PDBG_VISUAL_GRID = 3,
+    PDBG_VISUAL_UNKNOWN = 255
+} pdbg_visual_kind;
+
+typedef struct pdbg_visual_options {
+    int include_text;
+    int include_images;
+    int include_vectors;
+    size_t max_elements;
+} pdbg_visual_options;
+
+typedef struct pdbg_visual_element {
+    pdbg_visual_kind kind;
+    float x;
+    float y;
+    float width;
+    float height;
+    uint32_t page_index;
+    pdbg_object_id object;
+    int has_object;
+    int untrusted;
+} pdbg_visual_element;
+
 typedef enum pdbg_repair_policy {
     PDBG_REPAIR_DEFAULT = 0,
     PDBG_REPAIR_NEVER = 1,
@@ -369,10 +397,19 @@ pdbg_status pdbg_page_extract_text(
     pdbg_text_page **out,
     pdbg_error *err);
 
+pdbg_status pdbg_page_extract_visuals(
+    pdbg_doc *doc,
+    uint32_t page_index,
+    const pdbg_visual_options *options,
+    pdbg_cancel_token *cancel,
+    pdbg_visual_page **out,
+    pdbg_error *err);
+
 void pdbg_buffer_drop(pdbg_buffer *buffer);
 void pdbg_image_drop(pdbg_image *image);
 void pdbg_node_list_drop(pdbg_node_list *list);
 void pdbg_text_page_drop(pdbg_text_page *text);
+void pdbg_visual_page_drop(pdbg_visual_page *visuals);
 void pdbg_document_summary_out_drop(pdbg_document_summary_out *out);
 void pdbg_object_detail_out_drop(pdbg_object_detail_out *out);
 
@@ -419,6 +456,13 @@ pdbg_status pdbg_text_page_span_get(
     const pdbg_text_page *text,
     size_t index,
     pdbg_text_span *out,
+    pdbg_error *err);
+
+size_t pdbg_visual_page_element_count(const pdbg_visual_page *visuals);
+pdbg_status pdbg_visual_page_element_get(
+    const pdbg_visual_page *visuals,
+    size_t index,
+    pdbg_visual_element *out,
     pdbg_error *err);
 
 pdbg_status pdbg_test_invoke_callback(

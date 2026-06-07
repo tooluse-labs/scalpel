@@ -508,6 +508,27 @@ impl TextRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct VisualRequest {
+    pub page_index: usize,
+    pub include_text: bool,
+    pub include_images: bool,
+    pub include_vectors: bool,
+    pub max_elements: usize,
+}
+
+impl VisualRequest {
+    pub fn page(page_index: usize) -> Self {
+        Self {
+            page_index,
+            include_text: true,
+            include_images: true,
+            include_vectors: true,
+            max_elements: 200_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TextPage {
     pub page_index: usize,
     pub spans: Vec<TextSpan>,
@@ -517,6 +538,41 @@ pub struct TextPage {
 pub struct TextSpan {
     pub text: String,
     pub bbox: PageRect,
+    pub untrusted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct VisualPage {
+    pub page_index: usize,
+    pub elements: Vec<VisualElement>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VisualElementKind {
+    Text,
+    Image,
+    Vector,
+    Grid,
+    Unknown,
+}
+
+impl VisualElementKind {
+    pub fn as_public_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Vector => "vector",
+            Self::Grid => "grid",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VisualElement {
+    pub kind: VisualElementKind,
+    pub bbox: PageRect,
+    pub object: Option<ObjectId>,
     pub untrusted: bool,
 }
 

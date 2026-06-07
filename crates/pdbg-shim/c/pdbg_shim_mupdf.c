@@ -148,6 +148,11 @@ struct pdbg_text_page {
     pdbg_text_span *spans;
 };
 
+struct pdbg_visual_page {
+    size_t len;
+    pdbg_visual_element *items;
+};
+
 struct pdbg_cancel_token {
     atomic_int cancelled;
     pdbg_mutex_t mutex;
@@ -189,6 +194,7 @@ typedef struct pdbg_warning_capture {
 #define PDBG_DEFAULT_MAX_OBJECT_DEPTH 128U
 #define PDBG_DEFAULT_MAX_TEXT_CHARS 1000000ULL
 #define PDBG_DEFAULT_MAX_TEXT_BLOCKS 100000ULL
+#define PDBG_DEFAULT_MAX_VISUAL_ELEMENTS 200000ULL
 
 static void apply_open_options(pdbg_doc *doc, const pdbg_open_options *options)
 {
@@ -438,6 +444,14 @@ static void free_text_page(pdbg_text_page *text)
         free(text->spans[i].text);
     free(text->spans);
     free(text);
+}
+
+static void free_visual_page(pdbg_visual_page *visuals)
+{
+    if (!visuals)
+        return;
+    free(visuals->items);
+    free(visuals);
 }
 
 static size_t encode_utf8_codepoint(int codepoint, char out[4])
@@ -709,6 +723,147 @@ static int append_stext_blocks(
                 cancel,
                 status,
                 err);
+    }
+
+    return *status == PDBG_OK;
+}
+
+static pdbg_visual_kind visual_kind_from_stext_block(int type)
+{
+    switch (type) {
+    case FZ_STEXT_BLOCK_TEXT:
+        return PDBG_VISUAL_TEXT;
+    case FZ_STEXT_BLOCK_IMAGE:
+        return PDBG_VISUAL_IMAGE;
+    case FZ_STEXT_BLOCK_VECTOR:
+        return PDBG_VISUAL_VECTOR;
+    case FZ_STEXT_BLOCK_GRID:
+        return PDBG_VISUAL_GRID;
+    default:
+        return PDBG_VISUAL_UNKNOWN;
+    }
+}
+
+static int append_visual_element(
+    pdbg_visual_page *page,
+    uint32_t page_index,
+    pdbg_visual_kind kind,
+    fz_rect bbox,
+    fz_rect page_bounds,
+    size_t max_elements,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    if (!page || *status != PDBG_OK)
+        return 0;
+
+    if (bbox.x0 < page_bounds.x0)
+        bbox.x0 = page_bounds.x0;
+    if (bbox.y0 < page_bounds.y0)
+        bbox.y0 = page_bounds.y0;
+    if (bbox.x1 > page_bounds.x1)
+        bbox.x1 = page_bounds.x1;
+    if (bbox.y1 > page_bounds.y1)
+        bbox.y1 = page_bounds.y1;
+    if (bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0)
+        return 1;
+
+    if (page->len >= max_elements) {
+        *status = PDBG_ERROR_LIMIT;
+        set_error(err, *status, "visual extraction exceeded configured element limit");
+        return 0;
+    }
+
+    pdbg_visual_element *items =
+        (pdbg_visual_element *)realloc(page->items, (page->len + 1) * sizeof(pdbg_visual_element));
+    if (!items) {
+        *status = PDBG_ERROR_OOM;
+        set_error(err, *status, "out of memory");
+        return 0;
+    }
+
+    page->items = items;
+    pdbg_visual_element *element = &page->items[page->len];
+    memset(element, 0, sizeof(*element));
+    element->kind = kind;
+    element->x = bbox.x0 - page_bounds.x0;
+    element->y = bbox.y0 - page_bounds.y0;
+    element->width = bbox.x1 - bbox.x0;
+    element->height = bbox.y1 - bbox.y0;
+    element->page_index = page_index;
+    element->untrusted = 1;
+    page->len += 1;
+    return 1;
+}
+
+static int append_stext_visual_blocks(
+    pdbg_visual_page *visuals,
+    uint32_t page_index,
+    fz_stext_block *block,
+    fz_rect page_bounds,
+    int include_text,
+    int include_images,
+    int include_vectors,
+    size_t max_elements,
+    pdbg_cancel_token *cancel,
+    size_t depth,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    if (depth > PDBG_STEXT_MAX_STRUCT_DEPTH) {
+        *status = PDBG_ERROR_LIMIT;
+        set_error(err, *status, "visual structure nesting exceeded configured depth limit");
+        return 0;
+    }
+
+    for (; block && *status == PDBG_OK; block = block->next) {
+        if (cancel && atomic_load(&cancel->cancelled)) {
+            *status = PDBG_ERROR_CANCELLED;
+            set_error(err, *status, "cancelled");
+            return 0;
+        }
+
+        if (block->type == FZ_STEXT_BLOCK_STRUCT) {
+            if (block->u.s.down &&
+                !append_stext_visual_blocks(
+                    visuals,
+                    page_index,
+                    block->u.s.down->first_block,
+                    page_bounds,
+                    include_text,
+                    include_images,
+                    include_vectors,
+                    max_elements,
+                    cancel,
+                    depth + 1,
+                    status,
+                    err)) {
+                return 0;
+            }
+            continue;
+        }
+
+        int include = 0;
+        if (block->type == FZ_STEXT_BLOCK_TEXT)
+            include = include_text;
+        else if (block->type == FZ_STEXT_BLOCK_IMAGE)
+            include = include_images;
+        else if (block->type == FZ_STEXT_BLOCK_VECTOR || block->type == FZ_STEXT_BLOCK_GRID)
+            include = include_vectors;
+        if (!include)
+            continue;
+
+        if (!append_visual_element(
+                visuals,
+                page_index,
+                visual_kind_from_stext_block(block->type),
+                block->bbox,
+                page_bounds,
+                max_elements,
+                status,
+                err)) {
+            return 0;
+        }
     }
 
     return *status == PDBG_OK;
@@ -2841,6 +2996,129 @@ pdbg_status pdbg_page_extract_text(
     return PDBG_OK;
 }
 
+pdbg_status pdbg_page_extract_visuals(
+    pdbg_doc *doc,
+    uint32_t page_index,
+    const pdbg_visual_options *options,
+    pdbg_cancel_token *cancel,
+    pdbg_visual_page **out,
+    pdbg_error *err)
+{
+    if (!doc || !out) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid visual arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before visual extraction");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && atomic_load(&cancel->cancelled)) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+
+    int include_text = !options || options->include_text;
+    int include_images = !options || options->include_images;
+    int include_vectors = !options || options->include_vectors;
+    size_t max_elements =
+        options && options->max_elements ? options->max_elements : (size_t)PDBG_DEFAULT_MAX_VISUAL_ELEMENTS;
+
+    fz_context *ctx = doc->ctx;
+    fz_page *page = NULL;
+    fz_stext_page *stext = NULL;
+    fz_device *device = NULL;
+    pdbg_visual_page *visuals = NULL;
+    pdbg_cancel_cookie_scope cancel_scope;
+    pdbg_status status = PDBG_OK;
+    fz_var(page);
+    fz_var(stext);
+    fz_var(device);
+    fz_var(visuals);
+    cancel_cookie_scope_init(&cancel_scope);
+    fz_var(cancel_scope);
+    fz_var(status);
+
+    fz_try(ctx)
+    {
+        int page_count = fz_count_pages(ctx, doc->fz_doc);
+        if (page_index >= (uint32_t)page_count) {
+            status = PDBG_ERROR_LIMIT;
+            set_error(err, status, "page index out of range");
+        } else {
+            page = fz_load_page(ctx, doc->fz_doc, (int)page_index);
+            fz_rect page_bounds = fz_bound_page(ctx, page);
+            fz_stext_options stext_options;
+            memset(&stext_options, 0, sizeof(stext_options));
+            stext_options.flags =
+                FZ_STEXT_PRESERVE_WHITESPACE | FZ_STEXT_MEDIABOX_CLIP | FZ_STEXT_ACCURATE_BBOXES |
+                FZ_STEXT_SEGMENT;
+            if (include_images)
+                stext_options.flags |= FZ_STEXT_PRESERVE_IMAGES;
+            if (include_vectors)
+                stext_options.flags |= FZ_STEXT_COLLECT_VECTORS;
+            stext_options.scale = 1.0f;
+
+            stext = fz_new_stext_page(ctx, page_bounds);
+            device = fz_new_stext_device(ctx, stext, &stext_options);
+            fz_cookie *cookie = prepare_cancel_cookie(&cancel_scope, cancel);
+            fz_run_page(ctx, page, device, fz_identity, cookie);
+            fz_close_device(ctx, device);
+
+            if ((cancel && atomic_load(&cancel->cancelled)) || (cookie && cookie->abort)) {
+                status = PDBG_ERROR_CANCELLED;
+                set_error(err, status, "cancelled");
+            }
+
+            if (status == PDBG_OK) {
+                visuals = (pdbg_visual_page *)calloc(1, sizeof(pdbg_visual_page));
+                if (!visuals) {
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+            }
+
+            if (status == PDBG_OK)
+                append_stext_visual_blocks(
+                    visuals,
+                    page_index,
+                    stext->first_block,
+                    page_bounds,
+                    include_text,
+                    include_images,
+                    include_vectors,
+                    max_elements,
+                    cancel,
+                    0,
+                    &status,
+                    err);
+        }
+    }
+    fz_always(ctx)
+    {
+        finish_cancel_cookie(&cancel_scope);
+        if (device)
+            fz_drop_device(ctx, device);
+        if (stext)
+            fz_drop_stext_page(ctx, stext);
+        if (page)
+            fz_drop_page(ctx, page);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status != PDBG_OK) {
+        free_visual_page(visuals);
+        return status;
+    }
+
+    *out = visuals;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
+}
+
 void pdbg_buffer_drop(pdbg_buffer *buffer)
 {
     free_buffer(buffer);
@@ -2868,6 +3146,11 @@ void pdbg_node_list_drop(pdbg_node_list *list)
 void pdbg_text_page_drop(pdbg_text_page *text)
 {
     free_text_page(text);
+}
+
+void pdbg_visual_page_drop(pdbg_visual_page *visuals)
+{
+    free_visual_page(visuals);
 }
 
 void pdbg_document_summary_out_drop(pdbg_document_summary_out *out)
@@ -3046,6 +3329,26 @@ pdbg_status pdbg_text_page_span_get(
         return PDBG_ERROR_GENERIC;
     }
     *out = text->spans[index];
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
+}
+
+size_t pdbg_visual_page_element_count(const pdbg_visual_page *visuals)
+{
+    return visuals ? visuals->len : 0;
+}
+
+pdbg_status pdbg_visual_page_element_get(
+    const pdbg_visual_page *visuals,
+    size_t index,
+    pdbg_visual_element *out,
+    pdbg_error *err)
+{
+    if (!visuals || !out || index >= visuals->len) {
+        set_error(err, PDBG_ERROR_GENERIC, "visual element index out of range");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = visuals->items[index];
     set_error(err, PDBG_OK, "");
     return PDBG_OK;
 }
