@@ -862,8 +862,10 @@ impl VisualPageCache {
     }
 }
 
-fn real_preview_pager_label(page_index: usize, page_count: usize) -> String {
-    format!("Page {} / {}", page_index + 1, page_count.max(1))
+fn page_number_to_index(page_number: usize, page_count: usize) -> usize {
+    page_number
+        .saturating_sub(1)
+        .min(page_count.saturating_sub(1))
 }
 
 fn preview_click_from_pos(
@@ -1205,12 +1207,20 @@ impl GuiShellApp {
         self.tree.row_label(self.selected_row)
     }
 
+    fn clear_preview_selection(&mut self) {
+        self.preview_click = None;
+        self.selected_text_hit = None;
+        self.selected_visual_hit = None;
+    }
+
     fn select_row_from_tree(&mut self, row: usize) {
         if self.selected_row == row {
+            self.clear_preview_selection();
             self.sync_render_page_for_tree_row(row);
             return;
         }
         self.selected_row = row;
+        self.clear_preview_selection();
         self.forward_stack.clear();
         self.refresh_real_detail_for_selection();
         self.sync_render_page_for_tree_row(row);
@@ -1225,6 +1235,7 @@ impl GuiShellApp {
         self.back_stack.push(self.selected_row);
         self.forward_stack.clear();
         self.selected_row = row;
+        self.clear_preview_selection();
         self.selected_tab = InspectorTab::Object;
         self.refresh_real_detail_for_selection();
         self.sync_render_page_for_tree_row(row);
@@ -1238,6 +1249,7 @@ impl GuiShellApp {
         if let Some(row) = self.back_stack.pop() {
             self.forward_stack.push(self.selected_row);
             self.selected_row = row;
+            self.clear_preview_selection();
             self.refresh_real_detail_for_selection();
             self.sync_render_page_for_tree_row(row);
             self.status_log
@@ -1249,6 +1261,7 @@ impl GuiShellApp {
         if let Some(row) = self.forward_stack.pop() {
             self.back_stack.push(self.selected_row);
             self.selected_row = row;
+            self.clear_preview_selection();
             self.refresh_real_detail_for_selection();
             self.sync_render_page_for_tree_row(row);
             self.status_log
@@ -1878,9 +1891,7 @@ impl GuiShellApp {
             return;
         }
         self.render_page_index = page_index;
-        self.preview_click = None;
-        self.selected_text_hit = None;
-        self.selected_visual_hit = None;
+        self.clear_preview_selection();
         self.refresh_real_render();
     }
 
@@ -2813,14 +2824,8 @@ fn object_ref_text(object: ObjectId) -> String {
     format!("{} {} R", object.num, object.gen)
 }
 
-fn visual_object_text(hit: Option<&PreviewVisualHit>) -> String {
-    match hit {
-        None => "-".to_string(),
-        Some(hit) => hit
-            .object
-            .map(object_ref_text)
-            .unwrap_or_else(|| "not extracted by visual shim".to_string()),
-    }
+fn visual_object_attribution_text(hit: Option<&PreviewVisualHit>) -> Option<String> {
+    hit.and_then(|hit| hit.object.map(object_ref_text))
 }
 
 fn text_search_status_label(
@@ -4280,12 +4285,26 @@ impl GuiShellApp {
             {
                 self.set_render_page(self.render_page_index - 1);
             }
+            let mut page_number = self.render_page_index + 1;
+            let page_response = ui.add_sized(
+                [96.0, 22.0],
+                egui::DragValue::new(&mut page_number)
+                    .range(1..=page_count)
+                    .speed(1.0)
+                    .prefix("Page "),
+            );
             ui.label(
-                RichText::new(real_preview_pager_label(self.render_page_index, page_count))
+                RichText::new(format!("/ {}", page_count.max(1)))
                     .monospace()
                     .strong()
                     .color(PdbgTheme::TEXT),
             );
+            if page_response.changed() {
+                let target_page = page_number_to_index(page_number, page_count);
+                if target_page != self.render_page_index {
+                    self.set_render_page(target_page);
+                }
+            }
             if ui
                 .add_enabled(
                     self.render_page_index + 1 < page_count,
@@ -4421,7 +4440,9 @@ impl GuiShellApp {
     }
 
     fn draw_real_object_panel(&mut self, ui: &mut egui::Ui) {
-        self.draw_preview_click_panel(ui);
+        if self.draw_preview_click_panel(ui) {
+            return;
+        }
 
         if let Some(err) = &self.real_detail_error {
             ui.colored_label(PdbgTheme::ERROR_FG, err);
@@ -4561,9 +4582,9 @@ impl GuiShellApp {
         }
     }
 
-    fn draw_preview_click_panel(&self, ui: &mut egui::Ui) {
+    fn draw_preview_click_panel(&self, ui: &mut egui::Ui) -> bool {
         let Some(click) = self.preview_click else {
-            return;
+            return false;
         };
 
         section_frame().show(ui, |ui| {
@@ -4592,7 +4613,6 @@ impl GuiShellApp {
                     );
                     ui.end_row();
 
-                    ui.label("text bbox");
                     let text_bbox = self
                         .selected_text_hit
                         .as_ref()
@@ -4603,57 +4623,56 @@ impl GuiShellApp {
                                 "x={:.1} y={:.1} w={:.1} h={:.1}",
                                 bbox.x, bbox.y, bbox.width, bbox.height
                             )
-                        })
-                        .unwrap_or_else(|| "-".to_string());
-                    truncated_monospace(ui, text_bbox);
-                    ui.end_row();
+                        });
+                    if let Some(text_bbox) = text_bbox {
+                        ui.label("text bbox");
+                        truncated_monospace(ui, text_bbox);
+                        ui.end_row();
+                    }
 
                     let visual_hit = self
                         .selected_visual_hit
                         .as_ref()
                         .filter(|hit| hit.page_index == click.page_index);
 
-                    ui.label("visual kind");
-                    truncated_monospace(
-                        ui,
-                        visual_hit
-                            .map(|hit| {
-                                format!(
-                                    "{} #{}{}{}",
-                                    hit.kind.as_public_str(),
-                                    hit.element_index,
-                                    if hit.contains_click {
-                                        " contains"
-                                    } else {
-                                        " near"
-                                    },
-                                    if hit.untrusted { " untrusted" } else { "" }
-                                )
-                            })
-                            .unwrap_or_else(|| "-".to_string()),
-                    );
-                    ui.end_row();
+                    if let Some(hit) = visual_hit {
+                        ui.label("visual kind");
+                        truncated_monospace(
+                            ui,
+                            format!(
+                                "{} #{}{}{}",
+                                hit.kind.as_public_str(),
+                                hit.element_index,
+                                if hit.contains_click {
+                                    " contains"
+                                } else {
+                                    " near"
+                                },
+                                if hit.untrusted { " untrusted" } else { "" }
+                            ),
+                        );
+                        ui.end_row();
 
-                    ui.label("visual bbox");
-                    truncated_monospace(
-                        ui,
-                        visual_hit
-                            .map(|hit| {
-                                format!(
-                                    "x={:.1} y={:.1} w={:.1} h={:.1}",
-                                    hit.bbox.x, hit.bbox.y, hit.bbox.width, hit.bbox.height
-                                )
-                            })
-                            .unwrap_or_else(|| "-".to_string()),
-                    );
-                    ui.end_row();
+                        ui.label("visual bbox");
+                        truncated_monospace(
+                            ui,
+                            format!(
+                                "x={:.1} y={:.1} w={:.1} h={:.1}",
+                                hit.bbox.x, hit.bbox.y, hit.bbox.width, hit.bbox.height
+                            ),
+                        );
+                        ui.end_row();
 
-                    ui.label("object attribution");
-                    truncated_monospace(ui, visual_object_text(visual_hit));
-                    ui.end_row();
+                        if let Some(object) = visual_object_attribution_text(Some(hit)) {
+                            ui.label("object attribution");
+                            truncated_monospace(ui, object);
+                            ui.end_row();
+                        }
+                    }
                 });
         });
         ui.add_space(8.0);
+        true
     }
 
     fn draw_stream_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -5787,9 +5806,13 @@ mod tests {
     }
 
     #[test]
-    fn real_preview_pager_label_uses_current_and_total_only() {
-        assert_eq!(real_preview_pager_label(0, 517), "Page 1 / 517");
-        assert_eq!(real_preview_pager_label(516, 517), "Page 517 / 517");
+    fn page_number_to_index_clamps_to_available_pages() {
+        assert_eq!(page_number_to_index(1, 517), 0);
+        assert_eq!(page_number_to_index(32, 517), 31);
+        assert_eq!(page_number_to_index(517, 517), 516);
+        assert_eq!(page_number_to_index(999, 517), 516);
+        assert_eq!(page_number_to_index(0, 517), 0);
+        assert_eq!(page_number_to_index(1, 0), 0);
     }
 
     #[test]
@@ -5915,6 +5938,38 @@ mod tests {
     }
 
     #[test]
+    fn selecting_tree_row_clears_preview_hit_selection() {
+        let mut app = GuiShellApp::new();
+        app.preview_click = Some(PagePreviewClick {
+            page_index: 0,
+            render_x: 10.0,
+            render_y: 20.0,
+            normalized_x: 0.1,
+            normalized_y: 0.2,
+        });
+        app.selected_visual_hit = Some(PreviewVisualHit {
+            page_index: 0,
+            element_index: 0,
+            kind: VisualElementKind::Text,
+            bbox: PageRect {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            object: None,
+            untrusted: true,
+            contains_click: true,
+        });
+
+        app.select_row_from_tree(app.selected_row);
+
+        assert!(app.preview_click.is_none());
+        assert!(app.selected_visual_hit.is_none());
+        assert!(app.selected_text_hit.is_none());
+    }
+
+    #[test]
     fn visual_page_cache_reuses_lru_and_respects_element_budget() {
         let mut cache = VisualPageCache::new(2, 3);
         cache.insert(VisualPage {
@@ -5949,7 +6004,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_object_text_distinguishes_unextracted_from_absent_hit() {
+    fn visual_object_attribution_text_hides_missing_object() {
         let mut hit = PreviewVisualHit {
             page_index: 0,
             element_index: 0,
@@ -5965,13 +6020,13 @@ mod tests {
             contains_click: true,
         };
 
-        assert_eq!(visual_object_text(None), "-");
-        assert_eq!(
-            visual_object_text(Some(&hit)),
-            "not extracted by visual shim"
-        );
+        assert_eq!(visual_object_attribution_text(None), None);
+        assert_eq!(visual_object_attribution_text(Some(&hit)), None);
         hit.object = Some(ObjectId { num: 12, gen: 0 });
-        assert_eq!(visual_object_text(Some(&hit)), "12 0 R");
+        assert_eq!(
+            visual_object_attribution_text(Some(&hit)).as_deref(),
+            Some("12 0 R")
+        );
     }
 
     fn visual_test_element(x: f32) -> VisualElement {
