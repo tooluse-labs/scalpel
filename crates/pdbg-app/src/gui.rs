@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 const VIRTUAL_TREE_ROWS: usize = 1_000_000;
 const STREAM_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const HEX_WINDOW_BYTES: usize = 512;
+const REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES: usize = 64 * 1024;
+const REAL_STREAM_MAX_VIEW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const REAL_STREAM_MAX_LOADED_WINDOWS: usize = 5;
 const COPY_LIMIT_BYTES: usize = 4096;
 const DEFAULT_RENDER_ZOOM: f32 = 2.0;
 const OBJECT_SEARCH_CHILD_PAGE_SIZE: usize = 64;
@@ -68,6 +71,11 @@ const PAGE_PREVIEW_MIN_HEIGHT: f32 = 320.0;
 const WORKSPACE_SPLITTER_WIDTH: f32 = 6.0;
 const WORKSPACE_MIN_CENTER_WIDTH: f32 = 360.0;
 const PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT: f32 = 64.0;
+const DENSE_ROW_FONT_SIZE: f32 = 11.0;
+const STREAM_VIEW_FONT_SIZE: f32 = 10.0;
+const STREAM_VIEW_MIN_HEIGHT: f32 = 240.0;
+const STREAM_VIEW_AUTO_LOAD_EDGE_PX: f32 = 48.0;
+const NICE_STREAM_INDENT_WIDTH: f32 = 12.0;
 const CJK_FONT_NAME: &str = "pdbg-cjk";
 
 const CJK_FONT_CANDIDATES: &[&str] = &[
@@ -474,9 +482,23 @@ fn truncated_monospace(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Resp
     let width = ui.available_width().max(24.0);
     let response = ui.add_sized(
         egui::vec2(width, ui.text_style_height(&TextStyle::Monospace)),
-        egui::Label::new(RichText::new(text.as_str()).monospace()).truncate(),
+        egui::Label::new(dense_monospace_text(text.as_str())).truncate(),
     );
     response.on_hover_text(text)
+}
+
+fn dense_label(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.label(RichText::new(text.into()).size(DENSE_ROW_FONT_SIZE))
+}
+
+fn dense_monospace_text(text: impl Into<String>) -> RichText {
+    RichText::new(text.into())
+        .monospace()
+        .size(DENSE_ROW_FONT_SIZE)
+}
+
+fn mono_font_id(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("pdbg-mono".into()))
 }
 
 #[derive(Default)]
@@ -1030,6 +1052,7 @@ pub struct GuiShellApp {
     right_panel_width: Option<f32>,
     tree: TreeModel,
     stream: LargeStreamModel,
+    real_stream_preset: RealStreamPreset,
     real_stream_mode: StreamMode,
     real_stream_view_mode: StreamViewMode,
     real_stream_offset: u64,
@@ -1037,6 +1060,9 @@ pub struct GuiShellApp {
     real_stream_key: Option<RealStreamKey>,
     real_stream_job: Option<RealStreamJob>,
     real_stream_chunk: Option<StreamChunk>,
+    real_stream_windows: VecDeque<RealStreamLoadedWindow>,
+    real_stream_collapsed_blocks: HashSet<String>,
+    real_stream_selected_block: Option<String>,
     real_stream_error: Option<String>,
     decoded_stream_cache: StreamChunkCache<RealStreamKey>,
     selected_row: usize,
@@ -1146,13 +1172,17 @@ impl GuiShellApp {
             right_panel_width: None,
             tree,
             stream: LargeStreamModel::default(),
-            real_stream_mode: StreamMode::Raw,
-            real_stream_view_mode: StreamViewMode::Hex,
+            real_stream_preset: RealStreamPreset::Nice,
+            real_stream_mode: StreamMode::Decoded,
+            real_stream_view_mode: StreamViewMode::Text,
             real_stream_offset: 0,
-            real_stream_limit: HEX_WINDOW_BYTES,
+            real_stream_limit: REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES,
             real_stream_key: None,
             real_stream_job: None,
             real_stream_chunk: None,
+            real_stream_windows: VecDeque::new(),
+            real_stream_collapsed_blocks: HashSet::new(),
+            real_stream_selected_block: None,
             real_stream_error: None,
             decoded_stream_cache: StreamChunkCache::new(
                 DECODED_STREAM_CACHE_MAX_ITEMS,
@@ -1700,6 +1730,9 @@ impl GuiShellApp {
         }
         self.real_stream_key = None;
         self.real_stream_chunk = None;
+        self.real_stream_windows.clear();
+        self.real_stream_collapsed_blocks.clear();
+        self.real_stream_selected_block = None;
         self.real_stream_error = None;
     }
 
@@ -1710,20 +1743,34 @@ impl GuiShellApp {
             offset: self.real_stream_offset,
             limit: self.real_stream_limit,
         };
-        if self.real_stream_key == Some(key)
-            && (self.real_stream_chunk.is_some() || self.real_stream_job.is_some())
+        if self
+            .real_stream_job
+            .as_ref()
+            .is_some_and(|job| job.key == key)
         {
+            return;
+        }
+        if let Some(chunk) = self.real_stream_cached_window(key) {
+            self.real_stream_key = Some(key);
+            self.real_stream_chunk = Some(chunk);
+            self.real_stream_error = None;
+            return;
+        }
+        if self.real_stream_key == Some(key) && self.real_stream_job.is_some() {
             return;
         }
         if let Some(job) = self.real_stream_job.take() {
             job.cancel.cancel();
         }
         self.real_stream_key = Some(key);
-        self.real_stream_chunk = None;
+        if self.real_stream_windows.is_empty() {
+            self.real_stream_chunk = None;
+        }
         self.real_stream_error = None;
 
         if key.mode == StreamMode::Decoded {
             if let Some(chunk) = self.decoded_stream_cache.get(&key) {
+                self.insert_real_stream_window(key, chunk.clone());
                 self.real_stream_chunk = Some(chunk);
                 self.status_log.push(format!(
                     "reused cached decoded stream chunk {} {} R @ {}",
@@ -1790,6 +1837,70 @@ impl GuiShellApp {
         }
     }
 
+    fn real_stream_cached_window(&self, key: RealStreamKey) -> Option<StreamChunk> {
+        self.real_stream_windows
+            .iter()
+            .find(|window| window.key == key)
+            .map(|window| window.chunk.clone())
+    }
+
+    fn insert_real_stream_window(&mut self, key: RealStreamKey, chunk: StreamChunk) {
+        if let Some(window) = self
+            .real_stream_windows
+            .iter_mut()
+            .find(|window| window.key == key)
+        {
+            window.chunk = chunk;
+        } else {
+            self.real_stream_windows
+                .push_back(RealStreamLoadedWindow { key, chunk });
+        }
+        self.real_stream_windows
+            .make_contiguous()
+            .sort_by_key(|window| window.key.offset);
+        while self.real_stream_windows.len() > REAL_STREAM_MAX_LOADED_WINDOWS {
+            let front_distance = self
+                .real_stream_windows
+                .front()
+                .map(|window| key.offset.saturating_sub(window.key.offset))
+                .unwrap_or(0);
+            let back_distance = self
+                .real_stream_windows
+                .back()
+                .map(|window| window.key.offset.saturating_sub(key.offset))
+                .unwrap_or(0);
+            if front_distance > back_distance {
+                self.real_stream_windows.pop_front();
+            } else {
+                self.real_stream_windows.pop_back();
+            }
+        }
+    }
+
+    fn apply_real_stream_preset(&mut self, stream: &StreamSummary) -> bool {
+        let (mode, view_mode) =
+            real_stream_preset_defaults(self.real_stream_preset, stream.can_decode);
+        let limit = real_stream_default_limit(stream, mode);
+        let mut changed = false;
+        if self.real_stream_mode != mode {
+            self.real_stream_mode = mode;
+            changed = true;
+        }
+        if self.real_stream_view_mode != view_mode {
+            self.real_stream_view_mode = view_mode;
+            changed = true;
+        }
+        if self.real_stream_offset != 0 {
+            self.real_stream_offset = 0;
+            changed = true;
+        }
+        if self.real_stream_limit != limit {
+            self.real_stream_limit = limit;
+            changed = true;
+        }
+        changed
+    }
+
     fn poll_real_stream_job(&mut self) {
         let Some(polled) =
             self.real_stream_job
@@ -1830,6 +1941,7 @@ impl GuiShellApp {
                         if output.key.mode == StreamMode::Decoded {
                             self.decoded_stream_cache.insert(output.key, chunk.clone());
                         }
+                        self.insert_real_stream_window(output.key, chunk.clone());
                         self.real_stream_chunk = Some(chunk);
                         self.real_stream_error = None;
                     }
@@ -2597,7 +2709,7 @@ fn empty_status_log() -> Vec<String> {
 
 fn tree_text_format(color: Color32) -> egui::TextFormat {
     egui::TextFormat {
-        font_id: FontId::new(11.0, FontFamily::Name("pdbg-mono".into())),
+        font_id: mono_font_id(DENSE_ROW_FONT_SIZE),
         color,
         ..Default::default()
     }
@@ -2975,27 +3087,32 @@ fn draw_stream_summary_grid(ui: &mut egui::Ui, stream: &StreamSummary) {
         .spacing([12.0, 4.0])
         .striped(true)
         .show(ui, |ui| {
-            ui.label("object");
-            ui.monospace(format!("{} {} R", stream.object.num, stream.object.gen));
+            dense_label(ui, "object");
+            ui.label(dense_monospace_text(format!(
+                "{} {} R",
+                stream.object.num, stream.object.gen
+            )));
             ui.end_row();
-            ui.label("filters");
-            ui.monospace(if stream.filters.is_empty() {
+            dense_label(ui, "filters");
+            ui.label(dense_monospace_text(if stream.filters.is_empty() {
                 "-".to_string()
             } else {
                 stream.filters.join(", ")
-            });
+            }));
             ui.end_row();
-            ui.label("raw size");
-            ui.monospace(optional_u64(stream.raw_size_hint));
+            dense_label(ui, "raw size");
+            ui.label(dense_monospace_text(optional_u64(stream.raw_size_hint)));
             ui.end_row();
-            ui.label("decoded size");
-            ui.monospace(optional_u64(stream.decoded_size_hint));
+            dense_label(ui, "decoded size");
+            ui.label(dense_monospace_text(optional_u64(stream.decoded_size_hint)));
             ui.end_row();
-            ui.label("can decode");
-            ui.monospace(stream.can_decode.to_string());
+            dense_label(ui, "can decode");
+            ui.label(dense_monospace_text(stream.can_decode.to_string()));
             ui.end_row();
-            ui.label("image preview");
-            ui.monospace(stream.image_preview_available.to_string());
+            dense_label(ui, "image preview");
+            ui.label(dense_monospace_text(
+                stream.image_preview_available.to_string(),
+            ));
             ui.end_row();
         });
 }
@@ -3042,6 +3159,528 @@ fn stream_view_mode_label(mode: StreamViewMode) -> &'static str {
         StreamViewMode::Text => "Text",
         StreamViewMode::Bytes => "Bytes",
     }
+}
+
+fn real_stream_preset_label(preset: RealStreamPreset) -> &'static str {
+    match preset {
+        RealStreamPreset::Nice => "Nice View",
+        RealStreamPreset::Raw => "Raw View",
+    }
+}
+
+fn real_stream_preset_defaults(
+    preset: RealStreamPreset,
+    can_decode: bool,
+) -> (StreamMode, StreamViewMode) {
+    match preset {
+        RealStreamPreset::Nice if can_decode => (StreamMode::Decoded, StreamViewMode::Text),
+        RealStreamPreset::Nice => (StreamMode::Raw, StreamViewMode::Text),
+        RealStreamPreset::Raw => (StreamMode::Raw, StreamViewMode::Hex),
+    }
+}
+
+fn real_stream_default_limit(stream: &StreamSummary, mode: StreamMode) -> usize {
+    let size_hint = match mode {
+        StreamMode::Raw => stream.raw_size_hint,
+        StreamMode::Decoded => stream.decoded_size_hint,
+    };
+    size_hint
+        .and_then(|size| usize::try_from(size).ok())
+        .map(|size| size.min(REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES).max(1))
+        .unwrap_or(REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES)
+}
+
+fn real_stream_chunk_has_more(chunk: &StreamChunk) -> bool {
+    let loaded_end = chunk.offset.saturating_add(chunk.bytes.len() as u64);
+    chunk
+        .total_size
+        .map(|total| loaded_end < total)
+        .unwrap_or(chunk.truncated)
+}
+
+fn real_stream_chunks_range_label(chunks: &[StreamChunk]) -> String {
+    let Some(first) = chunks.first() else {
+        return "no bytes loaded".to_string();
+    };
+    let Some(last) = chunks.last() else {
+        return "no bytes loaded".to_string();
+    };
+    let loaded_end = last.offset.saturating_add(last.bytes.len() as u64);
+    let total = last
+        .total_size
+        .map(|total| format!(" / total {total}"))
+        .unwrap_or_default();
+    let more = if real_stream_chunk_has_more(last) {
+        " / more"
+    } else {
+        ""
+    };
+    format!("bytes {}..{}{total}{more}", first.offset, loaded_end)
+}
+
+fn real_stream_chunks_has_more(chunks: &[StreamChunk]) -> bool {
+    chunks.last().is_some_and(real_stream_chunk_has_more)
+}
+
+fn real_stream_chunks_visible_text(
+    chunks: &[StreamChunk],
+    view_mode: StreamViewMode,
+    preset: RealStreamPreset,
+) -> String {
+    chunks
+        .iter()
+        .map(|chunk| real_stream_visible_text(chunk, view_mode, preset))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn real_stream_chunks_nice_lines(chunks: &[StreamChunk]) -> Vec<NiceStreamLine> {
+    chunks
+        .iter()
+        .flat_map(|chunk| pdf_content_stream_nice_lines(&chunk.bytes))
+        .collect()
+}
+
+fn real_stream_nice_render_lines(
+    object: ObjectId,
+    chunks: &[StreamChunk],
+) -> Vec<NiceStreamRenderLine> {
+    let mut block_stack: Vec<(usize, String)> = Vec::new();
+    let mut rows = Vec::new();
+    for (index, line) in real_stream_chunks_nice_lines(chunks)
+        .into_iter()
+        .enumerate()
+    {
+        let line_key = nice_stream_line_key(object, chunks, index, &line);
+        if line.block_close {
+            while block_stack
+                .last()
+                .is_some_and(|(indent, _)| *indent > line.indent)
+            {
+                block_stack.pop();
+            }
+        } else {
+            while block_stack
+                .last()
+                .is_some_and(|(indent, _)| *indent >= line.indent)
+            {
+                block_stack.pop();
+            }
+        }
+        let mut guide_blocks = block_stack.clone();
+        if line.block_open {
+            guide_blocks.push((line.indent, line_key.clone()));
+        }
+        let block_key = if line.block_open {
+            Some(line_key.clone())
+        } else {
+            block_stack.last().map(|(_, key)| key.clone())
+        };
+
+        rows.push(NiceStreamRenderLine {
+            line_key: line_key.clone(),
+            block_key,
+            guide_blocks,
+            line: line.clone(),
+        });
+
+        if line.block_open {
+            block_stack.push((line.indent, line_key));
+        } else if line.block_close
+            && block_stack
+                .last()
+                .is_some_and(|(indent, _)| *indent == line.indent)
+        {
+            block_stack.pop();
+        }
+    }
+    rows
+}
+
+fn nice_stream_line_key(
+    object: ObjectId,
+    chunks: &[StreamChunk],
+    line_index: usize,
+    line: &NiceStreamLine,
+) -> String {
+    let first_offset = chunks.first().map(|chunk| chunk.offset).unwrap_or_default();
+    format!(
+        "{}:{}:{}:{}:{}",
+        object.num, object.gen, first_offset, line_index, line.text
+    )
+}
+
+fn draw_nice_stream_guides(
+    ui: &egui::Ui,
+    row_rect: egui::Rect,
+    guide_blocks: &[(usize, String)],
+    selected_block: Option<&str>,
+) {
+    let top = row_rect.top() - 1.0;
+    let bottom = row_rect.bottom() + 1.0;
+    for (indent, key) in guide_blocks {
+        let selected = selected_block == Some(key.as_str());
+        let color = if selected {
+            PdbgTheme::ACCENT
+        } else {
+            PdbgTheme::BORDER
+        };
+        let stroke = egui::Stroke::new(if selected { 1.5 } else { 1.0 }, color);
+        let x = row_rect.left() + (*indent as f32 * NICE_STREAM_INDENT_WIDTH) + 5.0;
+        draw_dashed_vertical_line(ui, x, top, bottom, stroke);
+    }
+}
+
+fn draw_dashed_vertical_line(ui: &egui::Ui, x: f32, top: f32, bottom: f32, stroke: egui::Stroke) {
+    let mut y = top;
+    while y < bottom {
+        let segment_bottom = (y + 3.0).min(bottom);
+        ui.painter()
+            .line_segment([egui::pos2(x, y), egui::pos2(x, segment_bottom)], stroke);
+        y += 6.0;
+    }
+}
+
+fn real_stream_next_offset(chunks: &[StreamChunk]) -> Option<u64> {
+    chunks
+        .last()
+        .map(|chunk| chunk.offset.saturating_add(chunk.bytes.len() as u64))
+        .filter(|offset| *offset > 0)
+}
+
+fn real_stream_previous_offset(chunks: &[StreamChunk], limit: usize) -> Option<u64> {
+    chunks
+        .first()
+        .and_then(|chunk| (chunk.offset > 0).then(|| chunk.offset.saturating_sub(limit as u64)))
+}
+
+fn real_stream_scroll_request(
+    scroll_offset_y: f32,
+    viewport_height: f32,
+    content_height: f32,
+    scroll_delta_y: f32,
+    hovered: bool,
+    chunks: &[StreamChunk],
+    limit: usize,
+) -> Option<u64> {
+    if !hovered || scroll_delta_y.abs() < 0.5 {
+        return None;
+    }
+    let max_offset = (content_height - viewport_height).max(0.0);
+    let near_top = scroll_offset_y <= STREAM_VIEW_AUTO_LOAD_EDGE_PX;
+    let near_bottom = scroll_offset_y >= (max_offset - STREAM_VIEW_AUTO_LOAD_EDGE_PX).max(0.0);
+    if scroll_delta_y < 0.0 && near_bottom && real_stream_chunks_has_more(chunks) {
+        real_stream_next_offset(chunks)
+    } else if scroll_delta_y > 0.0 && near_top {
+        real_stream_previous_offset(chunks, limit)
+    } else {
+        None
+    }
+}
+
+fn real_stream_visible_text(
+    chunk: &StreamChunk,
+    view_mode: StreamViewMode,
+    preset: RealStreamPreset,
+) -> String {
+    if preset == RealStreamPreset::Nice && view_mode == StreamViewMode::Text {
+        pdf_content_stream_nice_text(&chunk.bytes)
+    } else {
+        stream_chunk_display_text(chunk, view_mode)
+    }
+}
+
+fn pdf_content_stream_nice_text(bytes: &[u8]) -> String {
+    nice_stream_lines_to_text(&pdf_content_stream_nice_lines(bytes))
+}
+
+fn pdf_content_stream_nice_lines(bytes: &[u8]) -> Vec<NiceStreamLine> {
+    let raw = String::from_utf8_lossy(bytes);
+    let tokens = pdf_content_tokens(&raw);
+    if tokens.is_empty() {
+        return vec![NiceStreamLine {
+            indent: 0,
+            text: "<empty content stream>".to_string(),
+            block_open: false,
+            block_close: false,
+        }];
+    }
+
+    let mut lines = Vec::new();
+    let mut operands = Vec::new();
+    let mut indent = 0usize;
+    for token in tokens {
+        if is_pdf_content_operator(&token, &operands) {
+            let block_close = is_pdf_content_block_close(&token);
+            if matches!(token.as_str(), "Q" | "ET" | "EMC" | "EX") {
+                indent = indent.saturating_sub(1);
+            }
+            lines.push(NiceStreamLine {
+                indent,
+                text: pdf_content_instruction_line(&token, &operands),
+                block_open: is_pdf_content_block_open(&token),
+                block_close,
+            });
+            if is_pdf_content_block_open(&token) {
+                indent = (indent + 1).min(64);
+            }
+            operands.clear();
+        } else {
+            operands.push(token);
+        }
+    }
+
+    if !operands.is_empty() {
+        lines.push(NiceStreamLine {
+            indent,
+            text: compact_pdf_operands(&operands),
+            block_open: false,
+            block_close: false,
+        });
+    }
+    lines
+}
+
+fn nice_stream_lines_to_text(lines: &[NiceStreamLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        push_pdf_content_line(&mut out, line.indent, &line.text);
+    }
+    out
+}
+
+fn push_pdf_content_line(out: &mut String, indent: usize, line: &str) {
+    for _ in 0..indent {
+        out.push_str("  ");
+    }
+    out.push_str(line);
+    out.push('\n');
+}
+
+fn is_pdf_content_block_open(operator: &str) -> bool {
+    matches!(operator, "q" | "BT" | "BDC" | "BX")
+}
+
+fn is_pdf_content_block_close(operator: &str) -> bool {
+    matches!(operator, "Q" | "ET" | "EMC" | "EX")
+}
+
+fn pdf_content_tokens(input: &str) -> Vec<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if ch == '%' {
+            index += 1;
+            while index < chars.len() && chars[index] != '\n' && chars[index] != '\r' {
+                index += 1;
+            }
+            continue;
+        }
+
+        let (token, next) = if ch == '(' {
+            parse_pdf_string_token(&chars, index)
+        } else if ch == '[' {
+            parse_balanced_pdf_token(&chars, index, '[', ']')
+        } else if ch == '<' && chars.get(index + 1) != Some(&'<') {
+            parse_balanced_pdf_token(&chars, index, '<', '>')
+        } else if ch == '<' && chars.get(index + 1) == Some(&'<') {
+            ("<<".to_string(), index + 2)
+        } else if ch == '>' && chars.get(index + 1) == Some(&'>') {
+            (">>".to_string(), index + 2)
+        } else {
+            parse_pdf_atom_token(&chars, index)
+        };
+        if !token.is_empty() {
+            tokens.push(token);
+        }
+        index = next.max(index + 1);
+    }
+    tokens
+}
+
+fn parse_pdf_string_token(chars: &[char], start: usize) -> (String, usize) {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    let mut index = start;
+    let mut out = String::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        out.push(ch);
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return (out, index + 1);
+            }
+        }
+        index += 1;
+    }
+    (out, index)
+}
+
+fn parse_balanced_pdf_token(
+    chars: &[char],
+    start: usize,
+    open: char,
+    close: char,
+) -> (String, usize) {
+    let mut depth = 0usize;
+    let mut index = start;
+    let mut out = String::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        out.push(ch);
+        if ch == '(' {
+            let (string, next) = parse_pdf_string_token(chars, index);
+            out.pop();
+            out.push_str(&string);
+            index = next;
+            continue;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return (out, index + 1);
+            }
+        }
+        index += 1;
+    }
+    (out, index)
+}
+
+fn parse_pdf_atom_token(chars: &[char], start: usize) -> (String, usize) {
+    let mut index = start;
+    let mut out = String::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() || matches!(ch, '[' | ']' | '(' | ')' | '<' | '>' | '%') {
+            break;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    (out, index)
+}
+
+fn is_pdf_content_operator(operator: &str, operands: &[String]) -> bool {
+    matches!(
+        operator,
+        "Tf" | "Do"
+            | "gs"
+            | "sh"
+            | "CS"
+            | "cs"
+            | "BT"
+            | "ET"
+            | "Tj"
+            | "TJ"
+            | "'"
+            | "\""
+            | "Td"
+            | "TD"
+            | "Tm"
+            | "T*"
+            | "Tc"
+            | "TL"
+            | "Ts"
+            | "Tw"
+            | "Tz"
+            | "q"
+            | "Q"
+            | "cm"
+            | "m"
+            | "l"
+            | "c"
+            | "v"
+            | "y"
+            | "h"
+            | "re"
+            | "S"
+            | "s"
+            | "f"
+            | "F"
+            | "f*"
+            | "B"
+            | "B*"
+            | "b"
+            | "b*"
+            | "n"
+            | "W"
+            | "W*"
+            | "rg"
+            | "RG"
+            | "g"
+            | "G"
+            | "k"
+            | "K"
+            | "sc"
+            | "SC"
+            | "scn"
+            | "SCN"
+            | "MP"
+            | "DP"
+            | "BDC"
+            | "EMC"
+            | "BX"
+            | "EX"
+            | "w"
+            | "J"
+            | "j"
+            | "M"
+            | "d"
+            | "ri"
+            | "BI"
+            | "ID"
+            | "EI"
+    ) || (operator.len() <= 3 && !operands.is_empty() && operator.chars().all(char::is_alphabetic))
+}
+
+fn pdf_content_instruction_line(operator: &str, operands: &[String]) -> String {
+    if operands.is_empty() {
+        operator.to_string()
+    } else {
+        format!("{} {}", compact_pdf_operands(operands), operator)
+    }
+}
+
+fn compact_pdf_operands(operands: &[String]) -> String {
+    if operands.is_empty() {
+        return "-".to_string();
+    }
+    operands
+        .iter()
+        .map(|operand| compact_pdf_token(operand))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn compact_pdf_token(token: &str) -> String {
+    let mut out = String::new();
+    for ch in token.chars() {
+        if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+        if out.len() >= 96 {
+            out.push_str("...");
+            break;
+        }
+    }
+    out
 }
 
 fn stream_chunk_display_text(chunk: &StreamChunk, view_mode: StreamViewMode) -> String {
@@ -3515,12 +4154,14 @@ impl GuiShellApp {
         self.empty_workspace = false;
         self.tree = model.tree;
         self.stream = LargeStreamModel::default();
-        self.real_stream_mode = StreamMode::Raw;
-        self.real_stream_view_mode = StreamViewMode::Hex;
+        self.real_stream_preset = RealStreamPreset::Nice;
+        self.real_stream_mode = StreamMode::Decoded;
+        self.real_stream_view_mode = StreamViewMode::Text;
         self.real_stream_offset = 0;
-        self.real_stream_limit = HEX_WINDOW_BYTES;
+        self.real_stream_limit = REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES;
         self.real_stream_key = None;
         self.real_stream_chunk = None;
+        self.real_stream_windows.clear();
         self.real_stream_error = None;
         self.decoded_stream_cache = StreamChunkCache::new(
             DECODED_STREAM_CACHE_MAX_ITEMS,
@@ -3700,15 +4341,11 @@ impl GuiShellApp {
                         ui.add_space((depth as f32) * 18.0);
                         let marker_response = ui
                             .add(
-                                egui::Label::new(
-                                    RichText::new(marker).monospace().size(11.0).color(
-                                        if selected {
-                                            PdbgTheme::ACCENT
-                                        } else {
-                                            PdbgTheme::MUTED
-                                        },
-                                    ),
-                                )
+                                egui::Label::new(dense_monospace_text(marker).color(if selected {
+                                    PdbgTheme::ACCENT
+                                } else {
+                                    PdbgTheme::MUTED
+                                }))
                                 .sense(egui::Sense::click()),
                             )
                             .on_hover_text("Expand or collapse");
@@ -3808,10 +4445,7 @@ impl GuiShellApp {
                         for hit in &result.hits {
                             let label = object_search_hit_summary(hit);
                             if ui
-                                .selectable_label(
-                                    false,
-                                    RichText::new(label).monospace().size(11.0),
-                                )
+                                .selectable_label(false, dense_monospace_text(label))
                                 .on_hover_text(node_label_for_hit(hit))
                                 .clicked()
                             {
@@ -3899,9 +4533,7 @@ impl GuiShellApp {
                             if ui
                                 .selectable_label(
                                     selected,
-                                    RichText::new(text_search_hit_summary(hit))
-                                        .monospace()
-                                        .size(11.0),
+                                    dense_monospace_text(text_search_hit_summary(hit)),
                                 )
                                 .on_hover_text(text_search_hit_hover(hit))
                                 .clicked()
@@ -4414,13 +5046,13 @@ impl GuiShellApp {
                         .spacing([12.0, 4.0])
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.label("hash");
+                            dense_label(ui, "hash");
                             truncated_monospace(ui, option_text(summary.file_hash.as_deref()));
                             ui.end_row();
-                            ui.label("version");
+                            dense_label(ui, "version");
                             truncated_monospace(ui, option_text(summary.pdf_version.as_deref()));
                             ui.end_row();
-                            ui.label("permissions");
+                            dense_label(ui, "permissions");
                             truncated_monospace(
                                 ui,
                                 format!(
@@ -4485,13 +5117,13 @@ impl GuiShellApp {
                 .spacing([12.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.label("kind");
+                    dense_label(ui, "kind");
                     truncated_monospace(ui, object_kind_label(&detail.kind));
                     ui.end_row();
-                    ui.label("value");
+                    dense_label(ui, "value");
                     truncated_monospace(ui, object_value_preview(&detail.value, &detail.preview));
                     ui.end_row();
-                    ui.label("path");
+                    dense_label(ui, "path");
                     truncated_monospace(ui, node_breadcrumb(&detail.id));
                     ui.end_row();
                 });
@@ -4549,7 +5181,7 @@ impl GuiShellApp {
                     .striped(true)
                     .show(ui, |ui| {
                         for entry in &entries.items {
-                            ui.monospace(format!("/{}", entry.key));
+                            ui.label(dense_monospace_text(format!("/{}", entry.key)));
                             type_badge(ui, &entry.value.kind);
                             truncated_monospace(ui, summary_inline_text(&entry.value));
                             ui.end_row();
@@ -4572,7 +5204,7 @@ impl GuiShellApp {
                     .striped(true)
                     .show(ui, |ui| {
                         for (index, entry) in entries.items.iter().enumerate() {
-                            ui.monospace(format!("[{index}]"));
+                            ui.label(dense_monospace_text(format!("[{index}]")));
                             type_badge(ui, &entry.kind);
                             truncated_monospace(ui, summary_inline_text(entry));
                             ui.end_row();
@@ -4595,18 +5227,18 @@ impl GuiShellApp {
                 .spacing([12.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.label("page");
+                    dense_label(ui, "page");
                     truncated_monospace(ui, format!("{}", click.page_index + 1));
                     ui.end_row();
 
-                    ui.label("render px");
+                    dense_label(ui, "render px");
                     truncated_monospace(
                         ui,
                         format!("{:.1}, {:.1}", click.render_x, click.render_y),
                     );
                     ui.end_row();
 
-                    ui.label("normalized");
+                    dense_label(ui, "normalized");
                     truncated_monospace(
                         ui,
                         format!("{:.4}, {:.4}", click.normalized_x, click.normalized_y),
@@ -4625,7 +5257,7 @@ impl GuiShellApp {
                             )
                         });
                     if let Some(text_bbox) = text_bbox {
-                        ui.label("text bbox");
+                        dense_label(ui, "text bbox");
                         truncated_monospace(ui, text_bbox);
                         ui.end_row();
                     }
@@ -4636,7 +5268,7 @@ impl GuiShellApp {
                         .filter(|hit| hit.page_index == click.page_index);
 
                     if let Some(hit) = visual_hit {
-                        ui.label("visual kind");
+                        dense_label(ui, "visual kind");
                         truncated_monospace(
                             ui,
                             format!(
@@ -4653,7 +5285,7 @@ impl GuiShellApp {
                         );
                         ui.end_row();
 
-                        ui.label("visual bbox");
+                        dense_label(ui, "visual bbox");
                         truncated_monospace(
                             ui,
                             format!(
@@ -4664,7 +5296,7 @@ impl GuiShellApp {
                         ui.end_row();
 
                         if let Some(object) = visual_object_attribution_text(Some(hit)) {
-                            ui.label("object attribution");
+                            dense_label(ui, "object attribution");
                             truncated_monospace(ui, object);
                             ui.end_row();
                         }
@@ -4686,7 +5318,7 @@ impl GuiShellApp {
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Offset");
+                    dense_label(ui, "Offset");
                     let offset_response = ui.add(
                         egui::DragValue::new(&mut self.stream.offset)
                             .range(0..=STREAM_TOTAL_BYTES.saturating_sub(HEX_WINDOW_BYTES))
@@ -4697,7 +5329,7 @@ impl GuiShellApp {
                     }
                     ui.end_row();
 
-                    ui.label("Fallback range");
+                    dense_label(ui, "Fallback range");
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::DragValue::new(&mut self.stream.selection_offset)
@@ -4788,78 +5420,128 @@ impl GuiShellApp {
             draw_stream_summary_grid(ui, &stream);
         });
 
+        if self.real_stream_key.is_none()
+            && self.real_stream_chunk.is_none()
+            && self.real_stream_job.is_none()
+        {
+            self.apply_real_stream_preset(&stream);
+        }
+
         ui.add_space(8.0);
         let mut request_changed = false;
+        let mut force_reload = false;
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream Bytes", Some("raw / decoded chunk"));
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Decode").small().color(PdbgTheme::MUTED));
-                request_changed |= ui
-                    .selectable_value(&mut self.real_stream_mode, StreamMode::Raw, "Raw")
-                    .changed();
-                let decoded_enabled = stream.can_decode;
-                ui.add_enabled_ui(decoded_enabled, |ui| {
-                    request_changed |= ui
-                        .selectable_value(
-                            &mut self.real_stream_mode,
-                            StreamMode::Decoded,
-                            "Decoded",
-                        )
-                        .changed();
-                });
-                if !decoded_enabled && self.real_stream_mode == StreamMode::Decoded {
-                    self.real_stream_mode = StreamMode::Raw;
-                    request_changed = true;
-                }
-            });
+            section_header(ui, "Stream View", Some("nice operations / raw bytes"));
             ui.horizontal(|ui| {
                 ui.label(RichText::new("View").small().color(PdbgTheme::MUTED));
-                ui.selectable_value(&mut self.real_stream_view_mode, StreamViewMode::Hex, "Hex");
-                ui.selectable_value(
-                    &mut self.real_stream_view_mode,
-                    StreamViewMode::Text,
-                    "Text",
-                );
-                ui.selectable_value(
-                    &mut self.real_stream_view_mode,
-                    StreamViewMode::Bytes,
-                    "Bytes",
-                );
+                if ui
+                    .selectable_value(
+                        &mut self.real_stream_preset,
+                        RealStreamPreset::Nice,
+                        "Nice View",
+                    )
+                    .changed()
+                {
+                    request_changed |= self.apply_real_stream_preset(&stream);
+                }
+                if ui
+                    .selectable_value(
+                        &mut self.real_stream_preset,
+                        RealStreamPreset::Raw,
+                        "Raw View",
+                    )
+                    .changed()
+                {
+                    request_changed |= self.apply_real_stream_preset(&stream);
+                }
+                if ui.button("Reload").clicked() {
+                    force_reload = true;
+                }
             });
-            ui.add_space(4.0);
-            egui::Grid::new("real_stream_controls_grid")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Offset");
+            ui.collapsing("Advanced", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mode").small().color(PdbgTheme::MUTED));
                     request_changed |= ui
-                        .add(egui::DragValue::new(&mut self.real_stream_offset).speed(64))
+                        .selectable_value(&mut self.real_stream_mode, StreamMode::Raw, "Raw")
                         .changed();
-                    ui.end_row();
-
-                    ui.label("Limit");
+                    let decoded_enabled = stream.can_decode;
+                    ui.add_enabled_ui(decoded_enabled, |ui| {
+                        request_changed |= ui
+                            .selectable_value(
+                                &mut self.real_stream_mode,
+                                StreamMode::Decoded,
+                                "Decoded",
+                            )
+                            .changed();
+                    });
+                    if !decoded_enabled && self.real_stream_mode == StreamMode::Decoded {
+                        self.real_stream_mode = StreamMode::Raw;
+                        request_changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Format").small().color(PdbgTheme::MUTED));
                     request_changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.real_stream_limit)
-                                .range(1..=32 * 1024)
-                                .speed(64),
+                        .selectable_value(
+                            &mut self.real_stream_view_mode,
+                            StreamViewMode::Hex,
+                            "Hex",
                         )
                         .changed();
-                    ui.end_row();
+                    request_changed |= ui
+                        .selectable_value(
+                            &mut self.real_stream_view_mode,
+                            StreamViewMode::Text,
+                            "Text",
+                        )
+                        .changed();
+                    request_changed |= ui
+                        .selectable_value(
+                            &mut self.real_stream_view_mode,
+                            StreamViewMode::Bytes,
+                            "Bytes",
+                        )
+                        .changed();
                 });
+                ui.add_space(4.0);
+                egui::Grid::new("real_stream_controls_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        dense_label(ui, "Offset");
+                        request_changed |= ui
+                            .add(egui::DragValue::new(&mut self.real_stream_offset).speed(64))
+                            .changed();
+                        ui.end_row();
+
+                        dense_label(ui, "Limit");
+                        request_changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.real_stream_limit)
+                                    .range(1..=REAL_STREAM_MAX_VIEW_LIMIT_BYTES)
+                                    .speed(64),
+                            )
+                            .changed();
+                        ui.end_row();
+                    });
+            });
             if request_changed {
                 self.clear_real_stream_chunk();
+            }
+            if force_reload {
+                self.clear_real_stream_chunk();
+                self.refresh_real_stream_chunk(stream.object);
             }
             if self.real_stream_job.is_some() {
                 if ui.button("Cancel load").clicked() {
                     self.cancel_real_stream_job();
                 }
-            } else if ui.button("Load chunk").clicked() || self.real_stream_key.is_none() {
+            } else if self.real_stream_key.is_none() {
                 self.refresh_real_stream_chunk(stream.object);
             }
         });
 
-        if self.real_stream_job.is_some() {
+        if self.real_stream_job.is_some() && self.real_stream_chunk.is_none() {
             ui.add_space(8.0);
             ui.label(RichText::new("Loading stream chunk...").color(PdbgTheme::MUTED));
             return;
@@ -4874,53 +5556,209 @@ impl GuiShellApp {
         let Some(chunk) = self.real_stream_chunk.clone() else {
             return;
         };
+        let loaded_chunks = if self.real_stream_windows.is_empty() {
+            vec![chunk.clone()]
+        } else {
+            self.real_stream_windows
+                .iter()
+                .map(|window| window.chunk.clone())
+                .collect::<Vec<_>>()
+        };
         ui.add_space(8.0);
-        let total = chunk
-            .total_size
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
         section_frame().show(ui, |ui| {
             section_header(
                 ui,
-                stream_view_mode_label(self.real_stream_view_mode),
+                real_stream_preset_label(self.real_stream_preset),
                 Some(&format!(
-                    "{} bytes @ {} / total {}{}",
-                    chunk.bytes.len(),
-                    chunk.offset,
-                    total,
-                    if chunk.truncated { " / truncated" } else { "" }
+                    "{} bytes / {}",
+                    loaded_chunks
+                        .iter()
+                        .map(|chunk| chunk.bytes.len())
+                        .sum::<usize>(),
+                    real_stream_chunks_range_label(&loaded_chunks)
                 )),
             );
-            let mut visible_text = stream_chunk_display_text(&chunk, self.real_stream_view_mode);
-            ui.add(
-                TextEdit::multiline(&mut visible_text)
-                    .font(egui::TextStyle::Monospace)
-                    .desired_rows(14)
-                    .code_editor()
-                    .interactive(false),
+            let visible_text = real_stream_chunks_visible_text(
+                &loaded_chunks,
+                self.real_stream_view_mode,
+                self.real_stream_preset,
             );
-            if ui.button("Copy visible chunk").clicked() {
-                let escaped =
-                    escape_pdf_text(&visible_text, EgressFormat::Markdown, COPY_LIMIT_BYTES);
-                ctx.copy_text(escaped.text.clone());
-                self.status_log.push(format!(
-                    "copied visible {} {} stream chunk{}",
-                    stream_view_mode_label(self.real_stream_view_mode).to_ascii_lowercase(),
+            let view_height = (ui.available_height() - 32.0).max(STREAM_VIEW_MIN_HEIGHT);
+            let scroll_output = ScrollArea::both()
+                .id_salt((
+                    "real_stream_visible_chunk",
+                    loaded_chunks
+                        .first()
+                        .map(|chunk| chunk.offset)
+                        .unwrap_or_default(),
                     stream_mode_label(chunk.mode),
-                    if escaped.truncated {
-                        " (truncated)"
+                    stream_view_mode_label(self.real_stream_view_mode),
+                ))
+                .min_scrolled_height(view_height)
+                .max_height(view_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if self.real_stream_preset == RealStreamPreset::Nice
+                        && self.real_stream_view_mode == StreamViewMode::Text
+                    {
+                        self.draw_nice_stream_lines(ui, stream.object, &loaded_chunks);
                     } else {
-                        ""
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(visible_text.as_str())
+                                    .font(mono_font_id(STREAM_VIEW_FONT_SIZE))
+                                    .color(PdbgTheme::TEXT),
+                            )
+                            .extend()
+                            .selectable(true),
+                        );
                     }
-                ));
-                self.copied_excerpt = Some(escaped);
+                });
+            let auto_request_offset = {
+                let hovered = ui.input(|input| {
+                    input
+                        .pointer
+                        .hover_pos()
+                        .is_some_and(|pos| scroll_output.inner_rect.contains(pos))
+                });
+                let scroll_delta_y = ui.input(|input| input.smooth_scroll_delta.y);
+                real_stream_scroll_request(
+                    scroll_output.state.offset.y,
+                    scroll_output.inner_rect.height(),
+                    scroll_output.content_size.y,
+                    scroll_delta_y,
+                    hovered,
+                    &loaded_chunks,
+                    self.real_stream_limit,
+                )
+            };
+            if let Some(offset) = auto_request_offset {
+                self.real_stream_offset = offset;
+                self.refresh_real_stream_chunk(stream.object);
             }
+            ui.horizontal(|ui| {
+                if ui.button("Copy visible text").clicked() {
+                    let escaped =
+                        escape_pdf_text(&visible_text, EgressFormat::Markdown, COPY_LIMIT_BYTES);
+                    ctx.copy_text(escaped.text.clone());
+                    self.status_log.push(format!(
+                        "copied visible {} {} stream text{}",
+                        stream_view_mode_label(self.real_stream_view_mode).to_ascii_lowercase(),
+                        stream_mode_label(chunk.mode),
+                        if escaped.truncated {
+                            " (truncated)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    self.copied_excerpt = Some(escaped);
+                }
+                if self.real_stream_job.is_some() {
+                    ui.label(
+                        RichText::new("loading more...")
+                            .small()
+                            .color(PdbgTheme::MUTED),
+                    );
+                } else if real_stream_chunks_has_more(&loaded_chunks) {
+                    ui.label(
+                        RichText::new("more available; scroll down to load")
+                            .small()
+                            .color(PdbgTheme::MUTED),
+                    );
+                }
+            });
         });
 
         if !chunk.decode_diagnostics.is_empty() {
             ui.add_space(8.0);
             for diagnostic in &chunk.decode_diagnostics {
                 draw_diagnostic_card(ui, diagnostic);
+            }
+        }
+    }
+
+    fn draw_nice_stream_lines(
+        &mut self,
+        ui: &mut egui::Ui,
+        object: ObjectId,
+        chunks: &[StreamChunk],
+    ) {
+        let rows = real_stream_nice_render_lines(object, chunks);
+        let mut hidden_block_indent = None;
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for row in &rows {
+            let line = &row.line;
+            if let Some(indent) = hidden_block_indent {
+                if line.indent > indent {
+                    continue;
+                }
+                if line.indent == indent && line.block_close {
+                    hidden_block_indent = None;
+                    continue;
+                }
+                hidden_block_indent = None;
+            }
+
+            let mut collapsed =
+                line.block_open && self.real_stream_collapsed_blocks.contains(&row.line_key);
+            let selection_key = row.block_key.as_deref().unwrap_or(row.line_key.as_str());
+            let selected = self.real_stream_selected_block.as_deref() == Some(selection_key);
+            let row_response = ui.horizontal(|ui| {
+                ui.add_space(line.indent as f32 * NICE_STREAM_INDENT_WIDTH);
+                if line.block_open {
+                    let marker = if collapsed { "+" } else { "-" };
+                    if ui
+                        .small_button(marker)
+                        .on_hover_text("Collapse or expand this content block")
+                        .clicked()
+                    {
+                        collapsed = !collapsed;
+                        if collapsed {
+                            self.real_stream_collapsed_blocks
+                                .insert(row.line_key.clone());
+                        } else {
+                            self.real_stream_collapsed_blocks.remove(&row.line_key);
+                        }
+                        self.real_stream_selected_block = Some(row.line_key.clone());
+                    }
+                } else {
+                    ui.add_space(22.0);
+                }
+
+                let color = if line.block_open {
+                    PdbgTheme::ACCENT
+                } else if line.block_close {
+                    PdbgTheme::MUTED
+                } else {
+                    PdbgTheme::TEXT
+                };
+                let response = ui.selectable_label(
+                    selected,
+                    RichText::new(line.text.as_str())
+                        .font(mono_font_id(STREAM_VIEW_FONT_SIZE))
+                        .color(color),
+                );
+                if response.clicked() {
+                    self.real_stream_selected_block = Some(selection_key.to_string());
+                    if line.block_open {
+                        collapsed = !collapsed;
+                        if collapsed {
+                            self.real_stream_collapsed_blocks
+                                .insert(row.line_key.clone());
+                        } else {
+                            self.real_stream_collapsed_blocks.remove(&row.line_key);
+                        }
+                    }
+                }
+            });
+            draw_nice_stream_guides(
+                ui,
+                row_response.response.rect,
+                &row.guide_blocks,
+                self.real_stream_selected_block.as_deref(),
+            );
+            if line.block_open && collapsed {
+                hidden_block_indent = Some(line.indent);
             }
         }
     }
@@ -5017,11 +5855,39 @@ impl GuiShellApp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RealStreamPreset {
+    Nice,
+    Raw,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RealStreamKey {
     object: ObjectId,
     mode: StreamMode,
     offset: u64,
     limit: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RealStreamLoadedWindow {
+    key: RealStreamKey,
+    chunk: StreamChunk,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NiceStreamLine {
+    indent: usize,
+    text: String,
+    block_open: bool,
+    block_close: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NiceStreamRenderLine {
+    line: NiceStreamLine,
+    line_key: String,
+    block_key: Option<String>,
+    guide_blocks: Vec<(usize, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6228,6 +7094,204 @@ mod tests {
         assert_eq!(
             stream_chunk_display_text(&chunk, StreamViewMode::Bytes),
             "72 105 10"
+        );
+    }
+
+    #[test]
+    fn pdf_content_stream_nice_text_indents_content_stream_structure() {
+        let nice = pdf_content_stream_nice_text(
+            b"q 1 0 0 -1 0 792 cm q /GS63 gs 0 0 541.44 753.96 re f* Q \
+              /P << /MCID 0 >> BDC BT /FT68 360 Tf <0017> Tj ET EMC Q",
+        );
+
+        assert_eq!(
+            nice,
+            "q\n  1 0 0 -1 0 792 cm\n  q\n    /GS63 gs\n    0 0 541.44 753.96 re\n    f*\n  Q\n  /P << /MCID 0 >> BDC\n    BT\n      /FT68 360 Tf\n      <0017> Tj\n    ET\n  EMC\nQ\n"
+        );
+    }
+
+    #[test]
+    fn nice_stream_render_lines_group_selection_by_structural_block() {
+        let object = ObjectId { num: 38, gen: 0 };
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: b"q /P << /MCID 0 >> BDC BT /F1 9 Tf (Hi) Tj ET EMC Q".to_vec(),
+            total_size: Some(64),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+
+        let rows = real_stream_nice_render_lines(object, &chunks);
+        let bdc_key = rows
+            .iter()
+            .find(|row| row.line.text.ends_with(" BDC"))
+            .unwrap()
+            .line_key
+            .clone();
+        let bt_key = rows
+            .iter()
+            .find(|row| row.line.text == "BT")
+            .unwrap()
+            .line_key
+            .clone();
+
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.line.text == "/F1 9 Tf")
+                .unwrap()
+                .block_key
+                .as_deref(),
+            Some(bt_key.as_str())
+        );
+        assert!(rows
+            .iter()
+            .find(|row| row.line.text == "/F1 9 Tf")
+            .unwrap()
+            .guide_blocks
+            .iter()
+            .any(|(_, key)| key == &bdc_key));
+        assert!(rows
+            .iter()
+            .find(|row| row.line.text == "/F1 9 Tf")
+            .unwrap()
+            .guide_blocks
+            .iter()
+            .any(|(_, key)| key == &bt_key));
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.line.text == "EMC")
+                .unwrap()
+                .block_key
+                .as_deref(),
+            Some(bdc_key.as_str())
+        );
+    }
+
+    #[test]
+    fn real_stream_default_limit_uses_bounded_windows() {
+        let stream = StreamSummary {
+            object: ObjectId { num: 262, gen: 0 },
+            filters: vec!["FlateDecode".to_string()],
+            raw_size_hint: Some(6417),
+            decoded_size_hint: None,
+            can_decode: true,
+            image_preview_available: false,
+        };
+
+        assert_eq!(real_stream_default_limit(&stream, StreamMode::Raw), 6417);
+        assert_eq!(
+            real_stream_default_limit(&stream, StreamMode::Decoded),
+            REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn real_stream_chunks_range_label_describes_loaded_span_not_manual_windows() {
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: vec![b' '; 4096],
+            total_size: Some(72_511),
+            truncated: true,
+            decode_diagnostics: Vec::new(),
+        }];
+
+        let label = real_stream_chunks_range_label(&chunks);
+
+        assert_eq!(label, "bytes 0..4096 / total 72511 / more");
+        assert!(!label.contains("truncated"));
+        assert!(real_stream_chunks_has_more(&chunks));
+    }
+
+    #[test]
+    fn real_stream_scroll_request_loads_adjacent_content_at_edges() {
+        let chunks = vec![
+            StreamChunk {
+                mode: StreamMode::Decoded,
+                offset: 4096,
+                bytes: vec![b' '; 4096],
+                total_size: Some(16_000),
+                truncated: false,
+                decode_diagnostics: Vec::new(),
+            },
+            StreamChunk {
+                mode: StreamMode::Decoded,
+                offset: 8192,
+                bytes: vec![b' '; 4096],
+                total_size: Some(16_000),
+                truncated: true,
+                decode_diagnostics: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            real_stream_scroll_request(300.0, 100.0, 400.0, -24.0, true, &chunks, 4096),
+            Some(12_288)
+        );
+        assert_eq!(
+            real_stream_scroll_request(0.0, 100.0, 400.0, 24.0, true, &chunks, 4096),
+            Some(0)
+        );
+        assert_eq!(
+            real_stream_scroll_request(160.0, 100.0, 400.0, -24.0, true, &chunks, 4096),
+            None
+        );
+        assert_eq!(
+            real_stream_scroll_request(300.0, 100.0, 400.0, -24.0, false, &chunks, 4096),
+            None
+        );
+    }
+
+    #[test]
+    fn real_stream_window_cache_keeps_recent_neighbors_bounded() {
+        let mut app = GuiShellApp::new();
+        let object = ObjectId { num: 4, gen: 0 };
+        for index in 0..(REAL_STREAM_MAX_LOADED_WINDOWS + 2) {
+            let offset = (index * 64) as u64;
+            let key = RealStreamKey {
+                object,
+                mode: StreamMode::Decoded,
+                offset,
+                limit: 64,
+            };
+            app.insert_real_stream_window(
+                key,
+                StreamChunk {
+                    mode: StreamMode::Decoded,
+                    offset,
+                    bytes: vec![b' '; 64],
+                    total_size: Some(1024),
+                    truncated: true,
+                    decode_diagnostics: Vec::new(),
+                },
+            );
+        }
+
+        assert_eq!(
+            app.real_stream_windows.len(),
+            REAL_STREAM_MAX_LOADED_WINDOWS
+        );
+        assert_eq!(app.real_stream_windows.front().unwrap().key.offset, 2 * 64);
+        assert_eq!(
+            app.real_stream_windows.back().unwrap().key.offset,
+            (REAL_STREAM_MAX_LOADED_WINDOWS + 1) as u64 * 64
+        );
+    }
+
+    #[test]
+    fn real_stream_view_presets_choose_nice_text_and_raw_hex() {
+        assert_eq!(
+            real_stream_preset_defaults(RealStreamPreset::Nice, true),
+            (StreamMode::Decoded, StreamViewMode::Text)
+        );
+        assert_eq!(
+            real_stream_preset_defaults(RealStreamPreset::Nice, false),
+            (StreamMode::Raw, StreamViewMode::Text)
+        );
+        assert_eq!(
+            real_stream_preset_defaults(RealStreamPreset::Raw, true),
+            (StreamMode::Raw, StreamViewMode::Hex)
         );
     }
 
