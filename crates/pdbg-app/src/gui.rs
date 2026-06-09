@@ -681,7 +681,7 @@ fn section_header(ui: &mut egui::Ui, title: &str, detail: Option<&str>) {
                 .size(13.0)
                 .color(PdbgTheme::TEXT),
         );
-        if let Some(detail) = detail {
+        if let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) {
             let detail_width = ui.available_width().max(0.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 truncated_label(
@@ -694,6 +694,59 @@ fn section_header(ui: &mut egui::Ui, title: &str, detail: Option<&str>) {
         }
     });
     ui.add_space(4.0);
+}
+
+fn search_match_label(hits: usize, truncated: bool) -> String {
+    let noun = if hits == 1 { "match" } else { "matches" };
+    let suffix = if truncated { " · truncated" } else { "" };
+    format!("{hits} {noun}{suffix}")
+}
+
+/// Grouped, single-select control rendered as one rounded pill. Each option is
+/// `(value, label, enabled)`; the selected segment is filled with the accent and
+/// disabled segments are muted and non-interactive. Returns `true` if the
+/// selection changed this frame.
+fn segmented_control<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    options: &[(T, &str, bool)],
+) -> bool {
+    let mut changed = false;
+    egui::Frame::new()
+        .fill(PdbgTheme::CHIP_BG)
+        .stroke(egui::Stroke::new(1.0, PdbgTheme::BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+                ui.spacing_mut().button_padding = egui::vec2(11.0, 3.0);
+                for (value, label, enabled) in options {
+                    let selected = *current == *value;
+                    let fg = if selected {
+                        Color32::WHITE
+                    } else if *enabled {
+                        PdbgTheme::TEXT
+                    } else {
+                        PdbgTheme::MUTED
+                    };
+                    let fill = if selected {
+                        PdbgTheme::ACCENT
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let button = egui::Button::new(RichText::new(*label).size(12.0).color(fg))
+                        .fill(fill)
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(4);
+                    if ui.add_enabled(*enabled, button).clicked() && !selected {
+                        *current = *value;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
 }
 
 fn truncated_label(
@@ -3052,7 +3105,7 @@ impl GuiShellApp {
         };
         if !stream.can_decode {
             self.status_log.push(format!(
-                "stream {} cannot decode for preview-to-Nice View selection",
+                "stream {} cannot decode for preview-to-formatted selection",
                 object_ref_text(stream.object)
             ));
             self.pending_preview_stream_selection = None;
@@ -3969,19 +4022,14 @@ fn object_search_status_label(
     running: bool,
 ) -> String {
     if running {
-        return "searching".to_string();
+        return "Searching…".to_string();
     }
     if error.is_some() {
-        return "failed".to_string();
+        return "Search failed".to_string();
     }
     match result {
-        Some(result) => format!(
-            "{} hits / {} nodes{}",
-            result.hits.len(),
-            result.searched_nodes,
-            if result.truncated { " / truncated" } else { "" }
-        ),
-        None => "bounded lazy search".to_string(),
+        Some(result) => search_match_label(result.hits.len(), result.truncated),
+        None => String::new(),
     }
 }
 
@@ -4039,25 +4087,16 @@ fn text_search_status_label(
     result: Option<&TextSearchResult>,
     error: Option<&str>,
     running: bool,
-    cached_pages: usize,
-    cached_bytes: usize,
 ) -> String {
     if running {
-        return "running".to_string();
+        return "Searching…".to_string();
     }
     if error.is_some() {
-        return format!("failed / {cached_pages} cached");
+        return "Search failed".to_string();
     }
     match result {
-        Some(result) => format!(
-            "{} hits / {} pages{} / {} cached / {} KiB",
-            result.hits.len(),
-            result.searched_pages,
-            if result.truncated { " / truncated" } else { "" },
-            cached_pages,
-            cached_bytes / 1024
-        ),
-        None => format!("{cached_pages} cached / {} KiB", cached_bytes / 1024),
+        Some(result) => search_match_label(result.hits.len(), result.truncated),
+        None => String::new(),
     }
 }
 
@@ -4258,8 +4297,8 @@ fn stream_view_mode_label(mode: StreamViewMode) -> &'static str {
 
 fn real_stream_preset_label(preset: RealStreamPreset) -> &'static str {
     match preset {
-        RealStreamPreset::Nice => "Nice View",
-        RealStreamPreset::Raw => "Raw View",
+        RealStreamPreset::Nice => "Formatted",
+        RealStreamPreset::Raw => "Raw",
     }
 }
 
@@ -4293,28 +4332,19 @@ fn real_stream_chunk_has_more(chunk: &StreamChunk) -> bool {
         .unwrap_or(chunk.truncated)
 }
 
-fn real_stream_chunks_range_label(chunks: &[StreamChunk]) -> String {
-    let Some(first) = chunks.first() else {
-        return "no bytes loaded".to_string();
-    };
-    let Some(last) = chunks.last() else {
-        return "no bytes loaded".to_string();
-    };
-    let loaded_end = last.offset.saturating_add(last.bytes.len() as u64);
-    let total = last
-        .total_size
-        .map(|total| format!(" / total {total}"))
-        .unwrap_or_default();
-    let more = if real_stream_chunk_has_more(last) {
-        " / more"
-    } else {
-        ""
-    };
-    format!("bytes {}..{}{total}{more}", first.offset, loaded_end)
-}
-
 fn real_stream_chunks_has_more(chunks: &[StreamChunk]) -> bool {
     chunks.last().is_some_and(real_stream_chunk_has_more)
+}
+
+fn real_stream_loaded_label(chunks: &[StreamChunk]) -> String {
+    let loaded: u64 = chunks.iter().map(|chunk| chunk.bytes.len() as u64).sum();
+    let total = chunks.last().and_then(|chunk| chunk.total_size);
+    match total {
+        Some(total) if loaded < total => format!("{loaded} of {total} bytes"),
+        Some(total) => format!("{total} bytes"),
+        None if real_stream_chunks_has_more(chunks) => format!("{loaded} bytes loaded · more"),
+        None => format!("{loaded} bytes"),
+    }
 }
 
 fn real_stream_chunks_visible_text(
@@ -5547,23 +5577,40 @@ impl GuiShellApp {
             }
             if !self.recent_pdf_paths.is_empty() {
                 let mut recent_to_open = None;
-                ui.menu_button(
-                    RichText::new("Recent")
-                        .size(12.0)
-                        .color(PdbgTheme::TOP_BAR_TEXT),
-                    |ui| {
-                        for path in self.recent_pdf_paths.clone() {
-                            if ui
-                                .button(display_file_chip_label(&path))
-                                .on_hover_text(display_path_hover(&path))
-                                .clicked()
-                            {
-                                recent_to_open = Some(path);
-                                ui.close();
+                ui.scope(|ui| {
+                    // Match the dark top-bar buttons; the default widget fill is
+                    // light, which made the light "Recent" label invisible.
+                    let dark = Color32::from_rgb(42, 54, 68);
+                    let dark_hover = Color32::from_rgb(58, 72, 88);
+                    let widgets = &mut ui.visuals_mut().widgets;
+                    widgets.inactive.weak_bg_fill = dark;
+                    widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                    widgets.hovered.weak_bg_fill = dark_hover;
+                    widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                    widgets.active.weak_bg_fill = dark_hover;
+                    widgets.active.bg_stroke = egui::Stroke::NONE;
+                    widgets.open.weak_bg_fill = dark_hover;
+                    widgets.open.bg_stroke = egui::Stroke::NONE;
+                    ui.menu_button(
+                        RichText::new("Recent")
+                            .size(12.0)
+                            .color(PdbgTheme::TOP_BAR_TEXT),
+                        |ui| {
+                            // Restore the app style so the dropdown stays light.
+                            ui.set_style(pdbg_style());
+                            for path in self.recent_pdf_paths.clone() {
+                                if ui
+                                    .button(display_file_chip_label(&path))
+                                    .on_hover_text(display_path_hover(&path))
+                                    .clicked()
+                                {
+                                    recent_to_open = Some(path);
+                                    ui.close();
+                                }
                             }
-                        }
-                    },
-                );
+                        },
+                    );
+                });
                 if let Some(path) = recent_to_open {
                     self.open_pdf_from_path(path);
                 }
@@ -5584,13 +5631,19 @@ impl GuiShellApp {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !self.empty_workspace {
-                    let (dot, color, hover) = if self.safe_mode_active() {
-                        ("●", PdbgTheme::SAFE, "Safe Mode")
+                    let (color, label, hover) = if self.safe_mode_active() {
+                        (PdbgTheme::SAFE, "Safe Mode", "Safe Mode on")
                     } else {
-                        ("●", PdbgTheme::ERROR_FG, "Safe Mode off")
+                        (PdbgTheme::ERROR_FG, "Safe Mode off", "Safe Mode off")
                     };
-                    ui.label(RichText::new(dot).size(14.0).color(color))
+                    ui.label(RichText::new("●").size(12.0).color(color))
                         .on_hover_text(hover);
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(label)
+                            .size(11.0)
+                            .color(PdbgTheme::TOP_BAR_MUTED),
+                    );
                 }
             });
         });
@@ -5786,8 +5839,6 @@ impl GuiShellApp {
             self.text_search_result.as_ref(),
             self.text_search_error.as_deref(),
             self.text_search_job.is_some(),
-            self.text_search_cache.len(),
-            self.text_search_cache.current_bytes(),
         );
         section_header(ui, "Text Search", Some(&status));
 
@@ -5877,9 +5928,9 @@ impl GuiShellApp {
         }
 
         let preview_detail = if self.tree.is_real() {
-            "real MuPDF render"
+            ""
         } else {
-            "fake renderer surface"
+            "sample data"
         };
         section_header(ui, "Page Preview", Some(preview_detail));
         if self.draw_real_page_preview(ui) {
@@ -6297,11 +6348,15 @@ impl GuiShellApp {
         }
 
         section_header(ui, "Inspector", Some(&self.selected_object_label()));
-        ui.horizontal(|ui| {
-            self.tab_button(ui, InspectorTab::Object, "Object");
-            self.tab_button(ui, InspectorTab::Stream, "Stream");
-            self.tab_button(ui, InspectorTab::Diagnostics, "Diagnostics");
-        });
+        segmented_control(
+            ui,
+            &mut self.selected_tab,
+            &[
+                (InspectorTab::Object, "Object", true),
+                (InspectorTab::Stream, "Stream", true),
+                (InspectorTab::Diagnostics, "Diagnostics", true),
+            ],
+        );
         ui.add_space(6.0);
 
         match self.selected_tab {
@@ -6321,16 +6376,6 @@ impl GuiShellApp {
                 self.open_pdf_error = None;
             }
         });
-    }
-
-    fn tab_button(&mut self, ui: &mut egui::Ui, tab: InspectorTab, label: &str) {
-        if ui
-            .selectable_label(self.selected_tab == tab, label)
-            .on_hover_text(format!("{label} panel"))
-            .clicked()
-        {
-            self.selected_tab = tab;
-        }
     }
 
     fn draw_object_panel(&mut self, ui: &mut egui::Ui) {
@@ -6757,7 +6802,7 @@ impl GuiShellApp {
         };
 
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream Summary", Some("real bounded bytes"));
+            section_header(ui, "Stream Summary", None);
             draw_stream_summary_grid(ui, &stream);
         });
 
@@ -6772,29 +6817,20 @@ impl GuiShellApp {
         let mut request_changed = false;
         let mut force_reload = false;
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream View", Some("nice operations / raw bytes"));
+            section_header(ui, "Stream View", None);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("View").small().color(PdbgTheme::MUTED));
-                if ui
-                    .selectable_value(
-                        &mut self.real_stream_preset,
-                        RealStreamPreset::Nice,
-                        "Nice View",
-                    )
-                    .changed()
-                {
+                if segmented_control(
+                    ui,
+                    &mut self.real_stream_preset,
+                    &[
+                        (RealStreamPreset::Nice, "Formatted", true),
+                        (RealStreamPreset::Raw, "Raw", true),
+                    ],
+                ) {
                     request_changed |= self.apply_real_stream_preset(&stream);
                 }
-                if ui
-                    .selectable_value(
-                        &mut self.real_stream_preset,
-                        RealStreamPreset::Raw,
-                        "Raw View",
-                    )
-                    .changed()
-                {
-                    request_changed |= self.apply_real_stream_preset(&stream);
-                }
+                ui.add_space(6.0);
                 if ui.button("Reload").clicked() {
                     force_reload = true;
                 }
@@ -6802,19 +6838,15 @@ impl GuiShellApp {
             ui.collapsing("Advanced", |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Mode").small().color(PdbgTheme::MUTED));
-                    request_changed |= ui
-                        .selectable_value(&mut self.real_stream_mode, StreamMode::Raw, "Raw")
-                        .changed();
                     let decoded_enabled = stream.can_decode;
-                    ui.add_enabled_ui(decoded_enabled, |ui| {
-                        request_changed |= ui
-                            .selectable_value(
-                                &mut self.real_stream_mode,
-                                StreamMode::Decoded,
-                                "Decoded",
-                            )
-                            .changed();
-                    });
+                    request_changed |= segmented_control(
+                        ui,
+                        &mut self.real_stream_mode,
+                        &[
+                            (StreamMode::Raw, "Raw", true),
+                            (StreamMode::Decoded, "Decoded", decoded_enabled),
+                        ],
+                    );
                     if !decoded_enabled && self.real_stream_mode == StreamMode::Decoded {
                         self.real_stream_mode = StreamMode::Raw;
                         request_changed = true;
@@ -6822,27 +6854,15 @@ impl GuiShellApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Format").small().color(PdbgTheme::MUTED));
-                    request_changed |= ui
-                        .selectable_value(
-                            &mut self.real_stream_view_mode,
-                            StreamViewMode::Hex,
-                            "Hex",
-                        )
-                        .changed();
-                    request_changed |= ui
-                        .selectable_value(
-                            &mut self.real_stream_view_mode,
-                            StreamViewMode::Text,
-                            "Text",
-                        )
-                        .changed();
-                    request_changed |= ui
-                        .selectable_value(
-                            &mut self.real_stream_view_mode,
-                            StreamViewMode::Bytes,
-                            "Bytes",
-                        )
-                        .changed();
+                    request_changed |= segmented_control(
+                        ui,
+                        &mut self.real_stream_view_mode,
+                        &[
+                            (StreamViewMode::Hex, "Hex", true),
+                            (StreamViewMode::Text, "Text", true),
+                            (StreamViewMode::Bytes, "Bytes", true),
+                        ],
+                    );
                 });
                 ui.add_space(4.0);
                 egui::Grid::new("real_stream_controls_grid")
@@ -6910,14 +6930,7 @@ impl GuiShellApp {
             section_header(
                 ui,
                 real_stream_preset_label(self.real_stream_preset),
-                Some(&format!(
-                    "{} bytes / {}",
-                    loaded_chunks
-                        .iter()
-                        .map(|chunk| chunk.bytes.len())
-                        .sum::<usize>(),
-                    real_stream_chunks_range_label(&loaded_chunks)
-                )),
+                Some(&real_stream_loaded_label(&loaded_chunks)),
             );
             let visible_text = real_stream_chunks_visible_text(
                 &loaded_chunks,
@@ -9189,8 +9202,8 @@ mod tests {
     }
 
     #[test]
-    fn real_stream_chunks_range_label_describes_loaded_span_not_manual_windows() {
-        let chunks = vec![StreamChunk {
+    fn real_stream_loaded_label_reports_partial_and_complete_spans() {
+        let partial = vec![StreamChunk {
             mode: StreamMode::Decoded,
             offset: 0,
             bytes: vec![b' '; 4096],
@@ -9198,12 +9211,18 @@ mod tests {
             truncated: true,
             decode_diagnostics: Vec::new(),
         }];
+        assert_eq!(real_stream_loaded_label(&partial), "4096 of 72511 bytes");
+        assert!(real_stream_chunks_has_more(&partial));
 
-        let label = real_stream_chunks_range_label(&chunks);
-
-        assert_eq!(label, "bytes 0..4096 / total 72511 / more");
-        assert!(!label.contains("truncated"));
-        assert!(real_stream_chunks_has_more(&chunks));
+        let complete = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: vec![b' '; 2860],
+            total_size: Some(2860),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+        assert_eq!(real_stream_loaded_label(&complete), "2860 bytes");
     }
 
     #[test]
