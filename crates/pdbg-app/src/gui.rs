@@ -4228,33 +4228,55 @@ fn draw_stream_summary_grid(ui: &mut egui::Ui, stream: &StreamSummary) {
             )));
             ui.end_row();
             dense_label(ui, "filters");
-            ui.label(dense_monospace_text(if stream.filters.is_empty() {
-                "-".to_string()
+            if stream.filters.is_empty() {
+                summary_empty_value(ui);
             } else {
-                stream.filters.join(", ")
-            }));
+                ui.label(dense_monospace_text(stream.filters.join(", ")));
+            }
             ui.end_row();
             dense_label(ui, "raw size");
-            ui.label(dense_monospace_text(optional_u64(stream.raw_size_hint)));
+            summary_optional_size(ui, stream.raw_size_hint);
             ui.end_row();
             dense_label(ui, "decoded size");
-            ui.label(dense_monospace_text(optional_u64(stream.decoded_size_hint)));
+            summary_optional_size(ui, stream.decoded_size_hint);
             ui.end_row();
             dense_label(ui, "can decode");
-            ui.label(dense_monospace_text(stream.can_decode.to_string()));
+            summary_flag(ui, stream.can_decode);
             ui.end_row();
             dense_label(ui, "image preview");
-            ui.label(dense_monospace_text(
-                stream.image_preview_available.to_string(),
-            ));
+            summary_flag(ui, stream.image_preview_available);
             ui.end_row();
         });
 }
 
-fn optional_u64(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "-".to_string())
+fn summary_empty_value(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("—")
+            .font(mono_font_id(DENSE_ROW_FONT_SIZE))
+            .color(PdbgTheme::MUTED),
+    );
+}
+
+fn summary_optional_size(ui: &mut egui::Ui, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            ui.label(dense_monospace_text(value.to_string()));
+        }
+        None => summary_empty_value(ui),
+    }
+}
+
+fn summary_flag(ui: &mut egui::Ui, value: bool) {
+    let (text, color) = if value {
+        ("yes", PdbgTheme::SAFE)
+    } else {
+        ("no", PdbgTheme::MUTED)
+    };
+    ui.label(
+        RichText::new(text)
+            .font(mono_font_id(DENSE_ROW_FONT_SIZE))
+            .color(color),
+    );
 }
 
 fn render_result_color_image(render: &RenderResult) -> Option<egui::ColorImage> {
@@ -7444,12 +7466,6 @@ impl RealObjectTree {
         self.rows.len().max(1)
     }
 
-    fn loaded_child_count(&self) -> usize {
-        self.rows
-            .len()
-            .saturating_sub(self.has_document_root_row() as usize)
-    }
-
     fn has_document_root_row(&self) -> bool {
         self.rows
             .first()
@@ -7465,9 +7481,15 @@ impl RealObjectTree {
     }
 
     fn row_count_label(&self) -> String {
+        // Count top-level objects on both sides; `total` is the document's root
+        // child count, so pairing it with the (deeper) materialized row count
+        // would read as "15 loaded / 4 total".
+        let loaded = self.root_children.len();
+        let object_noun = |count: usize| if count == 1 { "object" } else { "objects" };
         match self.total {
-            Some(total) => format!("{} loaded / {total} total", self.loaded_child_count()),
-            None => format!("{} loaded", self.loaded_child_count()),
+            Some(total) if loaded < total => format!("{loaded} of {total} objects"),
+            Some(total) => format!("{total} {}", object_noun(total)),
+            None => format!("{loaded} {}", object_noun(loaded)),
         }
     }
 
@@ -9392,7 +9414,7 @@ mod tests {
             items: vec![summary],
         });
 
-        assert_eq!(tree.row_count_label(), "1 loaded / 1 total");
+        assert_eq!(tree.row_count_label(), "1 object");
         assert_eq!(tree.row_depth(0), Some(0));
         assert_eq!(tree.row_depth(1), Some(1));
         assert_eq!(tree.row_tree_marker(0), Some("-"));
@@ -9826,7 +9848,7 @@ mod tests {
         assert!(app.state.is_ok());
         assert!(matches!(app.tree, TreeModel::Real(_)));
         assert_eq!(app.tree.row_count(), 5);
-        assert_eq!(app.tree.row_count_label(), "4 loaded / 4 total");
+        assert_eq!(app.tree.row_count_label(), "4 objects");
         assert!(app.real_detail.is_some());
         let pages = app.real_pages.as_ref().unwrap();
         assert_eq!(pages.total, Some(1));
