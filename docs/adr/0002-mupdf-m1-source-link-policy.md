@@ -15,14 +15,17 @@ developer builds is:
 https://casper.mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz
 ```
 
-The `real-mupdf` build remains opt-in. The default workspace continues to build
-and test only the fake shim.
+As of the product-preview GUI path, `pdbg-app` enables `gui` plus `real-mupdf`
+by default. MuPDF source and build outputs remain outside git; the repository
+tracks only `third_party/mupdf.version` and `scripts/setup-mupdf.sh` so local
+developer builds use the same pinned upstream archive. The fake shim remains
+available for lower-level contract tests and no-MuPDF builds.
 
 For M1 developer builds, the preferred source layout is an extracted pinned
-MuPDF source tree outside the default workspace, referenced by
-`PDBG_MUPDF_SOURCE_DIR`. A checked-in `third_party/mupdf-1.27.2` tree may be
-introduced later only together with regenerated notices and corresponding-source
-publication steps.
+MuPDF source tree under ignored `third_party/` paths or another local directory,
+referenced by `PDBG_MUPDF_SOURCE_DIR`. A checked-in `third_party/mupdf-1.27.2`
+tree may be introduced later only together with regenerated notices and
+corresponding-source publication steps.
 
 The M1 link mode is static by default. `pdbg-shim/build.rs` accepts
 `PDBG_MUPDF_LINK_MODE` and `PDBG_MUPDF_LIBS` for local experiments, but the
@@ -41,17 +44,18 @@ change.
 
 ## Build Contract
 
-The default build must remain MuPDF-free:
+Prepare the pinned local MuPDF tree from the repository root:
 
 ```sh
-cargo test --workspace
+sh scripts/setup-mupdf.sh
+. third_party/mupdf.env
 ```
 
-The real MuPDF build is enabled explicitly:
+Then the app default build uses real MuPDF:
 
 ```sh
-PDBG_MUPDF_SOURCE_DIR=/path/to/mupdf-1.27.2-source \
-cargo test -p pdbg-shim --no-default-features --features real-mupdf
+cargo run -p pdbg-app -- --gui
+cargo test -p pdbg-app
 ```
 
 If MuPDF was built into a non-default location, set:
@@ -65,17 +69,22 @@ PDBG_MUPDF_LIB_DIR=/path/to/mupdf/build/release
 third-party libraries may be added locally while M1.1/M1.2 settles the final
 static link line.
 
-The full M1 real gate is:
+The full real gate is:
 
 ```sh
-PDBG_MUPDF_SOURCE_DIR=/path/to/mupdf-1.27.2-source \
 sh scripts/run_real_gate.sh
 ```
 
-GitHub Actions keeps the default `m0` workflow MuPDF-free. The opt-in
-`real-mupdf` workflow is triggered manually with `workflow_dispatch`; it
-downloads the pinned MuPDF source archive, builds the static libraries plus
-`mutool`, and runs the same `scripts/run_real_gate.sh` contract.
+No-MuPDF contract checks remain available through explicit no-default-feature
+builds:
+
+```sh
+sh scripts/run_m0_local_gate.sh
+```
+
+GitHub Actions jobs that run real MuPDF should use the pinned source archive,
+build the static libraries plus `mutool`, and run the same
+`scripts/run_real_gate.sh` contract.
 
 This gate also requires `mutool` for runtime generation of the encrypted-PDF
 fixture. By default it expects:

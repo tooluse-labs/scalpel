@@ -17,6 +17,6 @@ name = "pdbg-app"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["gui", "real-mupdf"]
 gui = ["dep:eframe", "dep:rfd"]
 real-mupdf = ["pdbg-core/real-mupdf"]

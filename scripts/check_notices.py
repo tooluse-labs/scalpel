@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify NOTICES coverage for the default graph, MuPDF placeholder, and GUI fonts."""
+"""Verify NOTICES coverage for workspace packages, MuPDF, and GUI fonts."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ NOTICES = ROOT / "NOTICES"
 
 def main() -> int:
     notices = NOTICES.read_text(encoding="utf-8")
-    package_names = default_resolve_package_names()
+    package_names = workspace_package_names()
 
     missing: list[str] = []
     for needle in ["AGPL-3.0-only", "MuPDF", "real-mupdf"]:
@@ -37,18 +37,21 @@ def main() -> int:
     return 1 if missing else 0
 
 
-def default_resolve_package_names() -> list[str]:
+def workspace_package_names() -> list[str]:
     metadata = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--no-deps"],
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
         text=True,
     )
     parsed = json.loads(metadata.stdout)
-    packages_by_id = {package["id"]: package["name"] for package in parsed["packages"]}
-    nodes = parsed.get("resolve", {}).get("nodes", [])
-    return sorted({packages_by_id[node["id"]] for node in nodes})
+    workspace_members = set(parsed.get("workspace_members", []))
+    return sorted(
+        package["name"]
+        for package in parsed["packages"]
+        if package["id"] in workspace_members
+    )
 
 
 def gui_font_assets() -> list[str]:

@@ -1,12 +1,17 @@
 #!/bin/sh
 set -eu
 
-: "${PDBG_MUPDF_SOURCE_DIR:?set PDBG_MUPDF_SOURCE_DIR to the pinned MuPDF source tree}"
+if [ -z "${PDBG_MUPDF_SOURCE_DIR:-}" ]; then
+  echo "PDBG_MUPDF_SOURCE_DIR is not set." >&2
+  echo "Run: sh scripts/setup-mupdf.sh && . third_party/mupdf.env" >&2
+  exit 1
+fi
 
 MUTOOL="${PDBG_MUTOOL_PATH:-$PDBG_MUPDF_SOURCE_DIR/build/release/mutool}"
 if [ ! -x "$MUTOOL" ]; then
   echo "mutool not found at $MUTOOL" >&2
   echo "build it with: make build=release build/release/mutool" >&2
+  echo "or run: sh scripts/setup-mupdf.sh && . third_party/mupdf.env" >&2
   echo "or set PDBG_MUTOOL_PATH=/path/to/mutool" >&2
   exit 1
 fi

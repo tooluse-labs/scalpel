@@ -621,7 +621,6 @@ struct PdbgTheme;
 impl PdbgTheme {
     const SURFACE: Color32 = Color32::from_rgb(251, 252, 253);
     const PANEL: Color32 = Color32::from_rgb(247, 249, 251);
-    const PANEL_ALT: Color32 = Color32::from_rgb(242, 246, 249);
     const CANVAS: Color32 = Color32::from_rgb(233, 237, 242);
     const PAGE: Color32 = Color32::from_rgb(255, 253, 248);
     const CODE_BG: Color32 = Color32::from_rgb(245, 247, 250);
@@ -1015,19 +1014,23 @@ fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Respon
     )
 }
 
-fn top_bar_chip(ui: &mut egui::Ui, label: &str, bg: Color32, fg: Color32) {
-    egui::Frame::new()
-        .fill(bg)
-        .corner_radius(3)
-        .inner_margin(egui::Margin::symmetric(7, 3))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(label)
-                    .font(FontId::new(11.0, FontFamily::Name("pdbg-sans".into())))
-                    .strong()
-                    .color(fg),
-            );
-        });
+fn top_bar_icon_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    hover_text: impl Into<String>,
+) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(label).size(16.0).color(if enabled {
+            PdbgTheme::TOP_BAR_TEXT
+        } else {
+            PdbgTheme::TOP_BAR_MUTED
+        }))
+        .fill(Color32::from_rgb(42, 54, 68))
+        .min_size(egui::vec2(30.0, 24.0)),
+    )
+    .on_hover_text(hover_text.into())
 }
 
 fn option_text(value: Option<&str>) -> &str {
@@ -3345,28 +3348,25 @@ impl GuiShellApp {
         }
     }
 
-    fn document_chips(&self) -> (String, String, String) {
+    fn document_file_label(&self) -> String {
         if self.empty_workspace {
-            return (
-                "No PDF".to_string(),
-                "pages -".to_string(),
-                "xref -".to_string(),
-            );
+            return "No PDF".to_string();
         }
         if let Ok(state) = &self.state {
             if let Some(summary) = &state.panels.summary {
-                return (
-                    display_file_chip_label(&summary.file_path),
-                    format!("pages {}", summary.page_count),
-                    format!("xref {}", summary.xref_size),
-                );
+                return display_file_chip_label(&summary.file_path);
             }
         }
-        (
-            "fake.pdf".to_string(),
-            "pages 1".to_string(),
-            "xref 3".to_string(),
-        )
+        "fake.pdf".to_string()
+    }
+
+    fn safe_mode_active(&self) -> bool {
+        self.state
+            .as_ref()
+            .ok()
+            .and_then(|state| state.panels.summary.as_ref())
+            .map(|summary| summary.safety.safe_mode)
+            .unwrap_or(!self.empty_workspace)
     }
 
     fn window_title(&self) -> String {
@@ -5122,7 +5122,15 @@ impl eframe::App for GuiShellApp {
                     .fill(PdbgTheme::TOP_BAR)
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
-            .show_inside(ui, |ui| self.draw_top_bar(ui, &ctx));
+            .show_inside(ui, |ui| self.draw_top_bar(ui));
+
+        egui::Panel::top("path_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(PdbgTheme::SURFACE)
+                    .inner_margin(egui::Margin::symmetric(12, 5)),
+            )
+            .show_inside(ui, |ui| self.draw_path_bar(ui));
 
         self.draw_workspace(ui, &ctx);
 
@@ -5524,7 +5532,7 @@ impl GuiShellApp {
         }
     }
 
-    fn draw_top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("pdbg")
@@ -5561,31 +5569,41 @@ impl GuiShellApp {
                 }
             }
             ui.add_space(8.0);
-            if top_bar_button(ui, "Back", !self.back_stack.is_empty()).clicked() {
+            if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked() {
                 self.go_back();
             }
-            if top_bar_button(ui, "Forward", !self.forward_stack.is_empty()).clicked() {
+            if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward").clicked() {
                 self.go_forward();
             }
-            ui.add_space(8.0);
-            let (file, pages, xref) = self.document_chips();
-            top_bar_chip(ui, &file, PdbgTheme::PANEL_ALT, PdbgTheme::TEXT);
-            top_bar_chip(ui, &pages, PdbgTheme::PANEL_ALT, PdbgTheme::TEXT);
-            top_bar_chip(ui, &xref, PdbgTheme::PANEL_ALT, PdbgTheme::TEXT);
-            top_bar_chip(ui, "SAFE MODE", PdbgTheme::SAFE, Color32::WHITE);
-            ui.add_space(8.0);
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(self.document_file_label())
+                    .strong()
+                    .size(12.0)
+                    .color(PdbgTheme::TOP_BAR_TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.empty_workspace {
+                    let (dot, color, hover) = if self.safe_mode_active() {
+                        ("●", PdbgTheme::SAFE, "Safe Mode")
+                    } else {
+                        ("●", PdbgTheme::ERROR_FG, "Safe Mode off")
+                    };
+                    ui.label(RichText::new(dot).size(14.0).color(color))
+                        .on_hover_text(hover);
+                }
+            });
+        });
+    }
+
+    fn draw_path_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.breadcrumb_label())
                     .monospace()
-                    .color(PdbgTheme::TOP_BAR_MUTED),
+                    .size(12.0)
+                    .color(PdbgTheme::MUTED),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("scale {:.2}x", ctx.pixels_per_point()))
-                        .monospace()
-                        .color(PdbgTheme::TOP_BAR_MUTED),
-                );
-            });
         });
     }
 
@@ -9627,7 +9645,7 @@ mod tests {
         assert!(app.state.is_err());
         assert_eq!(app.page_count(), 0);
         assert!(app.real_render_job.is_none());
-        assert_eq!(app.document_chips().0, "No PDF");
+        assert_eq!(app.document_file_label(), "No PDF");
         assert_eq!(app.window_title(), APP_TITLE);
         assert_eq!(app.breadcrumb_label(), "No document");
         assert!(app.status_log.iter().any(|line| line == "No PDF open"));

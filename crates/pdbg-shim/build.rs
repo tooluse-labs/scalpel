@@ -2,6 +2,11 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const MUPDF_SETUP_HELP: &str = "\
+Run `sh scripts/setup-mupdf.sh` from the repository root and then \
+`. third_party/mupdf.env`, or set PDBG_MUPDF_SOURCE_DIR, \
+PDBG_MUPDF_INCLUDE_DIR, and PDBG_MUPDF_LIB_DIR manually.";
+
 fn main() {
     println!("cargo:rerun-if-changed=include/pdbg_shim.h");
     println!("cargo:rerun-if-env-changed=AR");
@@ -43,14 +48,24 @@ fn build_real_mupdf() {
     let include_dir = env::var_os("PDBG_MUPDF_INCLUDE_DIR")
         .map(PathBuf::from)
         .or_else(|| source_dir.as_ref().map(|dir| dir.join("include")))
-        .expect(
-            "real-mupdf requires PDBG_MUPDF_SOURCE_DIR or PDBG_MUPDF_INCLUDE_DIR; \
-             point it at the pinned MuPDF source tree selected in ADR 0002",
+        .unwrap_or_else(|| {
+            panic!(
+                "real-mupdf requires PDBG_MUPDF_SOURCE_DIR or PDBG_MUPDF_INCLUDE_DIR.\n{}",
+                MUPDF_SETUP_HELP
+            )
+        });
+    if !include_dir.is_dir() {
+        panic!(
+            "MuPDF include directory does not exist: {}\n{}",
+            include_dir.display(),
+            MUPDF_SETUP_HELP
         );
+    }
     if !include_dir.join("mupdf").is_dir() {
         panic!(
-            "MuPDF include directory does not contain a mupdf/ subdirectory: {}",
-            include_dir.display()
+            "MuPDF include directory does not contain a mupdf/ subdirectory: {}\n{}",
+            include_dir.display(),
+            MUPDF_SETUP_HELP
         );
     }
 
@@ -68,10 +83,19 @@ fn build_real_mupdf() {
                 }
             })
         })
-        .expect(
-            "real-mupdf requires PDBG_MUPDF_LIB_DIR or PDBG_MUPDF_SOURCE_DIR; \
-             build MuPDF first so libmupdf is available",
+        .unwrap_or_else(|| {
+            panic!(
+                "real-mupdf requires PDBG_MUPDF_LIB_DIR or PDBG_MUPDF_SOURCE_DIR.\n{}",
+                MUPDF_SETUP_HELP
+            )
+        });
+    if !lib_dir.is_dir() {
+        panic!(
+            "MuPDF library directory does not exist: {}\n{}",
+            lib_dir.display(),
+            MUPDF_SETUP_HELP
         );
+    }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     let obj = out_dir.join(object_file_name("pdbg_shim_mupdf"));

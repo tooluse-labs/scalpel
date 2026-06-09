@@ -13,14 +13,20 @@ License: AGPL-3.0-only
 
 ## MuPDF
 
-MuPDF is not bundled, linked, downloaded, or required by the default workspace
-build. The fake shim remains the default backend.
+MuPDF source and build outputs are not committed to this repository. The
+`pdbg-app` default GUI build uses the `real-mupdf` backend and expects an
+external pinned MuPDF source tree plus static libraries. The fake shim remains
+available for low-level contract tests and no-MuPDF builds.
 
-The opt-in `real-mupdf` Milestone 1 developer path is pinned to MuPDF 1.27.2,
-announced in the official MuPDF release history on 2026-02-20. The selected
-source archive is:
+The `real-mupdf` developer path is pinned to MuPDF 1.27.2, announced in the
+official MuPDF release history on 2026-02-20. The selected source archive is:
 
 <https://casper.mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz>
+
+`scripts/setup-mupdf.sh` downloads that archive into ignored `third_party/`
+paths, verifies the pinned SHA-256 recorded in `third_party/mupdf.version`,
+extracts it, builds MuPDF locally, and writes `third_party/mupdf.env` for local
+shells.
 
 MuPDF is used under AGPL-3.0 for this project. No local MuPDF patches are
 currently recorded.

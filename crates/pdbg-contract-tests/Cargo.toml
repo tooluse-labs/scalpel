@@ -5,11 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-pdbg-app = { path = "../pdbg-app" }
-pdbg-core = { path = "../pdbg-core" }
+pdbg-app = { path = "../pdbg-app", default-features = false }
+pdbg-core = { path = "../pdbg-core", default-features = false, features = ["fake"] }
 pdbg-mcp = { path = "../pdbg-mcp" }
-pdbg-shim = { path = "../pdbg-shim" }
+pdbg-shim = { path = "../pdbg-shim", default-features = false, features = ["fake"] }
 
 [lib]
 path = "src/lib.rs"
-
