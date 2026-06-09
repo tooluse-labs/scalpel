@@ -28,7 +28,16 @@ const REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES: usize = 64 * 1024;
 const REAL_STREAM_MAX_VIEW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const REAL_STREAM_MAX_LOADED_WINDOWS: usize = 5;
 const COPY_LIMIT_BYTES: usize = 4096;
-const DEFAULT_RENDER_ZOOM: f32 = 2.0;
+const DEFAULT_RENDER_ZOOM: f32 = 1.0;
+const RENDER_ZOOM_LEVELS: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
+const DEFAULT_RENDER_MAX_DIMENSION: u32 = 4096;
+const DEFAULT_RENDER_MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+const RENDER_DIMENSION_LIMIT_ERROR: &str = "render output exceeds configured dimensions";
+const PREVIEW_CONTROL_ROW_HEIGHT: f32 = 44.0;
+const PREVIEW_CONTROL_GROUP_HEIGHT: f32 = 42.0;
+const PREVIEW_ZOOM_CONTROL_WIDTH: f32 = 228.0;
+const PREVIEW_PAGER_CONTROL_WIDTH: f32 = 174.0;
+const PREVIEW_CONTROL_GAP: f32 = 14.0;
 const OBJECT_SEARCH_CHILD_PAGE_SIZE: usize = 64;
 const OBJECT_SEARCH_MAX_CHILD_PAGES: usize = 2;
 const OBJECT_SEARCH_MAX_DEPTH: usize = 4;
@@ -98,6 +107,7 @@ pub struct GuiRunOptions {
     pub pdf_path: Option<String>,
     pub recent_files_path: Option<PathBuf>,
     pub start_empty_when_no_pdf: bool,
+    pub render_max_dimension: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,14 +115,16 @@ struct RealRenderKey {
     page_index: usize,
     zoom_bits: u32,
     rotation_degrees: i32,
+    max_dimension: u32,
 }
 
 impl RealRenderKey {
-    fn new(page_index: usize, zoom: f32, rotation_degrees: i32) -> Self {
+    fn new(page_index: usize, zoom: f32, rotation_degrees: i32, max_dimension: u32) -> Self {
         Self {
             page_index,
             zoom_bits: zoom.to_bits(),
             rotation_degrees,
+            max_dimension,
         }
     }
 
@@ -124,6 +136,10 @@ impl RealRenderKey {
         let mut request = RenderRequest::page(self.page_index);
         request.zoom = self.zoom();
         request.rotation_degrees = self.rotation_degrees;
+        request.max_width = self.max_dimension;
+        request.max_height = self.max_dimension;
+        request.max_pixels = render_max_pixels(self.max_dimension);
+        request.max_output_bytes = render_max_output_bytes(self.max_dimension);
         request
     }
 }
@@ -328,6 +344,231 @@ fn page_preview_leading_space(available_width: f32, display_width: f32) -> f32 {
     ((available_width - display_width) * 0.5).max(0.0)
 }
 
+fn previous_render_zoom(current: f32) -> Option<f32> {
+    RENDER_ZOOM_LEVELS
+        .iter()
+        .rev()
+        .copied()
+        .find(|zoom| *zoom < current - f32::EPSILON)
+}
+
+fn next_render_zoom(current: f32) -> Option<f32> {
+    RENDER_ZOOM_LEVELS
+        .iter()
+        .copied()
+        .find(|zoom| *zoom > current + f32::EPSILON)
+}
+
+fn next_render_rotation(current: i32) -> i32 {
+    match current.rem_euclid(360) {
+        0 => 90,
+        90 => 180,
+        180 => 270,
+        _ => 0,
+    }
+}
+
+fn render_max_dimension_or_default(value: Option<u32>) -> u32 {
+    value
+        .filter(|dimension| *dimension > 0)
+        .unwrap_or(DEFAULT_RENDER_MAX_DIMENSION)
+}
+
+fn render_max_pixels(max_dimension: u32) -> u64 {
+    u64::from(max_dimension).saturating_mul(u64::from(max_dimension))
+}
+
+fn render_max_output_bytes(max_dimension: u32) -> u64 {
+    render_max_pixels(max_dimension)
+        .saturating_mul(4)
+        .max(DEFAULT_RENDER_MAX_OUTPUT_BYTES)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PreviewControlIcon {
+    ZoomIn,
+    ZoomOut,
+    PreviousPage,
+    NextPage,
+    RotateRight,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageKeyboardShortcut {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+fn page_keyboard_target_page(
+    current_page: usize,
+    page_count: usize,
+    shortcut: PageKeyboardShortcut,
+) -> Option<usize> {
+    if page_count == 0 {
+        return None;
+    }
+    let last_page = page_count - 1;
+    Some(match shortcut {
+        PageKeyboardShortcut::Previous => current_page.saturating_sub(1),
+        PageKeyboardShortcut::Next => (current_page + 1).min(last_page),
+        PageKeyboardShortcut::First => 0,
+        PageKeyboardShortcut::Last => last_page,
+    })
+}
+
+fn preview_icon_button(
+    ui: &mut egui::Ui,
+    icon: PreviewControlIcon,
+    enabled: bool,
+    hover_text: impl Into<String>,
+) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("")
+            .frame(false)
+            .min_size(egui::vec2(36.0, 30.0)),
+    );
+    if ui.is_rect_visible(response.rect) {
+        draw_preview_control_icon(ui, response.rect.shrink(4.0), icon, enabled);
+    }
+    response.on_hover_text(hover_text.into())
+}
+
+fn preview_control_group<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let size = egui::vec2(width, PREVIEW_CONTROL_GROUP_HEIGHT);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, 16.0, PdbgTheme::CHIP_BG);
+    }
+
+    let inner_rect = rect.shrink2(egui::vec2(10.0, 6.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.set_min_size(inner_rect.size());
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+            add_contents(ui)
+        },
+    )
+    .inner
+}
+
+fn preview_control_separator(ui: &mut egui::Ui) {
+    let height = 26.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, height), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().line_segment(
+            [rect.center_top(), rect.center_bottom()],
+            egui::Stroke::new(1.0, PdbgTheme::BORDER),
+        );
+    }
+}
+
+fn draw_preview_control_icon(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    icon: PreviewControlIcon,
+    enabled: bool,
+) {
+    let color = if enabled {
+        PdbgTheme::TEXT
+    } else {
+        PdbgTheme::MUTED
+    };
+    let stroke = egui::Stroke::new(1.5, color);
+    match icon {
+        PreviewControlIcon::ZoomIn => draw_plus_minus_icon(ui, rect, true, stroke),
+        PreviewControlIcon::ZoomOut => draw_plus_minus_icon(ui, rect, false, stroke),
+        PreviewControlIcon::PreviousPage => draw_chevron_icon(ui, rect, false, stroke),
+        PreviewControlIcon::NextPage => draw_chevron_icon(ui, rect, true, stroke),
+        PreviewControlIcon::RotateRight => draw_rotate_icon(ui, rect, stroke),
+    }
+}
+
+fn draw_plus_minus_icon(ui: &mut egui::Ui, rect: egui::Rect, plus: bool, stroke: egui::Stroke) {
+    let painter = ui.painter();
+    let center = rect.center();
+    let half = rect.width().min(rect.height()) * 0.27;
+    painter.line_segment(
+        [
+            center + egui::vec2(-half, 0.0),
+            center + egui::vec2(half, 0.0),
+        ],
+        stroke,
+    );
+    if plus {
+        painter.line_segment(
+            [
+                center + egui::vec2(0.0, -half),
+                center + egui::vec2(0.0, half),
+            ],
+            stroke,
+        );
+    }
+}
+
+fn draw_chevron_icon(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    points_right: bool,
+    stroke: egui::Stroke,
+) {
+    let painter = ui.painter();
+    let center = rect.center();
+    let half_x = rect.width() * 0.14;
+    let half_y = rect.height() * 0.26;
+    let outer_x = if points_right { -half_x } else { half_x };
+    let inner_x = if points_right { half_x } else { -half_x };
+    let top = center + egui::vec2(outer_x, -half_y);
+    let middle = center + egui::vec2(inner_x, 0.0);
+    let bottom = center + egui::vec2(outer_x, half_y);
+    painter.line_segment([top, middle], stroke);
+    painter.line_segment([middle, bottom], stroke);
+}
+
+fn draw_rotate_icon(ui: &mut egui::Ui, rect: egui::Rect, stroke: egui::Stroke) {
+    let painter = ui.painter();
+    let side = rect.width().min(rect.height());
+    let origin = rect.center() - egui::vec2(side * 0.5, side * 0.5);
+    let scale = side / 16.0;
+    let point = |x: f32, y: f32| origin + egui::vec2(x * scale, y * scale);
+
+    let box_rect = egui::Rect::from_min_max(point(2.5, 6.5), point(10.5, 14.5));
+    painter.rect_stroke(box_rect, 2.0 * scale, stroke, egui::StrokeKind::Outside);
+
+    let mut path = Vec::with_capacity(14);
+    path.push(point(8.0, 2.5));
+    path.push(point(10.5, 2.5));
+    for step in 1..=10 {
+        let t = step as f32 / 10.0;
+        let one_minus_t = 1.0 - t;
+        let x = one_minus_t.powi(3) * 10.5
+            + 3.0 * one_minus_t.powi(2) * t * 12.709_139
+            + 3.0 * one_minus_t * t.powi(2) * 14.5
+            + t.powi(3) * 14.5;
+        let y = one_minus_t.powi(3) * 2.5
+            + 3.0 * one_minus_t.powi(2) * t * 2.5
+            + 3.0 * one_minus_t * t.powi(2) * 4.290_861
+            + t.powi(3) * 6.5;
+        path.push(point(x, y));
+    }
+    path.push(point(14.5, 7.0));
+    painter.line(path, stroke);
+
+    painter.line(
+        vec![point(9.5, 0.5), point(7.5, 2.5), point(9.5, 4.5)],
+        stroke,
+    );
+}
+
 fn pdbg_style() -> egui::Style {
     let mut style = egui::Style::default();
     let sans = FontFamily::Name("pdbg-sans".into());
@@ -389,9 +630,6 @@ impl PdbgTheme {
     const TOP_BAR: Color32 = Color32::from_rgb(28, 37, 48);
     const TOP_BAR_TEXT: Color32 = Color32::from_rgb(236, 241, 246);
     const TOP_BAR_MUTED: Color32 = Color32::from_rgb(170, 183, 196);
-    const LOG_BG: Color32 = Color32::from_rgb(17, 24, 39);
-    const LOG_TEXT: Color32 = Color32::from_rgb(218, 226, 235);
-    const LOG_MUTED: Color32 = Color32::from_rgb(139, 152, 168);
     const TEXT: Color32 = Color32::from_rgb(31, 41, 51);
     const MUTED: Color32 = Color32::from_rgb(104, 116, 131);
     const BORDER: Color32 = Color32::from_rgb(207, 215, 225);
@@ -816,6 +1054,20 @@ struct PreviewVisualHit {
     contains_click: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RealVisualTarget {
+    page_index: usize,
+    object: ObjectId,
+    allow_page_union: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPreviewStreamSelection {
+    page_index: usize,
+    text_hit: Option<TextSearchHit>,
+    visual_hit: Option<PreviewVisualHit>,
+}
+
 #[derive(Clone, Debug)]
 struct VisualPageCache {
     entries: VecDeque<VisualPageCacheEntry>,
@@ -884,12 +1136,6 @@ impl VisualPageCache {
     }
 }
 
-fn page_number_to_index(page_number: usize, page_count: usize) -> usize {
-    page_number
-        .saturating_sub(1)
-        .min(page_count.saturating_sub(1))
-}
-
 fn preview_click_from_pos(
     pos: egui::Pos2,
     image_rect: egui::Rect,
@@ -936,6 +1182,83 @@ fn text_hit_from_page_click(
         .map(|(index, span, _)| text_span_to_hit(page.page_index, index, span))
 }
 
+fn text_hit_for_text_fragments(page: &TextPage, fragments: &[String]) -> Option<TextSearchHit> {
+    let mut matched_indices = Vec::new();
+    let mut seen = HashSet::new();
+    for fragment in fragments {
+        for index in text_span_indices_for_fragment(page, fragment) {
+            if seen.insert(index) {
+                matched_indices.push(index);
+            }
+        }
+    }
+
+    let mut valid_indices = matched_indices.into_iter().filter(|index| {
+        page.spans
+            .get(*index)
+            .is_some_and(|span| span.bbox.width > 0.0 && span.bbox.height > 0.0)
+    });
+    let first_index = valid_indices.next()?;
+    let first_span = page.spans.get(first_index)?;
+    let mut bbox = first_span.bbox.clone();
+    let mut untrusted = first_span.untrusted;
+    for index in valid_indices {
+        if let Some(span) = page.spans.get(index) {
+            union_page_rect_into(&mut bbox, &span.bbox);
+            untrusted |= span.untrusted;
+        }
+    }
+
+    Some(TextSearchHit {
+        page_index: page.page_index,
+        span_index: first_index,
+        excerpt: fragments.join(" "),
+        bbox: Some(bbox),
+        untrusted,
+    })
+}
+
+fn text_span_indices_for_fragment(page: &TextPage, fragment: &str) -> Vec<usize> {
+    let fragment_key = normalized_text_match_key(fragment);
+    if fragment_key.is_empty() {
+        return Vec::new();
+    }
+    let span_keys = page
+        .spans
+        .iter()
+        .map(|span| normalized_text_match_key(&span.text))
+        .collect::<Vec<_>>();
+
+    for (index, span_key) in span_keys.iter().enumerate() {
+        if !span_key.is_empty() && span_key.contains(&fragment_key) {
+            return vec![index];
+        }
+    }
+
+    for start in 0..span_keys.len() {
+        let mut combined = String::new();
+        let mut indices = Vec::new();
+        for (index, span_key) in span_keys.iter().enumerate().skip(start) {
+            if span_key.is_empty() {
+                continue;
+            }
+            if !combined.is_empty() {
+                combined.push(' ');
+            }
+            combined.push_str(span_key);
+            indices.push(index);
+            if combined.contains(&fragment_key) {
+                return indices;
+            }
+            if combined.len() > fragment_key.len().saturating_add(128) {
+                break;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
 fn visual_hit_from_page_click(
     page: &VisualPage,
     click: PagePreviewClick,
@@ -977,6 +1300,332 @@ fn visual_hit_from_page_click(
         .map(|(index, element, contains_click, _, _)| {
             visual_element_to_hit(page.page_index, index, element, contains_click)
         })
+}
+
+fn visual_hit_for_object(page: &VisualPage, object: ObjectId) -> Option<PreviewVisualHit> {
+    let mut matching = page.elements.iter().enumerate().filter(|(_, element)| {
+        element.object == Some(object) && element.bbox.width > 0.0 && element.bbox.height > 0.0
+    });
+    let (first_index, first) = matching.next()?;
+    let mut bbox = first.bbox.clone();
+    let mut kind = first.kind;
+    let mut untrusted = first.untrusted;
+    for (_, element) in matching {
+        union_page_rect_into(&mut bbox, &element.bbox);
+        if element.kind != kind {
+            kind = VisualElementKind::Unknown;
+        }
+        untrusted |= element.untrusted;
+    }
+    Some(PreviewVisualHit {
+        page_index: page.page_index,
+        element_index: first_index,
+        kind,
+        bbox,
+        object: Some(object),
+        untrusted,
+        contains_click: false,
+    })
+}
+
+fn visual_hit_for_page_visual_union(
+    page: &VisualPage,
+    object: ObjectId,
+) -> Option<PreviewVisualHit> {
+    let mut visible = page
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| element.bbox.width > 0.0 && element.bbox.height > 0.0);
+    let (first_index, first) = visible.next()?;
+    let mut bbox = first.bbox.clone();
+    let mut kind = first.kind;
+    let mut untrusted = first.untrusted;
+    for (_, element) in visible {
+        union_page_rect_into(&mut bbox, &element.bbox);
+        if element.kind != kind {
+            kind = VisualElementKind::Unknown;
+        }
+        untrusted |= element.untrusted;
+    }
+    Some(PreviewVisualHit {
+        page_index: page.page_index,
+        element_index: first_index,
+        kind,
+        bbox,
+        object: Some(object),
+        untrusted,
+        contains_click: false,
+    })
+}
+
+fn visual_hit_for_element_indices(
+    page: &VisualPage,
+    indices: &[usize],
+    object: ObjectId,
+) -> Option<PreviewVisualHit> {
+    let first_index = *indices.first()?;
+    let first = page.elements.get(first_index)?;
+    if first.bbox.width <= 0.0 || first.bbox.height <= 0.0 {
+        return None;
+    }
+    let mut bbox = first.bbox.clone();
+    let mut kind = first.kind;
+    let mut untrusted = first.untrusted;
+    for index in indices.iter().skip(1) {
+        let Some(element) = page.elements.get(*index) else {
+            continue;
+        };
+        if element.bbox.width <= 0.0 || element.bbox.height <= 0.0 {
+            continue;
+        }
+        union_page_rect_into(&mut bbox, &element.bbox);
+        if element.kind != kind {
+            kind = VisualElementKind::Unknown;
+        }
+        untrusted |= element.untrusted;
+    }
+    Some(PreviewVisualHit {
+        page_index: page.page_index,
+        element_index: first_index,
+        kind,
+        bbox,
+        object: Some(object),
+        untrusted,
+        contains_click: false,
+    })
+}
+
+fn nice_stream_visual_hit_for_selection(
+    page: &VisualPage,
+    rows: &[NiceStreamRenderLine],
+    selection_key: &str,
+    object: ObjectId,
+) -> Option<PreviewVisualHit> {
+    if let Some(hit) = visual_hit_for_object(page, object) {
+        return Some(hit);
+    }
+
+    let ops = nice_stream_visual_ops(rows);
+    let selected_rows = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| nice_stream_row_matches_selection(row, selection_key))
+        .map(|(index, _)| index)
+        .collect::<HashSet<_>>();
+    if selected_rows.is_empty() {
+        return None;
+    }
+
+    let mut matched_indices = Vec::new();
+    let mut seen = HashSet::new();
+    for kind in nice_stream_selected_visual_kind_priority(&ops, &selected_rows) {
+        let Some(first_selected_op_index) = ops
+            .iter()
+            .position(|op| selected_rows.contains(&op.row_index) && op.kind == kind)
+        else {
+            continue;
+        };
+        let before_count = ops[..first_selected_op_index]
+            .iter()
+            .filter(|op| visual_kind_matches(kind, op.kind))
+            .count();
+        let selected_count = ops
+            .iter()
+            .filter(|op| {
+                selected_rows.contains(&op.row_index) && visual_kind_matches(kind, op.kind)
+            })
+            .count()
+            .max(1);
+        for index in page
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(_, element)| {
+                element.bbox.width > 0.0
+                    && element.bbox.height > 0.0
+                    && visual_kind_matches(kind, element.kind)
+            })
+            .skip(before_count)
+            .take(selected_count)
+            .map(|(index, _)| index)
+        {
+            if seen.insert(index) {
+                matched_indices.push(index);
+            }
+        }
+    }
+
+    if matched_indices.is_empty() {
+        let first_selected_op_index = ops
+            .iter()
+            .position(|op| selected_rows.contains(&op.row_index))?;
+        let before_count = ops[..first_selected_op_index].len();
+        let selected_count = ops
+            .iter()
+            .filter(|op| selected_rows.contains(&op.row_index))
+            .count()
+            .max(1);
+        matched_indices.extend(
+            page.elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| element.bbox.width > 0.0 && element.bbox.height > 0.0)
+                .skip(before_count)
+                .take(selected_count)
+                .map(|(index, _)| index),
+        );
+    }
+
+    visual_hit_for_element_indices(page, &matched_indices, object)
+}
+
+fn nice_stream_selection_key_for_text_hit(
+    rows: &[NiceStreamRenderLine],
+    hit: &TextSearchHit,
+) -> Option<String> {
+    let query = normalized_text_match_key(&hit.excerpt);
+    if query.is_empty() {
+        return None;
+    }
+
+    rows.iter()
+        .filter_map(|row| {
+            nice_stream_line_text_fragments(&row.line.text)
+                .into_iter()
+                .filter_map(|fragment| {
+                    let fragment_key = normalized_text_match_key(&fragment);
+                    if fragment_key.is_empty() {
+                        return None;
+                    }
+                    (fragment_key.contains(&query) || query.contains(&fragment_key))
+                        .then_some(fragment_key.len().abs_diff(query.len()))
+                })
+                .min()
+                .map(|score| (score, row.line_key.clone()))
+        })
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, key)| key)
+}
+
+fn nice_stream_selection_key_for_visual_hit(
+    page: &VisualPage,
+    rows: &[NiceStreamRenderLine],
+    hit: &PreviewVisualHit,
+) -> Option<String> {
+    let element = page.elements.get(hit.element_index)?;
+    let ops = nice_stream_visual_ops(rows);
+    for expected_kind in nice_stream_reverse_visual_kind_candidates(element.kind) {
+        let ordinal = page
+            .elements
+            .iter()
+            .take(hit.element_index + 1)
+            .filter(|element| {
+                element.bbox.width > 0.0
+                    && element.bbox.height > 0.0
+                    && visual_kind_matches(expected_kind, element.kind)
+            })
+            .count()
+            .checked_sub(1)?;
+        if let Some(op) = ops
+            .iter()
+            .filter(|op| visual_kind_matches(expected_kind, op.kind))
+            .nth(ordinal)
+        {
+            return rows.get(op.row_index).map(|row| row.line_key.clone());
+        }
+    }
+    None
+}
+
+fn nice_stream_reverse_visual_kind_candidates(kind: VisualElementKind) -> Vec<VisualElementKind> {
+    match kind {
+        VisualElementKind::Text => vec![VisualElementKind::Text, VisualElementKind::Unknown],
+        VisualElementKind::Image => vec![VisualElementKind::Image, VisualElementKind::Unknown],
+        VisualElementKind::Vector | VisualElementKind::Grid => {
+            vec![VisualElementKind::Vector, VisualElementKind::Unknown]
+        }
+        VisualElementKind::Unknown => vec![VisualElementKind::Unknown],
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NiceStreamVisualOp {
+    row_index: usize,
+    kind: VisualElementKind,
+}
+
+fn nice_stream_visual_ops(rows: &[NiceStreamRenderLine]) -> Vec<NiceStreamVisualOp> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(row_index, row)| {
+            nice_stream_line_visual_kind(&row.line.text)
+                .map(|kind| NiceStreamVisualOp { row_index, kind })
+        })
+        .collect()
+}
+
+fn nice_stream_selection_has_non_text_visual_ops(
+    rows: &[NiceStreamRenderLine],
+    selection_key: &str,
+) -> bool {
+    rows.iter()
+        .filter(|row| nice_stream_row_matches_selection(row, selection_key))
+        .filter_map(|row| nice_stream_line_visual_kind(&row.line.text))
+        .any(|kind| kind != VisualElementKind::Text)
+}
+
+fn nice_stream_selected_visual_kind_priority(
+    ops: &[NiceStreamVisualOp],
+    selected_rows: &HashSet<usize>,
+) -> Vec<VisualElementKind> {
+    let mut kinds = Vec::new();
+    for op in ops
+        .iter()
+        .filter(|op| selected_rows.contains(&op.row_index))
+    {
+        if !kinds.contains(&op.kind) {
+            kinds.push(op.kind);
+        }
+    }
+    kinds
+}
+
+fn nice_stream_line_visual_kind(line: &str) -> Option<VisualElementKind> {
+    let operator = nice_stream_line_operator(line)?;
+    match operator.as_str() {
+        "Tj" | "TJ" | "'" | "\"" => Some(VisualElementKind::Text),
+        "Do" | "EI" => Some(VisualElementKind::Image),
+        "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "sh" => {
+            Some(VisualElementKind::Vector)
+        }
+        _ => None,
+    }
+}
+
+fn nice_stream_line_operator(line: &str) -> Option<String> {
+    pdf_content_tokens(line).pop()
+}
+
+fn visual_kind_matches(expected: VisualElementKind, actual: VisualElementKind) -> bool {
+    match expected {
+        VisualElementKind::Unknown => true,
+        VisualElementKind::Vector => {
+            matches!(actual, VisualElementKind::Vector | VisualElementKind::Grid)
+        }
+        _ => expected == actual,
+    }
+}
+
+fn union_page_rect_into(target: &mut PageRect, rect: &PageRect) {
+    let left = target.x.min(rect.x);
+    let top = target.y.min(rect.y);
+    let right = (target.x + target.width).max(rect.x + rect.width);
+    let bottom = (target.y + target.height).max(rect.y + rect.height);
+    target.x = left;
+    target.y = top;
+    target.width = (right - left).max(0.0);
+    target.height = (bottom - top).max(0.0);
 }
 
 fn page_point_from_preview_click(click: PagePreviewClick, zoom: f32) -> Option<(f32, f32)> {
@@ -1063,9 +1712,11 @@ pub struct GuiShellApp {
     real_stream_windows: VecDeque<RealStreamLoadedWindow>,
     real_stream_collapsed_blocks: HashSet<String>,
     real_stream_selected_block: Option<String>,
+    scroll_selected_nice_stream_row: bool,
     real_stream_error: Option<String>,
     decoded_stream_cache: StreamChunkCache<RealStreamKey>,
     selected_row: usize,
+    scroll_selected_tree_row: bool,
     back_stack: Vec<usize>,
     forward_stack: Vec<usize>,
     selected_tab: InspectorTab,
@@ -1076,6 +1727,7 @@ pub struct GuiShellApp {
     render_page_index: usize,
     render_zoom: f32,
     render_rotation_degrees: i32,
+    render_max_dimension: u32,
     real_render_key: Option<RealRenderKey>,
     real_render_job: Option<RealRenderJob>,
     real_render: Option<RenderResult>,
@@ -1094,6 +1746,7 @@ pub struct GuiShellApp {
     visual_page_cache: VisualPageCache,
     selected_text_hit: Option<TextSearchHit>,
     selected_visual_hit: Option<PreviewVisualHit>,
+    pending_preview_stream_selection: Option<PendingPreviewStreamSelection>,
     preview_click: Option<PagePreviewClick>,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
@@ -1130,6 +1783,7 @@ impl GuiShellApp {
         let render_page_index = 0;
         let render_zoom = DEFAULT_RENDER_ZOOM;
         let render_rotation_degrees = 0;
+        let render_max_dimension = render_max_dimension_or_default(options.render_max_dimension);
         let mut status_log = if start_empty {
             empty_status_log()
         } else {
@@ -1183,12 +1837,14 @@ impl GuiShellApp {
             real_stream_windows: VecDeque::new(),
             real_stream_collapsed_blocks: HashSet::new(),
             real_stream_selected_block: None,
+            scroll_selected_nice_stream_row: false,
             real_stream_error: None,
             decoded_stream_cache: StreamChunkCache::new(
                 DECODED_STREAM_CACHE_MAX_ITEMS,
                 DECODED_STREAM_CACHE_MAX_BYTES,
             ),
             selected_row,
+            scroll_selected_tree_row: false,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             selected_tab: InspectorTab::Object,
@@ -1199,6 +1855,7 @@ impl GuiShellApp {
             render_page_index,
             render_zoom,
             render_rotation_degrees,
+            render_max_dimension,
             real_render_key: None,
             real_render_job: None,
             real_render: None,
@@ -1223,6 +1880,7 @@ impl GuiShellApp {
             ),
             selected_text_hit: None,
             selected_visual_hit: None,
+            pending_preview_stream_selection: None,
             preview_click: None,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
@@ -1241,21 +1899,28 @@ impl GuiShellApp {
         self.preview_click = None;
         self.selected_text_hit = None;
         self.selected_visual_hit = None;
+        self.pending_preview_stream_selection = None;
     }
 
     fn select_row_from_tree(&mut self, row: usize) {
         if self.selected_row == row {
             self.clear_preview_selection();
-            self.sync_render_page_for_tree_row(row);
+            self.expand_selected_real_tree_path();
+            self.sync_render_page_for_tree_row(self.selected_row);
+            self.select_visual_bbox_for_tree_row(self.selected_row);
             return;
         }
         self.selected_row = row;
         self.clear_preview_selection();
         self.forward_stack.clear();
         self.refresh_real_detail_for_selection();
-        self.sync_render_page_for_tree_row(row);
-        self.status_log
-            .push(format!("selected {}", self.tree.row_label(row)));
+        self.expand_selected_real_tree_path();
+        self.sync_render_page_for_tree_row(self.selected_row);
+        self.select_visual_bbox_for_tree_row(self.selected_row);
+        self.status_log.push(format!(
+            "selected {}",
+            self.tree.row_label(self.selected_row)
+        ));
     }
 
     fn follow_reference(&mut self, row: usize) {
@@ -1268,10 +1933,12 @@ impl GuiShellApp {
         self.clear_preview_selection();
         self.selected_tab = InspectorTab::Object;
         self.refresh_real_detail_for_selection();
-        self.sync_render_page_for_tree_row(row);
+        self.expand_selected_real_tree_path();
+        self.sync_render_page_for_tree_row(self.selected_row);
+        self.select_visual_bbox_for_tree_row(self.selected_row);
         self.status_log.push(format!(
             "resolved reference to {}",
-            self.tree.row_label(row)
+            self.tree.row_label(self.selected_row)
         ));
     }
 
@@ -1281,9 +1948,13 @@ impl GuiShellApp {
             self.selected_row = row;
             self.clear_preview_selection();
             self.refresh_real_detail_for_selection();
-            self.sync_render_page_for_tree_row(row);
-            self.status_log
-                .push(format!("back to {}", self.tree.row_label(row)));
+            self.expand_selected_real_tree_path();
+            self.sync_render_page_for_tree_row(self.selected_row);
+            self.select_visual_bbox_for_tree_row(self.selected_row);
+            self.status_log.push(format!(
+                "back to {}",
+                self.tree.row_label(self.selected_row)
+            ));
         }
     }
 
@@ -1293,9 +1964,13 @@ impl GuiShellApp {
             self.selected_row = row;
             self.clear_preview_selection();
             self.refresh_real_detail_for_selection();
-            self.sync_render_page_for_tree_row(row);
-            self.status_log
-                .push(format!("forward to {}", self.tree.row_label(row)));
+            self.expand_selected_real_tree_path();
+            self.sync_render_page_for_tree_row(self.selected_row);
+            self.select_visual_bbox_for_tree_row(self.selected_row);
+            self.status_log.push(format!(
+                "forward to {}",
+                self.tree.row_label(self.selected_row)
+            ));
         }
     }
 
@@ -1613,42 +2288,6 @@ impl GuiShellApp {
         inserted
     }
 
-    fn toggle_real_tree_row(&mut self, row: usize) {
-        let expanded = match &self.tree {
-            TreeModel::Real(tree) => tree.row_is_expanded(row),
-            TreeModel::Virtual(_) => false,
-        };
-        if expanded {
-            self.collapse_real_tree_row(row);
-        } else {
-            self.expand_real_tree_row(row);
-        }
-    }
-
-    fn collapse_real_tree_row(&mut self, row: usize) -> usize {
-        let removed = match &mut self.tree {
-            TreeModel::Real(tree) => tree.collapse_row(row),
-            TreeModel::Virtual(_) => 0,
-        };
-        if removed == 0 {
-            return 0;
-        }
-
-        let old_selected = self.selected_row;
-        if old_selected > row && old_selected <= row + removed {
-            self.selected_row = row;
-            self.refresh_real_detail_for_selection();
-        } else if old_selected > row + removed {
-            self.selected_row = old_selected - removed;
-        }
-        self.status_log.push(format!(
-            "collapsed {} visible children under {}",
-            removed,
-            self.tree.row_label(row)
-        ));
-        removed
-    }
-
     fn expand_real_tree_row(&mut self, row: usize) -> usize {
         let root_inserted = match &mut self.tree {
             TreeModel::Real(tree) => tree.expand_cached_document_root(row),
@@ -1693,6 +2332,25 @@ impl GuiShellApp {
         inserted
     }
 
+    fn expand_selected_real_tree_path(&mut self) {
+        let selected_id = match &self.tree {
+            TreeModel::Real(tree) => tree
+                .summary(self.selected_row)
+                .map(|summary| summary.id.clone()),
+            TreeModel::Virtual(_) => None,
+        };
+        let Some(selected_id) = selected_id else {
+            return;
+        };
+
+        self.expand_real_tree_row(self.selected_row);
+        if let TreeModel::Real(tree) = &mut self.tree {
+            if let Some(row) = tree.collapse_expanded_rows_except_selected_path(&selected_id) {
+                self.selected_row = row;
+            }
+        }
+    }
+
     fn refresh_real_detail_for_selection(&mut self) {
         self.clear_real_stream_chunk();
         let TreeModel::Real(tree) = &self.tree else {
@@ -1733,6 +2391,7 @@ impl GuiShellApp {
         self.real_stream_windows.clear();
         self.real_stream_collapsed_blocks.clear();
         self.real_stream_selected_block = None;
+        self.scroll_selected_nice_stream_row = false;
         self.real_stream_error = None;
     }
 
@@ -1944,6 +2603,9 @@ impl GuiShellApp {
                         self.insert_real_stream_window(output.key, chunk.clone());
                         self.real_stream_chunk = Some(chunk);
                         self.real_stream_error = None;
+                        if self.pending_preview_stream_selection.is_some() {
+                            self.select_nice_stream_code_for_preview_selection();
+                        }
                     }
                     Err(err) => {
                         self.real_stream_chunk = None;
@@ -1990,6 +2652,7 @@ impl GuiShellApp {
             self.render_page_index,
             self.render_zoom,
             self.render_rotation_degrees,
+            self.render_max_dimension,
         ))
     }
 
@@ -2007,6 +2670,134 @@ impl GuiShellApp {
         self.refresh_real_render();
     }
 
+    fn set_render_page_from_pager(&mut self, page_index: usize) {
+        self.set_render_page(page_index);
+        let page_index = self.render_page_index;
+        self.sync_tree_to_render_page(page_index);
+    }
+
+    fn handle_page_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let page_count = self.page_count();
+        if page_count == 0 || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+
+        let shortcut = ctx.input(|input| {
+            if input.modifiers.any() {
+                return None;
+            }
+            if input.key_pressed(egui::Key::ArrowLeft) {
+                Some(PageKeyboardShortcut::Previous)
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                Some(PageKeyboardShortcut::Next)
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                Some(PageKeyboardShortcut::First)
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                Some(PageKeyboardShortcut::Last)
+            } else {
+                None
+            }
+        });
+
+        if let Some(page_index) = shortcut
+            .and_then(|shortcut| {
+                page_keyboard_target_page(self.render_page_index, page_count, shortcut)
+            })
+            .filter(|page_index| *page_index != self.render_page_index)
+        {
+            self.set_render_page_from_pager(page_index);
+            self.status_log.push(format!(
+                "keyboard switched preview to page {}",
+                self.render_page_index + 1
+            ));
+        }
+    }
+
+    fn sync_tree_to_render_page(&mut self, page_index: usize) -> Option<usize> {
+        if !self.tree.is_real() {
+            return None;
+        }
+        let row = self.ensure_tree_page_row(page_index)?;
+        self.select_row_from_tree(row);
+        self.scroll_selected_tree_row = true;
+        self.status_log
+            .push(format!("synced document tree to page {}", page_index + 1));
+        Some(row)
+    }
+
+    fn ensure_tree_page_row(&mut self, page_index: usize) -> Option<usize> {
+        if let Some(row) = self.tree.real_row_for_page_index(page_index) {
+            return Some(row);
+        }
+
+        let page_root_row = self.tree.real_page_root_row()?;
+        self.expand_real_tree_row(page_root_row);
+        if let Some(row) = self.tree.real_row_for_page_index(page_index) {
+            return Some(row);
+        }
+
+        let summary = self.load_page_summary_for_tree(page_root_row, page_index)?;
+        self.tree.ensure_real_page_child_row(page_root_row, summary)
+    }
+
+    fn ensure_page_content_stream_row(&mut self, page_index: usize) -> Option<usize> {
+        let page_row = self.ensure_tree_page_row(page_index)?;
+        self.expand_real_tree_row(page_row);
+        for _ in 0..4 {
+            if let Some(row) = self.tree.real_first_page_content_stream_row(page_row) {
+                return Some(row);
+            }
+            let candidates = self.tree.real_page_content_candidate_rows(page_row);
+            let mut expanded_any = false;
+            for row in candidates {
+                if self.expand_real_tree_row(row) > 0 {
+                    expanded_any = true;
+                    break;
+                }
+            }
+            if !expanded_any {
+                break;
+            }
+        }
+        None
+    }
+
+    fn load_page_summary_for_tree(
+        &mut self,
+        page_root_row: usize,
+        page_index: usize,
+    ) -> Option<ObjectSummary> {
+        let page_root_id = match &self.tree {
+            TreeModel::Real(tree) => tree
+                .summary(page_root_row)
+                .map(|summary| summary.id.clone()),
+            TreeModel::Virtual(_) => None,
+        }?;
+        let Ok(state) = self.state.as_ref() else {
+            return None;
+        };
+        match state.session.run_task(|document| {
+            document.children(
+                &page_root_id,
+                ChildRange {
+                    offset: page_index,
+                    limit: 1,
+                },
+                ChildContainer::Array,
+            )
+        }) {
+            Ok(page) => page.items.into_iter().next(),
+            Err(err) => {
+                self.status_log.push(format!(
+                    "page {} tree row load failed: {}",
+                    page_index + 1,
+                    err.message
+                ));
+                None
+            }
+        }
+    }
+
     fn select_text_hit_for_preview_click(&mut self, click: PagePreviewClick) {
         self.selected_text_hit = None;
         if self.render_rotation_degrees != 0 {
@@ -2015,33 +2806,14 @@ impl GuiShellApp {
             return;
         }
 
-        let page = if let Some(page) = self.text_search_cache.get(click.page_index) {
-            page
-        } else {
-            let Ok(state) = self.state.as_ref() else {
-                self.status_log
-                    .push("preview text bbox hit-test skipped: document is not open".to_string());
+        let page = match self.text_page_for_preview(click.page_index) {
+            Ok(page) => page,
+            Err(err) => {
+                self.status_log.push(format!(
+                    "preview text bbox hit-test page {} failed: {err}",
+                    click.page_index + 1
+                ));
                 return;
-            };
-            let mut request = TextRequest::page(click.page_index);
-            request.max_chars = TEXT_SEARCH_MAX_CHARS_PER_PAGE;
-            request.max_blocks = TEXT_SEARCH_MAX_BLOCKS_PER_PAGE;
-            match state
-                .session
-                .run_task(|document| document.extract_text(&request))
-            {
-                Ok(page) => {
-                    self.text_search_cache.insert(page.clone());
-                    page
-                }
-                Err(err) => {
-                    self.status_log.push(format!(
-                        "preview text bbox hit-test page {} failed: {}",
-                        click.page_index + 1,
-                        err.message
-                    ));
-                    return;
-                }
             }
         };
 
@@ -2060,6 +2832,84 @@ impl GuiShellApp {
         }
     }
 
+    fn select_nice_stream_selection_for_preview(
+        &mut self,
+        object: ObjectId,
+        selection_key: &str,
+        rows: &[NiceStreamRenderLine],
+    ) {
+        self.selected_text_hit = None;
+        self.selected_visual_hit = None;
+        if self.render_rotation_degrees != 0 {
+            self.status_log
+                .push("nice stream bbox highlight is only available at 0 deg rotation".to_string());
+            return;
+        }
+
+        let page_index = self.render_page_index;
+        let fragments = nice_stream_text_fragments_for_selection(rows, selection_key);
+        let mut highlighted_text = false;
+        if !fragments.is_empty() {
+            match self.text_page_for_preview(page_index) {
+                Ok(page) => {
+                    if let Some(hit) = text_hit_for_text_fragments(&page, &fragments) {
+                        self.status_log.push(format!(
+                            "highlighted page {} text bbox from nice stream",
+                            page_index + 1
+                        ));
+                        self.selected_text_hit = Some(hit);
+                        highlighted_text = true;
+                    } else {
+                        self.status_log.push(format!(
+                            "no positioned text bbox for selected nice stream text on page {}",
+                            page_index + 1
+                        ));
+                    }
+                }
+                Err(err) => {
+                    self.status_log.push(format!(
+                        "nice stream text bbox page {} failed: {err}",
+                        page_index + 1
+                    ));
+                }
+            }
+        }
+
+        let needs_visual_highlight =
+            !highlighted_text || nice_stream_selection_has_non_text_visual_ops(rows, selection_key);
+        if needs_visual_highlight {
+            match self.visual_page_for_preview(page_index) {
+                Ok(page) => {
+                    if let Some(hit) =
+                        nice_stream_visual_hit_for_selection(&page, rows, selection_key, object)
+                    {
+                        self.status_log.push(format!(
+                            "highlighted page {} visual bbox from nice stream",
+                            page_index + 1
+                        ));
+                        self.selected_visual_hit = Some(hit);
+                    } else if !highlighted_text {
+                        self.status_log.push(format!(
+                            "no visual bbox for selected nice stream object on page {}",
+                            page_index + 1
+                        ));
+                    }
+                }
+                Err(err) => {
+                    self.status_log.push(format!(
+                        "nice stream visual bbox page {} failed: {err}",
+                        page_index + 1
+                    ));
+                }
+            }
+        }
+
+        if !highlighted_text && self.selected_visual_hit.is_none() && fragments.is_empty() {
+            self.status_log
+                .push("selected nice stream line has no previewable drawing operation".to_string());
+        }
+    }
+
     fn select_visual_hit_for_preview_click(&mut self, click: PagePreviewClick) {
         self.selected_visual_hit = None;
         if self.render_rotation_degrees != 0 {
@@ -2069,32 +2919,14 @@ impl GuiShellApp {
             return;
         }
 
-        let page = if let Some(page) = self.visual_page_cache.get(click.page_index) {
-            page
-        } else {
-            let Ok(state) = self.state.as_ref() else {
-                self.status_log
-                    .push("preview visual bbox hit-test skipped: document is not open".to_string());
+        let page = match self.visual_page_for_preview(click.page_index) {
+            Ok(page) => page,
+            Err(err) => {
+                self.status_log.push(format!(
+                    "preview visual bbox hit-test page {} failed: {err}",
+                    click.page_index + 1
+                ));
                 return;
-            };
-            let mut request = VisualRequest::page(click.page_index);
-            request.max_elements = VISUAL_CLICK_MAX_ELEMENTS_PER_PAGE;
-            match state
-                .session
-                .run_task(|document| document.extract_visuals(&request))
-            {
-                Ok(page) => {
-                    self.visual_page_cache.insert(page.clone());
-                    page
-                }
-                Err(err) => {
-                    self.status_log.push(format!(
-                        "preview visual bbox hit-test page {} failed: {}",
-                        click.page_index + 1,
-                        err.message
-                    ));
-                    return;
-                }
             }
         };
 
@@ -2111,6 +2943,268 @@ impl GuiShellApp {
                 click.page_index + 1
             ));
         }
+    }
+
+    fn select_nice_stream_code_for_preview_selection(&mut self) -> bool {
+        let Some(stream) = self
+            .real_detail
+            .as_ref()
+            .and_then(|detail| detail.stream.clone())
+        else {
+            return false;
+        };
+        let Some(chunks) = self.loaded_nice_stream_chunks(stream.object) else {
+            return false;
+        };
+        let rows = real_stream_nice_render_lines(stream.object, &chunks);
+        let selection = self.current_preview_stream_selection();
+        let text_hit = selection.text_hit;
+        let visual_hit = selection.visual_hit;
+        let page_index = selection.page_index;
+
+        let selection_key = text_hit
+            .as_ref()
+            .filter(|hit| hit.page_index == page_index)
+            .and_then(|hit| nice_stream_selection_key_for_text_hit(&rows, hit))
+            .or_else(|| {
+                let hit = visual_hit
+                    .as_ref()
+                    .filter(|hit| hit.page_index == page_index)?;
+                let page = self.visual_page_for_preview(hit.page_index).ok()?;
+                nice_stream_selection_key_for_visual_hit(&page, &rows, hit)
+            });
+
+        let Some(selection_key) = selection_key else {
+            return false;
+        };
+
+        self.expand_nice_stream_selection_path(&rows, &selection_key);
+        self.real_stream_selected_block = Some(selection_key);
+        self.scroll_selected_nice_stream_row = true;
+        self.pending_preview_stream_selection = None;
+        self.status_log
+            .push("highlighted nice stream code from preview click".to_string());
+        true
+    }
+
+    fn current_preview_stream_selection(&self) -> PendingPreviewStreamSelection {
+        self.pending_preview_stream_selection
+            .clone()
+            .unwrap_or_else(|| PendingPreviewStreamSelection {
+                page_index: self.render_page_index,
+                text_hit: self.selected_text_hit.clone(),
+                visual_hit: self.selected_visual_hit.clone(),
+            })
+    }
+
+    fn open_nice_stream_for_preview_selection(&mut self, page_index: usize) -> bool {
+        if self.selected_text_hit.is_none() && self.selected_visual_hit.is_none() {
+            self.pending_preview_stream_selection = None;
+            return false;
+        }
+
+        self.pending_preview_stream_selection = Some(PendingPreviewStreamSelection {
+            page_index,
+            text_hit: self.selected_text_hit.clone(),
+            visual_hit: self.selected_visual_hit.clone(),
+        });
+
+        if self.select_nice_stream_code_for_preview_selection() {
+            self.selected_tab = InspectorTab::Stream;
+            return true;
+        }
+
+        let Some(row) = self.ensure_page_content_stream_row(page_index) else {
+            self.status_log.push(format!(
+                "no content stream tree row available for page {} preview selection",
+                page_index + 1
+            ));
+            self.pending_preview_stream_selection = None;
+            return false;
+        };
+
+        self.select_stream_row_from_preview(row);
+        self.selected_tab = InspectorTab::Stream;
+        self.prepare_real_stream_for_preview_selection()
+    }
+
+    fn select_stream_row_from_preview(&mut self, row: usize) {
+        if self.selected_row != row {
+            self.selected_row = row;
+            self.forward_stack.clear();
+        }
+        self.refresh_real_detail_for_selection();
+        self.expand_selected_real_tree_path();
+        self.scroll_selected_tree_row = true;
+    }
+
+    fn prepare_real_stream_for_preview_selection(&mut self) -> bool {
+        let Some(stream) = self
+            .real_detail
+            .as_ref()
+            .and_then(|detail| detail.stream.clone())
+        else {
+            self.pending_preview_stream_selection = None;
+            return false;
+        };
+        if !stream.can_decode {
+            self.status_log.push(format!(
+                "stream {} cannot decode for preview-to-Nice View selection",
+                object_ref_text(stream.object)
+            ));
+            self.pending_preview_stream_selection = None;
+            return false;
+        }
+
+        let limit = real_stream_default_limit(&stream, StreamMode::Decoded);
+        let request_changed = self.real_stream_preset != RealStreamPreset::Nice
+            || self.real_stream_mode != StreamMode::Decoded
+            || self.real_stream_view_mode != StreamViewMode::Text
+            || self.real_stream_offset != 0
+            || self.real_stream_limit != limit
+            || self
+                .real_stream_key
+                .is_some_and(|key| key.object != stream.object || key.mode != StreamMode::Decoded);
+
+        self.real_stream_preset = RealStreamPreset::Nice;
+        self.real_stream_mode = StreamMode::Decoded;
+        self.real_stream_view_mode = StreamViewMode::Text;
+        self.real_stream_offset = 0;
+        self.real_stream_limit = limit;
+        if request_changed {
+            self.clear_real_stream_chunk();
+        }
+
+        self.refresh_real_stream_chunk(stream.object);
+        self.select_nice_stream_code_for_preview_selection();
+        true
+    }
+
+    fn loaded_nice_stream_chunks(&self, object: ObjectId) -> Option<Vec<StreamChunk>> {
+        if self.real_stream_preset != RealStreamPreset::Nice
+            || self.real_stream_mode != StreamMode::Decoded
+            || self.real_stream_view_mode != StreamViewMode::Text
+        {
+            return None;
+        }
+        let key = self.real_stream_key?;
+        if key.object != object || key.mode != StreamMode::Decoded {
+            return None;
+        }
+
+        if !self.real_stream_windows.is_empty() {
+            let chunks = self
+                .real_stream_windows
+                .iter()
+                .filter(|window| {
+                    window.key.object == object && window.key.mode == StreamMode::Decoded
+                })
+                .map(|window| window.chunk.clone())
+                .collect::<Vec<_>>();
+            return (!chunks.is_empty()).then_some(chunks);
+        }
+
+        self.real_stream_chunk.clone().map(|chunk| vec![chunk])
+    }
+
+    fn expand_nice_stream_selection_path(&mut self, rows: &[NiceStreamRenderLine], key: &str) {
+        let Some(row) = rows
+            .iter()
+            .find(|row| row.line_key == key || row.block_key.as_deref() == Some(key))
+        else {
+            return;
+        };
+        for (_, block_key) in &row.guide_blocks {
+            self.real_stream_collapsed_blocks.remove(block_key);
+        }
+        if let Some(block_key) = &row.block_key {
+            self.real_stream_collapsed_blocks.remove(block_key);
+        }
+        if row.line.block_open {
+            self.real_stream_collapsed_blocks.remove(&row.line_key);
+        }
+    }
+
+    fn select_visual_bbox_for_tree_row(&mut self, row: usize) {
+        let Some(target) = self.tree.real_row_visual_target(row) else {
+            return;
+        };
+        if self.render_rotation_degrees != 0 {
+            self.status_log
+                .push("tree visual bbox highlight is only available at 0 deg rotation".to_string());
+            return;
+        }
+
+        let page = match self.visual_page_for_preview(target.page_index) {
+            Ok(page) => page,
+            Err(err) => {
+                self.status_log.push(format!(
+                    "tree visual bbox page {} failed: {err}",
+                    target.page_index + 1
+                ));
+                return;
+            }
+        };
+
+        if let Some(hit) = visual_hit_for_object(&page, target.object) {
+            self.selected_text_hit = None;
+            self.selected_visual_hit = Some(hit);
+            self.status_log.push(format!(
+                "highlighted page {} visual bbox for {}",
+                target.page_index + 1,
+                object_ref_text(target.object)
+            ));
+            return;
+        }
+
+        if target.allow_page_union {
+            if let Some(hit) = visual_hit_for_page_visual_union(&page, target.object) {
+                self.selected_text_hit = None;
+                self.selected_visual_hit = Some(hit);
+                self.status_log.push(format!(
+                    "highlighted page {} content stream bbox for {}",
+                    target.page_index + 1,
+                    object_ref_text(target.object)
+                ));
+            }
+        }
+    }
+
+    fn visual_page_for_preview(&mut self, page_index: usize) -> Result<VisualPage, String> {
+        if let Some(page) = self.visual_page_cache.get(page_index) {
+            return Ok(page);
+        }
+        let state = self
+            .state
+            .as_ref()
+            .map_err(|_| "document is not open".to_string())?;
+        let mut request = VisualRequest::page(page_index);
+        request.max_elements = VISUAL_CLICK_MAX_ELEMENTS_PER_PAGE;
+        let page = state
+            .session
+            .run_task(|document| document.extract_visuals(&request))
+            .map_err(|err| err.message)?;
+        self.visual_page_cache.insert(page.clone());
+        Ok(page)
+    }
+
+    fn text_page_for_preview(&mut self, page_index: usize) -> Result<TextPage, String> {
+        if let Some(page) = self.text_search_cache.get(page_index) {
+            return Ok(page);
+        }
+        let state = self
+            .state
+            .as_ref()
+            .map_err(|_| "document is not open".to_string())?;
+        let mut request = TextRequest::page(page_index);
+        request.max_chars = TEXT_SEARCH_MAX_CHARS_PER_PAGE;
+        request.max_blocks = TEXT_SEARCH_MAX_BLOCKS_PER_PAGE;
+        let page = state
+            .session
+            .run_task(|document| document.extract_text(&request))
+            .map_err(|err| err.message)?;
+        self.text_search_cache.insert(page.clone());
+        Ok(page)
     }
 
     fn refresh_real_render(&mut self) {
@@ -2178,21 +3272,6 @@ impl GuiShellApp {
         ));
     }
 
-    fn cancel_real_render_job(&mut self) {
-        if let Some(job) = self.real_render_job.take() {
-            job.cancel.cancel();
-            self.real_render = None;
-            self.real_render_texture = None;
-            self.real_render_error = Some("page render cancelled".to_string());
-            self.status_log.push(format!(
-                "cancelled page {} @ {:.0}% rot {} render",
-                job.key.page_index + 1,
-                job.key.zoom() * 100.0,
-                job.key.rotation_degrees
-            ));
-        }
-    }
-
     fn poll_real_render_job(&mut self) {
         let Some(polled) =
             self.real_render_job
@@ -2232,6 +3311,22 @@ impl GuiShellApp {
                         self.real_render = Some(render);
                     }
                     Err(err) => {
+                        if err.contains(RENDER_DIMENSION_LIMIT_ERROR)
+                            && output.key.zoom() > DEFAULT_RENDER_ZOOM
+                        {
+                            self.render_zoom = DEFAULT_RENDER_ZOOM;
+                            self.real_render = None;
+                            self.real_render_texture = None;
+                            self.real_render_error = None;
+                            self.real_render_key = None;
+                            self.status_log.push(format!(
+                                "page {} render exceeded bounds at {:.0}%; retrying at 100%",
+                                output.key.page_index + 1,
+                                output.key.zoom() * 100.0
+                            ));
+                            self.refresh_real_render();
+                            return;
+                        }
                         self.real_render = None;
                         self.real_render_error = Some(err.clone());
                         self.status_log.push(format!(
@@ -3186,7 +4281,7 @@ fn real_stream_default_limit(stream: &StreamSummary, mode: StreamMode) -> usize 
     };
     size_hint
         .and_then(|size| usize::try_from(size).ok())
-        .map(|size| size.min(REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES).max(1))
+        .map(|size| size.clamp(1, REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES))
         .unwrap_or(REAL_STREAM_DEFAULT_VIEW_LIMIT_BYTES)
 }
 
@@ -3295,6 +4390,188 @@ fn real_stream_nice_render_lines(
         }
     }
     rows
+}
+
+fn nice_stream_row_matches_selection(row: &NiceStreamRenderLine, selection_key: &str) -> bool {
+    row.line_key == selection_key || row.block_key.as_deref() == Some(selection_key)
+}
+
+fn nice_stream_text_fragments_for_selection(
+    rows: &[NiceStreamRenderLine],
+    selection_key: &str,
+) -> Vec<String> {
+    let mut fragments = Vec::new();
+    for row in rows {
+        if nice_stream_row_matches_selection(row, selection_key) {
+            fragments.extend(nice_stream_line_text_fragments(&row.line.text));
+        }
+    }
+    dedupe_text_fragments(fragments)
+}
+
+fn nice_stream_line_text_fragments(line: &str) -> Vec<String> {
+    let tokens = pdf_content_tokens(line);
+    let Some(operator) = tokens.last().map(String::as_str) else {
+        return Vec::new();
+    };
+    match operator {
+        "Tj" | "TJ" | "'" | "\"" => {
+            let mut fragments = Vec::new();
+            for token in &tokens[..tokens.len().saturating_sub(1)] {
+                push_pdf_text_fragments_from_token(token, &mut fragments);
+            }
+            fragments
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn push_pdf_text_fragments_from_token(token: &str, out: &mut Vec<String>) {
+    if token.starts_with('(') {
+        let text = decode_pdf_literal_string_token(token);
+        if is_useful_pdf_text_fragment(&text) {
+            out.push(text);
+        }
+    } else if token.starts_with('<') && !token.starts_with("<<") {
+        let text = decode_pdf_hex_string_token(token);
+        if is_useful_pdf_text_fragment(&text) {
+            out.push(text);
+        }
+    } else if token.starts_with('[') && token.ends_with(']') {
+        let inner = &token[1..token.len().saturating_sub(1)];
+        for nested in pdf_content_tokens(inner) {
+            push_pdf_text_fragments_from_token(&nested, out);
+        }
+    }
+}
+
+fn decode_pdf_literal_string_token(token: &str) -> String {
+    let inner = token
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+        .unwrap_or(token);
+    let mut out = String::new();
+    let chars: Vec<char> = inner.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch != '\\' {
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(escaped) = chars.get(index).copied() else {
+            break;
+        };
+        match escaped {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000c}'),
+            '(' | ')' | '\\' => out.push(escaped),
+            '\n' | '\r' => {
+                if escaped == '\r' && chars.get(index + 1) == Some(&'\n') {
+                    index += 1;
+                }
+            }
+            '0'..='7' => {
+                let mut value = escaped.to_digit(8).unwrap_or(0);
+                let mut consumed = 1usize;
+                while consumed < 3 {
+                    let Some(next) = chars.get(index + 1).copied() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    value = value * 8 + digit;
+                    index += 1;
+                    consumed += 1;
+                }
+                out.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+            }
+            _ => out.push(escaped),
+        }
+        index += 1;
+    }
+    out
+}
+
+fn decode_pdf_hex_string_token(token: &str) -> String {
+    let inner = token
+        .strip_prefix('<')
+        .and_then(|text| text.strip_suffix('>'))
+        .unwrap_or(token);
+    let mut hex = inner
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if hex.len() % 2 == 1 {
+        hex.push('0');
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let mut index = 0usize;
+    while index + 1 < hex.len() {
+        if let Ok(byte) = u8::from_str_radix(&hex[index..index + 2], 16) {
+            bytes.push(byte);
+        }
+        index += 2;
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        let mut out = String::new();
+        for pair in bytes[2..].chunks(2) {
+            if pair.len() == 2 {
+                let unit = u16::from_be_bytes([pair[0], pair[1]]);
+                out.push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'));
+            }
+        }
+        out
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+fn is_useful_pdf_text_fragment(text: &str) -> bool {
+    normalized_text_match_key(text).chars().count() >= 2
+}
+
+fn dedupe_text_fragments(fragments: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for fragment in fragments {
+        let key = normalized_text_match_key(&fragment);
+        if !key.is_empty() && seen.insert(key) {
+            out.push(fragment);
+        }
+    }
+    out
+}
+
+fn normalized_text_match_key(text: &str) -> String {
+    let mut out = String::new();
+    let mut last_space = false;
+    for ch in text.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.is_empty() && !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        for lower in ch.to_lowercase() {
+            out.push(lower);
+        }
+        last_space = false;
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
 }
 
 fn nice_stream_line_key(
@@ -3768,6 +5045,30 @@ fn page_index_for_node(id: &NodeId) -> Option<usize> {
     }
 }
 
+fn is_page_row_node_for_index(id: &NodeId, page_index: usize) -> bool {
+    match id {
+        NodeId::Page { index, .. } => *index == page_index,
+        NodeId::ArrayEntry { parent, index, .. } if is_page_root_node(parent) => {
+            *index == page_index
+        }
+        _ => false,
+    }
+}
+
+fn is_page_content_stream_node(id: &NodeId) -> bool {
+    match id {
+        NodeId::DictEntry { parent, key, .. } if key == "Contents" => {
+            page_index_for_node(parent).is_some()
+        }
+        NodeId::ArrayEntry { parent, .. } => is_page_content_stream_node(parent),
+        _ => false,
+    }
+}
+
+fn summary_has_stream(summary: &ObjectSummary) -> bool {
+    summary.has_stream || matches!(summary.kind, ObjectKind::Stream)
+}
+
 fn is_page_root_node(id: &NodeId) -> bool {
     matches!(id, NodeId::PageRoot { .. })
         || matches!(id, NodeId::DictEntry { key, .. } if key == "Pages")
@@ -3804,6 +5105,7 @@ impl eframe::App for GuiShellApp {
         self.poll_real_render_job();
         self.poll_object_search_job();
         self.poll_text_search_job();
+        self.handle_page_keyboard_shortcuts(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         if self.open_pdf_job.is_some()
             || self.real_stream_job.is_some()
@@ -3821,16 +5123,6 @@ impl eframe::App for GuiShellApp {
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show_inside(ui, |ui| self.draw_top_bar(ui, &ctx));
-
-        egui::Panel::bottom("log_panel")
-            .resizable(true)
-            .default_size(150.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(PdbgTheme::LOG_BG)
-                    .inner_margin(egui::Margin::symmetric(10, 8)),
-            )
-            .show_inside(ui, |ui| self.draw_log(ui));
 
         self.draw_workspace(ui, &ctx);
 
@@ -4168,6 +5460,7 @@ impl GuiShellApp {
             DECODED_STREAM_CACHE_MAX_BYTES,
         );
         self.selected_row = self.tree.initial_selected_row();
+        self.scroll_selected_tree_row = false;
         self.back_stack.clear();
         self.forward_stack.clear();
         self.selected_tab = InspectorTab::Object;
@@ -4197,6 +5490,7 @@ impl GuiShellApp {
         );
         self.selected_text_hit = None;
         self.selected_visual_hit = None;
+        self.pending_preview_stream_selection = None;
         self.preview_click = None;
         self.copied_excerpt = None;
         self.status_log = model.status_log;
@@ -4327,6 +5621,8 @@ impl GuiShellApp {
     fn draw_real_tree_rows(&mut self, ui: &mut egui::Ui) {
         let mut clicked_row = None;
         let mut toggled_row = None;
+        let scroll_selected = self.scroll_selected_tree_row;
+        let mut scrolled_selected = false;
         ScrollArea::vertical()
             .id_salt("real_document_tree_rows")
             .show(ui, |ui| {
@@ -4362,6 +5658,10 @@ impl GuiShellApp {
                                     .truncate(),
                             )
                             .on_hover_text(row_label);
+                        if selected && scroll_selected {
+                            row_response.scroll_to_me(Some(egui::Align::Center));
+                            scrolled_selected = true;
+                        }
                         if row_response.double_clicked() {
                             toggled_row = Some(row);
                         } else if row_response.clicked() {
@@ -4371,12 +5671,12 @@ impl GuiShellApp {
                 }
             });
         if let Some(row) = toggled_row {
-            if self.selected_row != row {
-                self.select_row_from_tree(row);
-            }
-            self.toggle_real_tree_row(row);
+            self.select_row_from_tree(row);
         } else if let Some(row) = clicked_row {
             self.select_row_from_tree(row);
+        }
+        if scrolled_selected {
+            self.scroll_selected_tree_row = false;
         }
     }
 
@@ -4759,11 +6059,18 @@ impl GuiShellApp {
                                 render_page_index,
                             );
                             self.preview_click = click;
+                            let mut highlighted_stream_code = false;
                             if let Some(click) = click {
                                 self.select_text_hit_for_preview_click(click);
                                 self.select_visual_hit_for_preview_click(click);
+                                highlighted_stream_code =
+                                    self.open_nice_stream_for_preview_selection(click.page_index);
                             }
-                            self.selected_tab = InspectorTab::Object;
+                            self.selected_tab = if highlighted_stream_code {
+                                InspectorTab::Stream
+                            } else {
+                                InspectorTab::Object
+                            };
                         }
                     }
                     let painter = ui.painter_at(image_rect);
@@ -4831,7 +6138,6 @@ impl GuiShellApp {
                 });
             });
         ui.add_space(8.0);
-        self.draw_real_preview_pager(ui);
         if let Some(hit) = &selected_hit {
             ui.add_space(4.0);
             ui.vertical_centered(|ui| {
@@ -4853,52 +6159,72 @@ impl GuiShellApp {
         }
 
         let mut rerender = false;
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("render_zoom")
-                .selected_text(format!("{:.0}%", self.render_zoom * 100.0))
-                .show_ui(ui, |ui| {
-                    for zoom in [0.5_f32, 1.0, 1.5, 2.0, 3.0, 4.0] {
-                        if ui
-                            .selectable_value(
-                                &mut self.render_zoom,
-                                zoom,
-                                format!("{:.0}%", zoom * 100.0),
-                            )
-                            .changed()
-                        {
+        let total_width =
+            PREVIEW_ZOOM_CONTROL_WIDTH + PREVIEW_CONTROL_GAP + PREVIEW_PAGER_CONTROL_WIDTH;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), PREVIEW_CONTROL_ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let leading = ((ui.available_width() - total_width) * 0.5).max(0.0);
+                ui.add_space(leading);
+                preview_control_group(ui, PREVIEW_ZOOM_CONTROL_WIDTH, |ui| {
+                    let previous_zoom = previous_render_zoom(self.render_zoom);
+                    if preview_icon_button(
+                        ui,
+                        PreviewControlIcon::ZoomOut,
+                        previous_zoom.is_some(),
+                        "Zoom out",
+                    )
+                    .clicked()
+                    {
+                        if let Some(zoom) = previous_zoom {
+                            self.render_zoom = zoom;
                             rerender = true;
                         }
                     }
-                });
-            egui::ComboBox::from_id_salt("render_rotation")
-                .selected_text(format!("{} deg", self.render_rotation_degrees))
-                .show_ui(ui, |ui| {
-                    for rotation in [0, 90, 180, 270] {
-                        if ui
-                            .selectable_value(
-                                &mut self.render_rotation_degrees,
-                                rotation,
-                                format!("{rotation} deg"),
-                            )
-                            .changed()
-                        {
+                    ui.add_sized(
+                        [64.0, 30.0],
+                        egui::Label::new(
+                            RichText::new(format!("{:.0}%", self.render_zoom * 100.0))
+                                .size(18.0)
+                                .color(PdbgTheme::TEXT),
+                        ),
+                    );
+                    let next_zoom = next_render_zoom(self.render_zoom);
+                    if preview_icon_button(
+                        ui,
+                        PreviewControlIcon::ZoomIn,
+                        next_zoom.is_some(),
+                        "Zoom in",
+                    )
+                    .clicked()
+                    {
+                        if let Some(zoom) = next_zoom {
+                            self.render_zoom = zoom;
                             rerender = true;
                         }
                     }
+                    preview_control_separator(ui);
+                    if preview_icon_button(
+                        ui,
+                        PreviewControlIcon::RotateRight,
+                        true,
+                        format!(
+                            "Rotate to {} deg",
+                            next_render_rotation(self.render_rotation_degrees)
+                        ),
+                    )
+                    .clicked()
+                    {
+                        self.render_rotation_degrees =
+                            next_render_rotation(self.render_rotation_degrees);
+                        rerender = true;
+                    }
                 });
-            if self.real_render_job.is_some() {
-                ui.separator();
-                if ui.button("Cancel render").clicked() {
-                    self.cancel_real_render_job();
-                }
-            } else {
-                ui.separator();
-                if ui.button("Render").clicked() {
-                    self.real_render_key = None;
-                    self.refresh_real_render();
-                }
-            }
-        });
+                ui.add_space(PREVIEW_CONTROL_GAP);
+                self.draw_real_preview_pager(ui);
+            },
+        );
         if rerender {
             self.refresh_real_render();
         }
@@ -4910,41 +6236,38 @@ impl GuiShellApp {
         if page_count == 0 {
             return;
         }
-        ui.horizontal_centered(|ui| {
-            if ui
-                .add_enabled(self.render_page_index > 0, egui::Button::new("Prev"))
-                .clicked()
+        preview_control_group(ui, PREVIEW_PAGER_CONTROL_WIDTH, |ui| {
+            if preview_icon_button(
+                ui,
+                PreviewControlIcon::PreviousPage,
+                self.render_page_index > 0,
+                "Previous page",
+            )
+            .clicked()
             {
-                self.set_render_page(self.render_page_index - 1);
+                self.set_render_page_from_pager(self.render_page_index - 1);
             }
-            let mut page_number = self.render_page_index + 1;
-            let page_response = ui.add_sized(
-                [96.0, 22.0],
-                egui::DragValue::new(&mut page_number)
-                    .range(1..=page_count)
-                    .speed(1.0)
-                    .prefix("Page "),
-            );
-            ui.label(
-                RichText::new(format!("/ {}", page_count.max(1)))
-                    .monospace()
-                    .strong()
+            ui.add_sized(
+                [64.0, 30.0],
+                egui::Label::new(
+                    RichText::new(format!(
+                        "{}/{}",
+                        self.render_page_index + 1,
+                        page_count.max(1)
+                    ))
+                    .size(18.0)
                     .color(PdbgTheme::TEXT),
+                ),
             );
-            if page_response.changed() {
-                let target_page = page_number_to_index(page_number, page_count);
-                if target_page != self.render_page_index {
-                    self.set_render_page(target_page);
-                }
-            }
-            if ui
-                .add_enabled(
-                    self.render_page_index + 1 < page_count,
-                    egui::Button::new("Next"),
-                )
-                .clicked()
+            if preview_icon_button(
+                ui,
+                PreviewControlIcon::NextPage,
+                self.render_page_index + 1 < page_count,
+                "Next page",
+            )
+            .clicked()
             {
-                self.set_render_page(self.render_page_index + 1);
+                self.set_render_page_from_pager(self.render_page_index + 1);
             }
         });
     }
@@ -5702,7 +7025,9 @@ impl GuiShellApp {
             let mut collapsed =
                 line.block_open && self.real_stream_collapsed_blocks.contains(&row.line_key);
             let selection_key = row.block_key.as_deref().unwrap_or(row.line_key.as_str());
-            let selected = self.real_stream_selected_block.as_deref() == Some(selection_key);
+            let selected_key = self.real_stream_selected_block.as_deref();
+            let selected =
+                selected_key == Some(selection_key) || selected_key == Some(row.line_key.as_str());
             let row_response = ui.horizontal(|ui| {
                 ui.add_space(line.indent as f32 * NICE_STREAM_INDENT_WIDTH);
                 if line.block_open {
@@ -5720,6 +7045,7 @@ impl GuiShellApp {
                             self.real_stream_collapsed_blocks.remove(&row.line_key);
                         }
                         self.real_stream_selected_block = Some(row.line_key.clone());
+                        self.select_nice_stream_selection_for_preview(object, &row.line_key, &rows);
                     }
                 } else {
                     ui.add_space(22.0);
@@ -5740,6 +7066,7 @@ impl GuiShellApp {
                 );
                 if response.clicked() {
                     self.real_stream_selected_block = Some(selection_key.to_string());
+                    self.select_nice_stream_selection_for_preview(object, selection_key, &rows);
                     if line.block_open {
                         collapsed = !collapsed;
                         if collapsed {
@@ -5751,6 +7078,12 @@ impl GuiShellApp {
                     }
                 }
             });
+            if selected && self.scroll_selected_nice_stream_row {
+                row_response
+                    .response
+                    .scroll_to_me(Some(egui::Align::Center));
+                self.scroll_selected_nice_stream_row = false;
+            }
             draw_nice_stream_guides(
                 ui,
                 row_response.response.rect,
@@ -5825,32 +7158,6 @@ impl GuiShellApp {
                 draw_diagnostic_card(ui, &diagnostic);
             }
         }
-    }
-
-    fn draw_log(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Log")
-                    .strong()
-                    .size(13.0)
-                    .color(PdbgTheme::LOG_TEXT),
-            );
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Clear").color(PdbgTheme::LOG_TEXT))
-                        .fill(Color32::from_rgb(31, 41, 55)),
-                )
-                .clicked()
-            {
-                self.status_log.clear();
-            }
-        });
-        ui.add_space(4.0);
-        ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-            for line in &self.status_log {
-                ui.label(RichText::new(line).monospace().color(PdbgTheme::LOG_MUTED));
-            }
-        });
     }
 }
 
@@ -5980,6 +7287,52 @@ impl TreeModel {
         }
     }
 
+    fn real_row_for_page_index(&self, page_index: usize) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.row_for_page_index(page_index),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_page_root_row(&self) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.page_root_row(),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_first_page_content_stream_row(&self, page_row: usize) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.first_page_content_stream_row(page_row),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_page_content_candidate_rows(&self, page_row: usize) -> Vec<usize> {
+        match self {
+            Self::Real(tree) => tree.page_content_candidate_rows(page_row),
+            Self::Virtual(_) => Vec::new(),
+        }
+    }
+
+    fn ensure_real_page_child_row(
+        &mut self,
+        page_root_row: usize,
+        summary: ObjectSummary,
+    ) -> Option<usize> {
+        match self {
+            Self::Real(tree) => tree.ensure_page_child_row(page_root_row, summary),
+            Self::Virtual(_) => None,
+        }
+    }
+
+    fn real_row_visual_target(&self, row: usize) -> Option<RealVisualTarget> {
+        match self {
+            Self::Real(tree) => tree.row_visual_target(row),
+            Self::Virtual(_) => None,
+        }
+    }
+
     fn reference_targets(&self, row: usize) -> [usize; 3] {
         match self {
             Self::Virtual(tree) => tree.reference_targets(row),
@@ -6103,6 +7456,15 @@ impl RealObjectTree {
             .map(|row| &row.summary)
     }
 
+    fn page_root_row(&self) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            matches!(
+                &row.summary.id,
+                NodeId::DictEntry { key, .. } if key == "Pages"
+            ) || matches!(&row.summary.id, NodeId::PageRoot { .. })
+        })
+    }
+
     fn row_label(&self, row: usize) -> String {
         self.summary(row)
             .map(summary_inline_text)
@@ -6125,14 +7487,52 @@ impl RealObjectTree {
         }
     }
 
-    fn row_is_expanded(&self, row: usize) -> bool {
-        self.rows.get(row).is_some_and(|row| row.expanded)
-    }
-
     fn row_page_index(&self, row: usize) -> Option<usize> {
         self.rows
             .get(row)
             .and_then(|row| page_index_for_node(&row.summary.id))
+    }
+
+    fn row_for_page_index(&self, page_index: usize) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| is_page_row_node_for_index(&row.summary.id, page_index))
+    }
+
+    fn first_page_content_stream_row(&self, page_row: usize) -> Option<usize> {
+        let end = self.subtree_end(page_row);
+        (page_row + 1..end).find(|row| {
+            self.rows.get(*row).is_some_and(|tree_row| {
+                is_page_content_stream_node(&tree_row.summary.id)
+                    && summary_has_stream(&tree_row.summary)
+            })
+        })
+    }
+
+    fn page_content_candidate_rows(&self, page_row: usize) -> Vec<usize> {
+        let end = self.subtree_end(page_row);
+        (page_row + 1..end)
+            .filter(|row| {
+                self.rows.get(*row).is_some_and(|tree_row| {
+                    is_page_content_stream_node(&tree_row.summary.id)
+                        && (tree_row.summary.has_children || summary_has_stream(&tree_row.summary))
+                })
+            })
+            .collect()
+    }
+
+    fn row_visual_target(&self, row: usize) -> Option<RealVisualTarget> {
+        let row = self.rows.get(row)?;
+        let page_index = page_index_for_node(&row.summary.id)?;
+        let object = row.summary.object.or_else(|| row.summary.id.object_id())?;
+        if !row.summary.has_stream && !matches!(row.summary.kind, ObjectKind::Stream) {
+            return None;
+        }
+        Some(RealVisualTarget {
+            page_index,
+            object,
+            allow_page_union: is_page_content_stream_node(&row.summary.id),
+        })
     }
 
     fn row_layout_job(&self, row: usize, selected: bool) -> egui::text::LayoutJob {
@@ -6259,6 +7659,42 @@ impl RealObjectTree {
         hit.object.map(|object| self.ensure_object_row(doc, object))
     }
 
+    fn ensure_page_child_row(
+        &mut self,
+        page_root_row: usize,
+        summary: ObjectSummary,
+    ) -> Option<usize> {
+        if let Some(row) = self.row_for_node(&summary.id) {
+            return Some(row);
+        }
+        let parent_depth = self.rows.get(page_root_row)?.depth;
+        if let Some(parent) = self.rows.get_mut(page_root_row) {
+            parent.expanded = true;
+        }
+        let insert_at = self.subtree_end(page_root_row);
+        self.rows.insert(
+            insert_at,
+            RealTreeRow {
+                summary,
+                depth: parent_depth + 1,
+                expanded: false,
+            },
+        );
+        Some(insert_at)
+    }
+
+    fn subtree_end(&self, row: usize) -> usize {
+        let Some(parent) = self.rows.get(row) else {
+            return self.rows.len();
+        };
+        let parent_depth = parent.depth;
+        let mut end = row + 1;
+        while end < self.rows.len() && self.rows[end].depth > parent_depth {
+            end += 1;
+        }
+        end
+    }
+
     fn update_row_from_detail(&mut self, row: usize, detail: &ObjectDetail) {
         let Some(row) = self.rows.get_mut(row) else {
             return;
@@ -6334,6 +7770,45 @@ impl RealObjectTree {
         let inserted = children.len();
         self.rows.splice(row + 1..row + 1, children);
         inserted
+    }
+
+    fn collapse_expanded_rows_except_selected_path(
+        &mut self,
+        selected_id: &NodeId,
+    ) -> Option<usize> {
+        let selected_row = self.row_for_node(selected_id)?;
+        let keep = self.selected_path_node_ids(selected_row);
+        let mut row = self.rows.len();
+        while row > 0 {
+            row -= 1;
+            if keep.contains(&self.rows[row].summary.id) {
+                continue;
+            }
+            if self.rows[row].expanded {
+                self.collapse_row(row);
+            }
+        }
+        self.row_for_node(selected_id)
+    }
+
+    fn selected_path_node_ids(&self, selected_row: usize) -> HashSet<NodeId> {
+        let mut keep = HashSet::new();
+        let Some(selected) = self.rows.get(selected_row) else {
+            return keep;
+        };
+        keep.insert(selected.summary.id.clone());
+        let mut next_depth = selected.depth;
+        for row in (0..selected_row).rev() {
+            let candidate = &self.rows[row];
+            if candidate.depth < next_depth {
+                keep.insert(candidate.summary.id.clone());
+                next_depth = candidate.depth;
+                if next_depth == 0 {
+                    break;
+                }
+            }
+        }
+        keep
     }
 
     fn collapse_row(&mut self, row: usize) -> usize {
@@ -6672,16 +8147,6 @@ mod tests {
     }
 
     #[test]
-    fn page_number_to_index_clamps_to_available_pages() {
-        assert_eq!(page_number_to_index(1, 517), 0);
-        assert_eq!(page_number_to_index(32, 517), 31);
-        assert_eq!(page_number_to_index(517, 517), 516);
-        assert_eq!(page_number_to_index(999, 517), 516);
-        assert_eq!(page_number_to_index(0, 517), 0);
-        assert_eq!(page_number_to_index(1, 0), 0);
-    }
-
-    #[test]
     fn page_preview_display_size_reserves_footer_space() {
         let texture_size = egui::vec2(900.0, 1400.0);
         let available = egui::vec2(900.0, 1000.0);
@@ -6703,6 +8168,86 @@ mod tests {
     fn page_preview_leading_space_does_not_hide_wide_image_left_edge() {
         assert_eq!(page_preview_leading_space(900.0, 1400.0), 0.0);
         assert_eq!(page_preview_leading_space(900.0, 700.0), 100.0);
+    }
+
+    #[test]
+    fn render_zoom_steps_through_supported_levels() {
+        assert_eq!(previous_render_zoom(0.5), None);
+        assert_eq!(next_render_zoom(0.5), Some(1.0));
+        assert_eq!(previous_render_zoom(1.0), Some(0.5));
+        assert_eq!(next_render_zoom(1.0), Some(1.5));
+        assert_eq!(previous_render_zoom(2.25), Some(2.0));
+        assert_eq!(next_render_zoom(2.25), Some(3.0));
+        assert_eq!(previous_render_zoom(4.0), Some(3.0));
+        assert_eq!(next_render_zoom(4.0), None);
+    }
+
+    #[test]
+    fn render_rotation_cycles_through_right_angles() {
+        assert_eq!(next_render_rotation(0), 90);
+        assert_eq!(next_render_rotation(90), 180);
+        assert_eq!(next_render_rotation(180), 270);
+        assert_eq!(next_render_rotation(270), 0);
+        assert_eq!(next_render_rotation(450), 180);
+        assert_eq!(next_render_rotation(-90), 0);
+    }
+
+    #[test]
+    fn page_keyboard_shortcuts_choose_expected_pages() {
+        assert_eq!(
+            page_keyboard_target_page(2, 5, PageKeyboardShortcut::Previous),
+            Some(1)
+        );
+        assert_eq!(
+            page_keyboard_target_page(2, 5, PageKeyboardShortcut::Next),
+            Some(3)
+        );
+        assert_eq!(
+            page_keyboard_target_page(2, 5, PageKeyboardShortcut::First),
+            Some(0)
+        );
+        assert_eq!(
+            page_keyboard_target_page(2, 5, PageKeyboardShortcut::Last),
+            Some(4)
+        );
+        assert_eq!(
+            page_keyboard_target_page(0, 5, PageKeyboardShortcut::Previous),
+            Some(0)
+        );
+        assert_eq!(
+            page_keyboard_target_page(4, 5, PageKeyboardShortcut::Next),
+            Some(4)
+        );
+        assert_eq!(
+            page_keyboard_target_page(0, 0, PageKeyboardShortcut::Next),
+            None
+        );
+    }
+
+    #[test]
+    fn render_key_request_applies_configured_dimension_limit() {
+        let key = RealRenderKey::new(0, 1.5, 90, 8192);
+        let request = key.request();
+
+        assert_eq!(request.max_width, 8192);
+        assert_eq!(request.max_height, 8192);
+        assert_eq!(request.max_pixels, 8192 * 8192);
+        assert_eq!(request.max_output_bytes, 8192 * 8192 * 4);
+        assert_eq!(request.zoom, 1.5);
+        assert_eq!(request.rotation_degrees, 90);
+    }
+
+    #[test]
+    fn gui_options_default_render_dimension_limit_when_unset_or_zero() {
+        assert_eq!(
+            render_max_dimension_or_default(None),
+            DEFAULT_RENDER_MAX_DIMENSION
+        );
+        assert_eq!(
+            render_max_dimension_or_default(Some(0)),
+            DEFAULT_RENDER_MAX_DIMENSION
+        );
+        assert_eq!(render_max_dimension_or_default(Some(8192)), 8192);
     }
 
     #[test]
@@ -6801,6 +8346,224 @@ mod tests {
             ..click
         };
         assert!(visual_hit_from_page_click(&page, miss, 2.0).is_none());
+    }
+
+    #[test]
+    fn visual_hit_for_object_unions_matching_bboxes() {
+        let object = ObjectId { num: 30, gen: 0 };
+        let page = VisualPage {
+            page_index: 0,
+            elements: vec![
+                VisualElement {
+                    kind: VisualElementKind::Text,
+                    bbox: PageRect {
+                        x: 20.0,
+                        y: 10.0,
+                        width: 40.0,
+                        height: 30.0,
+                    },
+                    object: Some(object),
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Vector,
+                    bbox: PageRect {
+                        x: 50.0,
+                        y: 30.0,
+                        width: 60.0,
+                        height: 25.0,
+                    },
+                    object: Some(object),
+                    untrusted: true,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Image,
+                    bbox: PageRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                    object: Some(ObjectId { num: 99, gen: 0 }),
+                    untrusted: false,
+                },
+            ],
+        };
+
+        let hit = visual_hit_for_object(&page, object).unwrap();
+
+        assert_eq!(hit.page_index, 0);
+        assert_eq!(hit.element_index, 0);
+        assert_eq!(hit.kind, VisualElementKind::Unknown);
+        assert_eq!(hit.object, Some(object));
+        assert!(hit.untrusted);
+        assert!(!hit.contains_click);
+        assert_eq!(hit.bbox.x, 20.0);
+        assert_eq!(hit.bbox.y, 10.0);
+        assert_eq!(hit.bbox.width, 90.0);
+        assert_eq!(hit.bbox.height, 45.0);
+    }
+
+    #[test]
+    fn visual_hit_for_page_visual_union_uses_all_visible_bboxes() {
+        let object = ObjectId { num: 30, gen: 0 };
+        let page = VisualPage {
+            page_index: 1,
+            elements: vec![
+                VisualElement {
+                    kind: VisualElementKind::Vector,
+                    bbox: PageRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 30.0,
+                        height: 40.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Vector,
+                    bbox: PageRect {
+                        x: 50.0,
+                        y: 5.0,
+                        width: 20.0,
+                        height: 30.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Image,
+                    bbox: PageRect {
+                        x: 80.0,
+                        y: 80.0,
+                        width: 0.0,
+                        height: 10.0,
+                    },
+                    object: None,
+                    untrusted: true,
+                },
+            ],
+        };
+
+        let hit = visual_hit_for_page_visual_union(&page, object).unwrap();
+
+        assert_eq!(hit.page_index, 1);
+        assert_eq!(hit.element_index, 0);
+        assert_eq!(hit.kind, VisualElementKind::Vector);
+        assert_eq!(hit.object, Some(object));
+        assert!(!hit.untrusted);
+        assert_eq!(hit.bbox.x, 10.0);
+        assert_eq!(hit.bbox.y, 5.0);
+        assert_eq!(hit.bbox.width, 60.0);
+        assert_eq!(hit.bbox.height, 55.0);
+    }
+
+    #[test]
+    fn page_content_stream_node_detection_follows_contents_arrays() {
+        let doc = pdbg_core::DocumentId(7);
+        let page = NodeId::Page {
+            doc: doc.clone(),
+            index: 0,
+        };
+        let contents = NodeId::DictEntry {
+            doc: doc.clone(),
+            parent: Box::new(page),
+            key: "Contents".to_string(),
+        };
+        let content_item = NodeId::ArrayEntry {
+            doc: doc.clone(),
+            parent: Box::new(contents),
+            index: 0,
+        };
+        let media_box = NodeId::DictEntry {
+            doc,
+            parent: Box::new(NodeId::Page {
+                doc: pdbg_core::DocumentId(7),
+                index: 0,
+            }),
+            key: "MediaBox".to_string(),
+        };
+
+        assert!(is_page_content_stream_node(&content_item));
+        assert!(!is_page_content_stream_node(&media_box));
+    }
+
+    #[test]
+    fn real_tree_finds_page_content_stream_descendant() {
+        let doc = pdbg_core::DocumentId(7);
+        let page = NodeId::ArrayEntry {
+            doc: doc.clone(),
+            parent: Box::new(NodeId::PageRoot { doc: doc.clone() }),
+            index: 1,
+        };
+        let content_stream = ObjectSummary {
+            id: NodeId::DictEntry {
+                doc: doc.clone(),
+                parent: Box::new(page.clone()),
+                key: "Contents".to_string(),
+            },
+            kind: ObjectKind::Stream,
+            label: "Contents".to_string(),
+            preview: "7 0 R stream".to_string(),
+            object: Some(ObjectId { num: 7, gen: 0 }),
+            has_children: false,
+            has_stream: true,
+            child_count: None,
+            byte_size_hint: None,
+            diagnostics: Vec::new(),
+        };
+        let media_box = ObjectSummary {
+            id: NodeId::DictEntry {
+                doc,
+                parent: Box::new(page.clone()),
+                key: "MediaBox".to_string(),
+            },
+            kind: ObjectKind::Array,
+            label: "MediaBox".to_string(),
+            preview: String::new(),
+            object: None,
+            has_children: false,
+            has_stream: false,
+            child_count: None,
+            byte_size_hint: None,
+            diagnostics: Vec::new(),
+        };
+        let tree = RealObjectTree {
+            rows: vec![
+                RealTreeRow {
+                    summary: ObjectSummary {
+                        id: page,
+                        kind: ObjectKind::Page,
+                        label: "Page 2".to_string(),
+                        preview: String::new(),
+                        object: None,
+                        has_children: true,
+                        has_stream: false,
+                        child_count: Some(2),
+                        byte_size_hint: None,
+                        diagnostics: Vec::new(),
+                    },
+                    depth: 0,
+                    expanded: true,
+                },
+                RealTreeRow {
+                    summary: media_box,
+                    depth: 1,
+                    expanded: false,
+                },
+                RealTreeRow {
+                    summary: content_stream,
+                    depth: 1,
+                    expanded: false,
+                },
+            ],
+            root_children: Vec::new(),
+            total: Some(1),
+        };
+
+        assert_eq!(tree.first_page_content_stream_row(0), Some(2));
+        assert_eq!(tree.page_content_candidate_rows(0), vec![2]);
     }
 
     #[test]
@@ -7166,6 +8929,227 @@ mod tests {
                 .as_deref(),
             Some(bdc_key.as_str())
         );
+    }
+
+    #[test]
+    fn nice_stream_selection_extracts_text_fragments_from_block() {
+        let object = ObjectId { num: 7, gen: 0 };
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: b"BT /F1 12 Tf (Country of Citizenship) Tj ET".to_vec(),
+            total_size: Some(47),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+        let rows = real_stream_nice_render_lines(object, &chunks);
+        let bt_key = rows
+            .iter()
+            .find(|row| row.line.text == "BT")
+            .unwrap()
+            .line_key
+            .clone();
+
+        assert_eq!(
+            nice_stream_text_fragments_for_selection(&rows, &bt_key),
+            vec!["Country of Citizenship"]
+        );
+    }
+
+    #[test]
+    fn text_hit_for_fragments_unions_matching_text_spans() {
+        let page = TextPage {
+            page_index: 1,
+            spans: vec![
+                TextSpan {
+                    text: "Country of".to_string(),
+                    bbox: PageRect {
+                        x: 10.0,
+                        y: 20.0,
+                        width: 40.0,
+                        height: 8.0,
+                    },
+                    untrusted: false,
+                },
+                TextSpan {
+                    text: "Citizenship".to_string(),
+                    bbox: PageRect {
+                        x: 52.0,
+                        y: 18.0,
+                        width: 48.0,
+                        height: 12.0,
+                    },
+                    untrusted: true,
+                },
+            ],
+        };
+
+        let hit = text_hit_for_text_fragments(&page, &["Country of Citizenship".to_string()])
+            .expect("expected positioned text hit");
+
+        assert_eq!(hit.page_index, 1);
+        assert_eq!(hit.span_index, 0);
+        assert!(hit.untrusted);
+        let bbox = hit.bbox.unwrap();
+        assert_eq!(bbox.x, 10.0);
+        assert_eq!(bbox.y, 18.0);
+        assert_eq!(bbox.width, 90.0);
+        assert_eq!(bbox.height, 12.0);
+    }
+
+    #[test]
+    fn nice_stream_text_hit_selects_matching_text_show_line() {
+        let object = ObjectId { num: 7, gen: 0 };
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: b"BT /F1 12 Tf (Country of Citizenship) Tj (China) Tj ET".to_vec(),
+            total_size: Some(59),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+        let rows = real_stream_nice_render_lines(object, &chunks);
+        let hit = TextSearchHit {
+            page_index: 0,
+            span_index: 0,
+            excerpt: "Country of Citizenship".to_string(),
+            bbox: None,
+            untrusted: false,
+        };
+
+        let key = nice_stream_selection_key_for_text_hit(&rows, &hit).unwrap();
+        let row = rows.iter().find(|row| row.line_key == key).unwrap();
+
+        assert_eq!(row.line.text, "(Country of Citizenship) Tj");
+    }
+
+    #[test]
+    fn nice_stream_visual_selection_matches_vector_and_image_order() {
+        let object = ObjectId { num: 7, gen: 0 };
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: b"BT (Title) Tj ET q 10 10 20 20 re f Q q /Im0 Do Q".to_vec(),
+            total_size: Some(57),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+        let rows = real_stream_nice_render_lines(object, &chunks);
+        let page = VisualPage {
+            page_index: 0,
+            elements: vec![
+                VisualElement {
+                    kind: VisualElementKind::Text,
+                    bbox: PageRect {
+                        x: 1.0,
+                        y: 1.0,
+                        width: 10.0,
+                        height: 5.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Vector,
+                    bbox: PageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 20.0,
+                        height: 20.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Image,
+                    bbox: PageRect {
+                        x: 40.0,
+                        y: 50.0,
+                        width: 30.0,
+                        height: 25.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+            ],
+        };
+        let vector_key = rows
+            .iter()
+            .find(|row| row.line.text == "f")
+            .and_then(|row| row.block_key.clone())
+            .unwrap();
+        let image_key = rows
+            .iter()
+            .find(|row| row.line.text.ends_with(" Do"))
+            .and_then(|row| row.block_key.clone())
+            .unwrap();
+
+        let vector_hit =
+            nice_stream_visual_hit_for_selection(&page, &rows, &vector_key, object).unwrap();
+        let image_hit =
+            nice_stream_visual_hit_for_selection(&page, &rows, &image_key, object).unwrap();
+
+        assert_eq!(vector_hit.element_index, 1);
+        assert_eq!(vector_hit.kind, VisualElementKind::Vector);
+        assert_eq!(vector_hit.bbox.x, 10.0);
+        assert_eq!(image_hit.element_index, 2);
+        assert_eq!(image_hit.kind, VisualElementKind::Image);
+        assert_eq!(image_hit.bbox.x, 40.0);
+    }
+
+    #[test]
+    fn nice_stream_visual_hit_selects_matching_draw_operation() {
+        let object = ObjectId { num: 7, gen: 0 };
+        let chunks = vec![StreamChunk {
+            mode: StreamMode::Decoded,
+            offset: 0,
+            bytes: b"q 10 10 20 20 re f Q q /Im0 Do Q".to_vec(),
+            total_size: Some(37),
+            truncated: false,
+            decode_diagnostics: Vec::new(),
+        }];
+        let rows = real_stream_nice_render_lines(object, &chunks);
+        let page = VisualPage {
+            page_index: 0,
+            elements: vec![
+                VisualElement {
+                    kind: VisualElementKind::Vector,
+                    bbox: PageRect {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 20.0,
+                        height: 20.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+                VisualElement {
+                    kind: VisualElementKind::Image,
+                    bbox: PageRect {
+                        x: 40.0,
+                        y: 50.0,
+                        width: 30.0,
+                        height: 25.0,
+                    },
+                    object: None,
+                    untrusted: false,
+                },
+            ],
+        };
+        let hit = PreviewVisualHit {
+            page_index: 0,
+            element_index: 1,
+            kind: VisualElementKind::Image,
+            bbox: page.elements[1].bbox.clone(),
+            object: None,
+            untrusted: false,
+            contains_click: true,
+        };
+
+        let key = nice_stream_selection_key_for_visual_hit(&page, &rows, &hit).unwrap();
+        let row = rows.iter().find(|row| row.line_key == key).unwrap();
+
+        assert_eq!(row.line.text, "/Im0 Do");
     }
 
     #[test]
@@ -7554,6 +9538,24 @@ mod tests {
     }
 
     #[test]
+    fn page_row_node_detection_ignores_page_child_nodes() {
+        let doc = pdbg_core::DocumentId(1);
+        let page = NodeId::ArrayEntry {
+            doc: doc.clone(),
+            parent: Box::new(NodeId::PageRoot { doc: doc.clone() }),
+            index: 2,
+        };
+        let media_box = NodeId::DictEntry {
+            doc,
+            parent: Box::new(page.clone()),
+            key: "MediaBox".to_string(),
+        };
+
+        assert!(is_page_row_node_for_index(&page, 2));
+        assert!(!is_page_row_node_for_index(&media_box, 2));
+    }
+
+    #[test]
     fn recent_pdf_paths_are_deduped_bounded_and_persisted() {
         let recent_path = temp_recent_file_path("round-trip");
         let dir = recent_path.parent().unwrap().to_path_buf();
@@ -7699,6 +9701,7 @@ mod tests {
             pdf_path: None,
             recent_files_path: Some(recent_path.clone()),
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         assert!(!app.tree.is_real());
 
@@ -7736,6 +9739,7 @@ mod tests {
             pdf_path: None,
             recent_files_path: Some(recent_path.clone()),
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         let initial_row = app.tree.row_label(0);
 
@@ -7777,20 +9781,21 @@ mod tests {
             pdf_path: Some(fixture.to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         assert!(app.real_render_job.is_some());
         wait_for_real_render(&mut app);
 
         assert!(app.state.is_ok());
         assert!(matches!(app.tree, TreeModel::Real(_)));
-        assert_eq!(app.tree.row_count(), 4);
+        assert_eq!(app.tree.row_count(), 5);
         assert_eq!(app.tree.row_count_label(), "4 loaded / 4 total");
         assert!(app.real_detail.is_some());
         let pages = app.real_pages.as_ref().unwrap();
         assert_eq!(pages.total, Some(1));
         assert_eq!(pages.items[0].label, "Page 1");
         assert!(app.real_render.is_some());
-        assert!(app.breadcrumb_label().contains("Trailer"));
+        assert!(app.breadcrumb_label().contains("Root"));
         assert!(app.status_log[0].contains("real MuPDF opened"));
         assert!(app
             .status_log
@@ -7816,6 +9821,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
         let open_elapsed = open_start.elapsed();
@@ -7830,20 +9836,20 @@ mod tests {
             .unwrap()
             .xref_size;
         assert!(xref_size > 1_000);
-        assert_eq!(app.tree.row_count(), 4);
+        assert_eq!(app.tree.row_count(), 5);
 
         let xref_expand_start = Instant::now();
-        app.select_row_from_tree(3);
-        let xref_inserted = app.expand_selected_real_row();
+        app.select_row_from_tree(4);
         let xref_elapsed = xref_expand_start.elapsed();
-        assert_eq!(xref_inserted, 64);
+        assert_eq!(app.tree.real_row_tree_marker(app.selected_row), Some("-"));
+        assert!(app.tree.row_count() > 5);
         assert!(app.tree.row_count() < xref_size / 10);
 
         let pages_expand_start = Instant::now();
-        app.select_row_from_tree(2);
-        let pages_inserted = app.expand_selected_real_row();
+        app.select_row_from_tree(3);
         let pages_elapsed = pages_expand_start.elapsed();
-        assert_eq!(pages_inserted, 1);
+        assert_eq!(app.tree.real_row_tree_marker(app.selected_row), Some("-"));
+        assert!(app.tree.real_row_for_page_index(0).is_some());
 
         let jump_start = Instant::now();
         app.follow_real_reference(ObjectId { num: 1, gen: 0 });
@@ -7882,6 +9888,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
@@ -7890,6 +9897,7 @@ mod tests {
             .real_detail
             .as_ref()
             .is_some_and(|detail| detail.stream.is_some()));
+        app.real_stream_mode = StreamMode::Raw;
         app.real_stream_limit = 16;
         app.refresh_real_stream_chunk(ObjectId { num: 4, gen: 0 });
         assert!(app.real_stream_job.is_some());
@@ -7921,6 +9929,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
@@ -7962,10 +9971,12 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
         app.follow_real_reference(ObjectId { num: 4, gen: 0 });
+        app.real_stream_mode = StreamMode::Raw;
         app.real_stream_limit = 16;
         app.refresh_real_stream_chunk(ObjectId { num: 4, gen: 0 });
         assert!(app.real_stream_job.is_some());
@@ -7994,6 +10005,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
@@ -8002,14 +10014,21 @@ mod tests {
         assert_eq!(app.real_pages.as_ref().unwrap().items[1].label, "Page 2");
         let initial = app.real_render.as_ref().unwrap();
         assert_eq!(initial.page_index, 0);
-        assert_eq!((initial.width, initial.height), (400, 200));
+        assert_eq!((initial.width, initial.height), (200, 100));
 
-        app.render_zoom = 1.0;
+        app.render_zoom = 2.0;
         app.refresh_real_render();
         wait_for_real_render(&mut app);
         let zoomed = app.real_render.as_ref().unwrap();
         assert_eq!(zoomed.page_index, 0);
-        assert_eq!((zoomed.width, zoomed.height), (200, 100));
+        assert_eq!((zoomed.width, zoomed.height), (400, 200));
+
+        app.render_zoom = 1.0;
+        app.refresh_real_render();
+        wait_for_real_render(&mut app);
+        let reset_zoom = app.real_render.as_ref().unwrap();
+        assert_eq!(reset_zoom.page_index, 0);
+        assert_eq!((reset_zoom.width, reset_zoom.height), (200, 100));
 
         app.set_render_page(1);
         wait_for_real_render(&mut app);
@@ -8036,6 +10055,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
@@ -8074,6 +10094,63 @@ mod tests {
 
     #[cfg(feature = "real-mupdf")]
     #[test]
+    fn real_gui_pager_expands_and_selects_matching_page_tree_row() {
+        let path = write_temp_pdf("gui-pager-tree-sync", &synthetic_two_page_pdf());
+        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+            smoke_exit_after: None,
+            pdf_path: Some(path.to_string_lossy().to_string()),
+            recent_files_path: None,
+            start_empty_when_no_pdf: false,
+            render_max_dimension: None,
+        });
+        wait_for_real_render(&mut app);
+
+        assert!(app.tree.real_row_for_page_index(1).is_none());
+        let page_root_row = app.tree.real_page_root_row().unwrap();
+        let non_page_row = (0..app.tree.row_count())
+            .find(|row| *row != page_root_row && app.tree.real_row_tree_marker(*row) == Some("+"))
+            .unwrap();
+        let non_page_id = match &app.tree {
+            TreeModel::Real(tree) => tree
+                .summary(non_page_row)
+                .map(|summary| summary.id.clone())
+                .unwrap(),
+            TreeModel::Virtual(_) => panic!("expected real tree"),
+        };
+        app.expand_real_tree_row(non_page_row);
+        let expanded_non_page_row = match &app.tree {
+            TreeModel::Real(tree) => tree.row_for_node(&non_page_id).unwrap(),
+            TreeModel::Virtual(_) => panic!("expected real tree"),
+        };
+        assert_eq!(
+            app.tree.real_row_tree_marker(expanded_non_page_row),
+            Some("-")
+        );
+
+        app.set_render_page_from_pager(1);
+        wait_for_real_render(&mut app);
+
+        let page_row = app.tree.real_row_for_page_index(1).unwrap();
+        let page_root_row = app.tree.real_page_root_row().unwrap();
+        let collapsed_non_page_row = match &app.tree {
+            TreeModel::Real(tree) => tree.row_for_node(&non_page_id).unwrap(),
+            TreeModel::Virtual(_) => panic!("expected real tree"),
+        };
+        assert_eq!(app.render_page_index, 1);
+        assert_eq!(app.selected_row, page_row);
+        assert_eq!(app.tree.real_row_tree_marker(page_root_row), Some("-"));
+        assert_eq!(app.tree.real_row_tree_marker(page_row), Some("-"));
+        assert_eq!(
+            app.tree.real_row_tree_marker(collapsed_non_page_row),
+            Some("+")
+        );
+        assert!(app.scroll_selected_tree_row);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
     fn real_gui_render_cache_reuses_previous_page() {
         let path = write_temp_pdf("gui-render-cache", &synthetic_two_page_pdf());
         let mut app = GuiShellApp::new_with_options(GuiRunOptions {
@@ -8081,6 +10158,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         wait_for_real_render(&mut app);
 
@@ -8093,11 +10171,11 @@ mod tests {
         assert!(app.real_render_job.is_none());
         let render = app.real_render.as_ref().unwrap();
         assert_eq!(render.page_index, 0);
-        assert_eq!((render.width, render.height), (400, 200));
+        assert_eq!((render.width, render.height), (200, 100));
         assert!(app
             .status_log
             .iter()
-            .any(|line| line.starts_with("reused cached page 1 @ 200%")));
+            .any(|line| line.starts_with("reused cached page 1 @ 100%")));
 
         let _ = std::fs::remove_file(path);
     }
@@ -8111,6 +10189,7 @@ mod tests {
             pdf_path: Some(path.to_string_lossy().to_string()),
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         assert!(app.real_render_job.is_some());
 
@@ -8119,38 +10198,11 @@ mod tests {
 
         let render = app.real_render.as_ref().unwrap();
         assert_eq!(render.page_index, 1);
-        assert_eq!((render.width, render.height), (200, 400));
+        assert_eq!((render.width, render.height), (100, 200));
         assert!(app
             .status_log
             .iter()
             .any(|line| line.starts_with("queued page 2")));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[cfg(feature = "real-mupdf")]
-    #[test]
-    fn real_gui_render_job_can_be_cancelled_from_ui_state() {
-        let path = write_temp_pdf("gui-render-cancel", &synthetic_two_page_pdf());
-        let mut app = GuiShellApp::new_with_options(GuiRunOptions {
-            smoke_exit_after: None,
-            pdf_path: Some(path.to_string_lossy().to_string()),
-            recent_files_path: None,
-            start_empty_when_no_pdf: false,
-        });
-        assert!(app.real_render_job.is_some());
-
-        app.cancel_real_render_job();
-        assert!(app.real_render_job.is_none());
-        assert!(app.real_render.is_none());
-        assert_eq!(
-            app.real_render_error.as_deref(),
-            Some("page render cancelled")
-        );
-        assert!(app
-            .status_log
-            .iter()
-            .any(|line| line.starts_with("cancelled page 1")));
 
         let _ = std::fs::remove_file(path);
     }
@@ -8177,6 +10229,7 @@ mod tests {
             pdf_path: None,
             recent_files_path: None,
             start_empty_when_no_pdf: false,
+            render_max_dimension: None,
         });
         assert_eq!(app.smoke_exit_after, Some(Duration::from_millis(250)));
     }

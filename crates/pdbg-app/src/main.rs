@@ -13,6 +13,7 @@ struct CliOptions {
     gui: bool,
     gui_smoke_ms: Option<u64>,
     pdf_path: Option<String>,
+    render_max_dimension: Option<u32>,
 }
 
 impl CliOptions {
@@ -26,17 +27,31 @@ impl CliOptions {
                     options.gui_smoke_ms = args.next().and_then(|value| value.parse().ok());
                 }
                 "--pdf" => options.pdf_path = args.next(),
+                "--render-max-dimension" | "--max-render-dimension" => {
+                    options.render_max_dimension = args
+                        .next()
+                        .and_then(|value| parse_render_max_dimension(&value));
+                }
                 _ => {
                     if let Some(value) = arg.strip_prefix("--gui-smoke-ms=") {
                         options.gui_smoke_ms = value.parse().ok();
                     } else if let Some(value) = arg.strip_prefix("--pdf=") {
                         options.pdf_path = Some(value.to_string());
+                    } else if let Some(value) = arg
+                        .strip_prefix("--render-max-dimension=")
+                        .or_else(|| arg.strip_prefix("--max-render-dimension="))
+                    {
+                        options.render_max_dimension = parse_render_max_dimension(value);
                     }
                 }
             }
         }
         options
     }
+}
+
+fn parse_render_max_dimension(value: &str) -> Option<u32> {
+    value.parse::<u32>().ok().filter(|dimension| *dimension > 0)
 }
 
 fn run_headless(options: CliOptions) {
@@ -82,6 +97,7 @@ fn run_gui(options: CliOptions) {
         pdf_path: options.pdf_path,
         recent_files_path: None,
         start_empty_when_no_pdf,
+        render_max_dimension: options.render_max_dimension,
     };
     if let Err(err) = pdbg_app::gui::run_gui_with_options(options) {
         eprintln!("pdbg-app GUI failed: {err}");
@@ -92,6 +108,18 @@ fn run_gui(options: CliOptions) {
 #[cfg(not(feature = "gui"))]
 fn run_gui(_options: CliOptions) {
     eprintln!("pdbg-app GUI is behind the optional `gui` feature");
-    eprintln!("run: cargo run -p pdbg-app --features gui -- --gui");
+    eprintln!("run: cargo run -p pdbg-app --features gui -- --gui [--render-max-dimension 8192]");
     std::process::exit(2);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_render_max_dimension;
+
+    #[test]
+    fn parse_render_max_dimension_accepts_positive_pixels() {
+        assert_eq!(parse_render_max_dimension("8192"), Some(8192));
+        assert_eq!(parse_render_max_dimension("0"), None);
+        assert_eq!(parse_render_max_dimension("bad"), None);
+    }
 }
