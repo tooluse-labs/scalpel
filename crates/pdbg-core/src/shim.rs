@@ -1,12 +1,18 @@
 use crate::dto::*;
 use crate::session::FakeSharedStore;
-use crate::{wire, ChildContainer, NodeTokenRegistry, SafeModeConfig};
+#[cfg(feature = "real-mupdf")]
+use crate::{wire, NodeTokenRegistry};
+use crate::{ChildContainer, SafeModeConfig};
 use pdbg_shim::raw;
+#[cfg(feature = "real-mupdf")]
 use std::ffi::CString;
+#[cfg(all(unix, feature = "real-mupdf"))]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "real-mupdf")]
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -25,6 +31,7 @@ impl ShimError {
         }
     }
 
+    #[cfg(feature = "real-mupdf")]
     fn with_diagnostics(
         status: raw::pdbg_status,
         message: impl Into<String>,
@@ -75,18 +82,16 @@ pub trait ShimDocument {
 }
 
 pub struct FakeShim {
-    ctx: Arc<PdbgContext>,
     shared_store: FakeSharedStore,
 }
+
+static FAKE_NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl FakeShim {
     pub fn new() -> Result<Self, ShimError> {
         let shared_store = FakeSharedStore::new();
         shared_store.record_root_lock_context();
-        Ok(Self {
-            ctx: Arc::new(PdbgContext::new()?),
-            shared_store,
-        })
+        Ok(Self { shared_store })
     }
 
     pub fn shared_store(&self) -> FakeSharedStore {
@@ -102,10 +107,11 @@ impl FakeShim {
         path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, None, config)?;
+        let doc = FakeDoc::open_path(path, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc,
+            backend: OpenDocumentBackend::Fake(doc),
+            #[cfg(feature = "real-mupdf")]
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -116,10 +122,12 @@ impl FakeShim {
         password: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = PdbgDoc::open_path(Arc::clone(&self.ctx), path, Some(password), config)?;
+        let _ = password;
+        let doc = FakeDoc::open_path(path, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc,
+            backend: OpenDocumentBackend::Fake(doc),
+            #[cfg(feature = "real-mupdf")]
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -131,10 +139,11 @@ impl FakeShim {
         display_path: &str,
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
-        let doc = PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, None, config)?;
+        let doc = FakeDoc::open_fd(fd, display_path, config)?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc,
+            backend: OpenDocumentBackend::Fake(doc),
+            #[cfg(feature = "real-mupdf")]
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -144,15 +153,11 @@ impl Shim for FakeShim {
     type Document = OpenDocument;
 
     fn open_document(&self, path: &str) -> Result<Self::Document, ShimError> {
-        let doc = PdbgDoc::open_path(
-            Arc::clone(&self.ctx),
-            path,
-            None,
-            &SafeModeConfig::default(),
-        )?;
+        let doc = FakeDoc::open_path(path, &SafeModeConfig::default())?;
         self.shared_store.record_document_open();
         Ok(OpenDocument {
-            doc,
+            backend: OpenDocumentBackend::Fake(doc),
+            #[cfg(feature = "real-mupdf")]
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -177,7 +182,12 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, None, config)?,
+            backend: OpenDocumentBackend::Real(PdbgDoc::open_path(
+                Arc::clone(&self.ctx),
+                path,
+                None,
+                config,
+            )?),
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -189,7 +199,12 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: PdbgDoc::open_path(Arc::clone(&self.ctx), path, Some(password), config)?,
+            backend: OpenDocumentBackend::Real(PdbgDoc::open_path(
+                Arc::clone(&self.ctx),
+                path,
+                Some(password),
+                config,
+            )?),
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -202,7 +217,13 @@ impl RealMuPdfShim {
         config: &SafeModeConfig,
     ) -> Result<OpenDocument, ShimError> {
         Ok(OpenDocument {
-            doc: PdbgDoc::open_fd(Arc::clone(&self.ctx), fd, display_path, None, config)?,
+            backend: OpenDocumentBackend::Real(PdbgDoc::open_fd(
+                Arc::clone(&self.ctx),
+                fd,
+                display_path,
+                None,
+                config,
+            )?),
             registry: NodeTokenRegistry::default(),
         })
     }
@@ -218,13 +239,24 @@ impl Shim for RealMuPdfShim {
 }
 
 pub struct OpenDocument {
-    doc: PdbgDoc,
+    backend: OpenDocumentBackend,
+    #[cfg(feature = "real-mupdf")]
     registry: NodeTokenRegistry,
+}
+
+enum OpenDocumentBackend {
+    #[cfg(feature = "real-mupdf")]
+    Real(PdbgDoc),
+    Fake(FakeDoc),
 }
 
 impl ShimDocument for OpenDocument {
     fn summary(&mut self) -> Result<DocumentSummary, ShimError> {
-        self.doc.summary(&self.registry)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.summary(&self.registry),
+            OpenDocumentBackend::Fake(doc) => Ok(doc.summary()),
+        }
     }
 
     fn children(
@@ -233,9 +265,14 @@ impl ShimDocument for OpenDocument {
         range: ChildRange,
         container: ChildContainer,
     ) -> Result<ChildPage, ShimError> {
-        let raw_parent = self.raw_node_for(parent)?;
-        self.doc
-            .children(&mut self.registry, &raw_parent, parent, range, container)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                let raw_parent = self.raw_node_for(parent)?;
+                doc.children(&mut self.registry, &raw_parent, parent, range, container)
+            }
+            OpenDocumentBackend::Fake(doc) => Ok(doc.children(parent, range, container)),
+        }
     }
 
     fn object_detail(
@@ -243,9 +280,14 @@ impl ShimDocument for OpenDocument {
         node: &NodeId,
         range: ChildRange,
     ) -> Result<ObjectDetail, ShimError> {
-        let raw_node = self.raw_node_for(node)?;
-        self.doc
-            .object_detail(&mut self.registry, &raw_node, node, range)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                let raw_node = self.raw_node_for(node)?;
+                doc.object_detail(&mut self.registry, &raw_node, node, range)
+            }
+            OpenDocumentBackend::Fake(doc) => Ok(doc.object_detail(node, range)),
+        }
     }
 
     fn stream_load(
@@ -255,24 +297,42 @@ impl ShimDocument for OpenDocument {
         offset: u64,
         limit: usize,
     ) -> Result<StreamChunk, ShimError> {
-        self.doc
-            .stream_load(&self.registry, object, mode, offset, limit)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.stream_load(&self.registry, object, mode, offset, limit)
+            }
+            OpenDocumentBackend::Fake(doc) => doc.stream_load(object, mode, offset, limit, None),
+        }
     }
 
     fn render_page(&mut self, request: &RenderRequest) -> Result<RenderResult, ShimError> {
-        self.doc.render_page(&self.registry, request)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.render_page(&self.registry, request),
+            OpenDocumentBackend::Fake(doc) => doc.render_page(request, None),
+        }
     }
 
     fn extract_text(&mut self, request: &TextRequest) -> Result<TextPage, ShimError> {
-        self.doc.extract_text(request)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.extract_text(request),
+            OpenDocumentBackend::Fake(doc) => doc.extract_text(request, None),
+        }
     }
 
     fn extract_visuals(&mut self, request: &VisualRequest) -> Result<VisualPage, ShimError> {
-        self.doc.extract_visuals(request)
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.extract_visuals(request),
+            OpenDocumentBackend::Fake(doc) => doc.extract_visuals(request, None),
+        }
     }
 }
 
 impl OpenDocument {
+    #[cfg(feature = "real-mupdf")]
     fn raw_node_for(&self, node: &NodeId) -> Result<raw::pdbg_node_id, ShimError> {
         if let Some(raw_node) = self.registry.raw_for(node) {
             return Ok(raw_node);
@@ -293,14 +353,20 @@ impl OpenDocument {
         limit: usize,
         cancel: &CancelToken,
     ) -> Result<StreamChunk, ShimError> {
-        self.doc.stream_load_with_cancel(
-            &self.registry,
-            object,
-            mode,
-            offset,
-            limit,
-            cancel.as_mut_ptr(),
-        )
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.stream_load_with_cancel(
+                &self.registry,
+                object,
+                mode,
+                offset,
+                limit,
+                cancel.as_mut_ptr(),
+            ),
+            OpenDocumentBackend::Fake(doc) => {
+                doc.stream_load(object, mode, offset, limit, Some(cancel))
+            }
+        }
     }
 
     pub fn render_page_with_cancel_token(
@@ -308,8 +374,13 @@ impl OpenDocument {
         request: &RenderRequest,
         cancel: &CancelToken,
     ) -> Result<RenderResult, ShimError> {
-        self.doc
-            .render_page_with_cancel(&self.registry, request, cancel.as_mut_ptr())
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.render_page_with_cancel(&self.registry, request, cancel.as_mut_ptr())
+            }
+            OpenDocumentBackend::Fake(doc) => doc.render_page(request, Some(cancel)),
+        }
     }
 
     pub fn extract_text_with_cancel_token(
@@ -317,8 +388,13 @@ impl OpenDocument {
         request: &TextRequest,
         cancel: &CancelToken,
     ) -> Result<TextPage, ShimError> {
-        self.doc
-            .extract_text_with_cancel(request, cancel.as_mut_ptr())
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.extract_text_with_cancel(request, cancel.as_mut_ptr())
+            }
+            OpenDocumentBackend::Fake(doc) => doc.extract_text(request, Some(cancel)),
+        }
     }
 
     pub fn extract_visuals_with_cancel_token(
@@ -326,8 +402,399 @@ impl OpenDocument {
         request: &VisualRequest,
         cancel: &CancelToken,
     ) -> Result<VisualPage, ShimError> {
-        self.doc
-            .extract_visuals_with_cancel(request, cancel.as_mut_ptr())
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.extract_visuals_with_cancel(request, cancel.as_mut_ptr())
+            }
+            OpenDocumentBackend::Fake(doc) => doc.extract_visuals(request, Some(cancel)),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn fake_owned_fd_raw(&self) -> Option<i32> {
+        match &self.backend {
+            OpenDocumentBackend::Fake(doc) => {
+                doc._owned_fd.as_ref().map(std::os::fd::AsRawFd::as_raw_fd)
+            }
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(_) => None,
+        }
+    }
+}
+
+struct FakeDoc {
+    document_id: DocumentId,
+    max_decoded_stream_bytes: u64,
+    #[cfg(unix)]
+    _owned_fd: Option<OwnedFd>,
+}
+
+impl FakeDoc {
+    fn open_path(path: &str, config: &SafeModeConfig) -> Result<Self, ShimError> {
+        if path == "fail-open" {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "fake open failure",
+            ));
+        }
+        Ok(Self {
+            document_id: DocumentId(FAKE_NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)),
+            max_decoded_stream_bytes: config.max_decoded_stream_bytes,
+            #[cfg(unix)]
+            _owned_fd: None,
+        })
+    }
+
+    #[cfg(unix)]
+    fn open_fd(
+        fd: BorrowedFd<'_>,
+        display_path: &str,
+        config: &SafeModeConfig,
+    ) -> Result<Self, ShimError> {
+        if display_path == "fail-open" {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "fake open failure",
+            ));
+        }
+        let owned_fd = fd
+            .try_clone_to_owned()
+            .map_err(|err| ShimError::new(raw::pdbg_status::PDBG_ERROR_GENERIC, err.to_string()))?;
+        Ok(Self {
+            document_id: DocumentId(FAKE_NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)),
+            max_decoded_stream_bytes: config.max_decoded_stream_bytes,
+            _owned_fd: Some(owned_fd),
+        })
+    }
+
+    fn summary(&self) -> DocumentSummary {
+        DocumentSummary {
+            doc: self.document_id.clone(),
+            file_path: "fake.pdf".to_string(),
+            file_hash: Some("fake-hash".to_string()),
+            pdf_version: Some("1.7".to_string()),
+            page_count: 1,
+            xref_size: 3,
+            parsed_object_count: Some(3),
+            encrypted: false,
+            needs_password: false,
+            permissions: DocumentPermissions {
+                print: true,
+                modify: false,
+                copy: true,
+                annotate: false,
+                fill_forms: false,
+                extract_accessibility: false,
+                assemble: false,
+                high_quality_print: false,
+            },
+            metadata_summary: Vec::new(),
+            safety: DocumentSafetyState {
+                safe_mode: true,
+                javascript_disabled: true,
+                repaired_or_damaged: false,
+                embedded_files_detected: false,
+                external_references_detected: false,
+                ocr_enabled: false,
+            },
+            diagnostics: vec![
+                fake_diagnostic(
+                    DiagnosticCode::RepairWarning,
+                    "fake document diagnostic",
+                    None,
+                ),
+                DiagnosticSummary {
+                    severity: DiagnosticSeverity::Info,
+                    code: DiagnosticCode::JavaScriptDisabled,
+                    message: "JavaScript execution is disabled".to_string(),
+                    node: None,
+                    page_index: None,
+                    object: None,
+                },
+            ],
+        }
+    }
+
+    fn children(&self, parent: &NodeId, range: ChildRange, container: ChildContainer) -> ChildPage {
+        fake_child_page(parent, range, container)
+    }
+
+    fn object_detail(&self, node: &NodeId, range: ChildRange) -> ObjectDetail {
+        let dictionary_page = fake_child_page(node, range, ChildContainer::Dictionary);
+        let array_page = fake_child_page(node, range, ChildContainer::Array);
+        ObjectDetail {
+            id: node.clone(),
+            kind: ObjectKind::Dict,
+            object: Some(ObjectId { num: 1, gen: 0 }),
+            label: "Fake object".to_string(),
+            preview: "<< /Type /Fake >>".to_string(),
+            value: ObjectValue::Container,
+            dictionary_entries: Some(ChildPage {
+                total: dictionary_page.total,
+                items: dictionary_page
+                    .items
+                    .into_iter()
+                    .map(|value| {
+                        let key = match &value.id {
+                            NodeId::DictEntry { key, .. } => key.clone(),
+                            _ => String::new(),
+                        };
+                        DictEntryDetail { key, value }
+                    })
+                    .collect(),
+            }),
+            array_entries: Some(array_page),
+            stream: Some(fake_stream_summary()),
+            diagnostics: vec![fake_diagnostic(
+                DiagnosticCode::RepairWarning,
+                "fake object diagnostic",
+                Some(node.clone()),
+            )],
+        }
+    }
+
+    fn stream_load(
+        &self,
+        _object: ObjectId,
+        mode: StreamMode,
+        offset: u64,
+        limit: usize,
+        cancel: Option<&CancelToken>,
+    ) -> Result<StreamChunk, ShimError> {
+        check_fake_cancel(cancel)?;
+        let bytes: &[u8] = match mode {
+            StreamMode::Raw => b"fake stream bytes",
+            StreamMode::Decoded => b"fake decoded stream expands beyond the configured cap",
+        };
+        if mode == StreamMode::Decoded && (bytes.len() as u64) > self.max_decoded_stream_bytes {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "decoded stream limit exceeded during decode",
+            ));
+        }
+        let data_len = bytes.len().min(limit);
+        Ok(StreamChunk {
+            mode,
+            offset,
+            bytes: bytes[..data_len].to_vec(),
+            total_size: Some(bytes.len() as u64),
+            truncated: data_len < bytes.len(),
+            decode_diagnostics: vec![fake_diagnostic(
+                DiagnosticCode::StreamDecodeFailure,
+                "fake stream diagnostic",
+                None,
+            )],
+        })
+    }
+
+    fn render_page(
+        &self,
+        request: &RenderRequest,
+        cancel: Option<&CancelToken>,
+    ) -> Result<RenderResult, ShimError> {
+        check_fake_cancel(cancel)?;
+        Ok(RenderResult {
+            page_index: request.page_index,
+            width: 1,
+            height: 1,
+            stride: 4,
+            pixels_rgba: vec![255, 255, 255, 255],
+            duration_ms: 0,
+            diagnostics: vec![fake_diagnostic(
+                DiagnosticCode::RenderWarning,
+                "fake render diagnostic",
+                None,
+            )],
+        })
+    }
+
+    fn extract_text(
+        &self,
+        request: &TextRequest,
+        cancel: Option<&CancelToken>,
+    ) -> Result<TextPage, ShimError> {
+        check_fake_cancel(cancel)?;
+        if request.max_blocks != 0 && request.max_blocks < 2 {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "text extraction exceeded configured block limit",
+            ));
+        }
+        if request.max_chars != 0 && request.max_chars < 4 {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "text extraction exceeded configured character limit",
+            ));
+        }
+        Ok(TextPage {
+            page_index: request.page_index,
+            spans: vec![
+                TextSpan {
+                    text: "A\0B".to_string(),
+                    bbox: PageRect {
+                        x: 5.0,
+                        y: 7.0,
+                        width: 10.0,
+                        height: 12.0,
+                    },
+                    untrusted: true,
+                },
+                TextSpan {
+                    text: "C".to_string(),
+                    bbox: PageRect {
+                        x: 20.0,
+                        y: 28.0,
+                        width: 6.0,
+                        height: 8.0,
+                    },
+                    untrusted: true,
+                },
+            ],
+        })
+    }
+
+    fn extract_visuals(
+        &self,
+        request: &VisualRequest,
+        cancel: Option<&CancelToken>,
+    ) -> Result<VisualPage, ShimError> {
+        check_fake_cancel(cancel)?;
+        let mut elements = Vec::new();
+        if request.include_text {
+            elements.push(VisualElement {
+                kind: VisualElementKind::Text,
+                bbox: PageRect {
+                    x: 5.0,
+                    y: 7.0,
+                    width: 21.0,
+                    height: 29.0,
+                },
+                object: None,
+                untrusted: true,
+            });
+        }
+        if request.include_images {
+            elements.push(VisualElement {
+                kind: VisualElementKind::Image,
+                bbox: PageRect {
+                    x: 40.0,
+                    y: 50.0,
+                    width: 80.0,
+                    height: 90.0,
+                },
+                object: None,
+                untrusted: true,
+            });
+        }
+        if request.include_vectors {
+            elements.push(VisualElement {
+                kind: VisualElementKind::Vector,
+                bbox: PageRect {
+                    x: 140.0,
+                    y: 150.0,
+                    width: 20.0,
+                    height: 10.0,
+                },
+                object: None,
+                untrusted: true,
+            });
+        }
+        if request.max_elements != 0 && request.max_elements < elements.len() {
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "visual extraction exceeded configured element limit",
+            ));
+        }
+        Ok(VisualPage {
+            page_index: request.page_index,
+            elements,
+        })
+    }
+}
+
+fn check_fake_cancel(cancel: Option<&CancelToken>) -> Result<(), ShimError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(ShimError::new(
+            raw::pdbg_status::PDBG_ERROR_CANCELLED,
+            "cancelled",
+        ));
+    }
+    Ok(())
+}
+
+fn fake_child_page(parent: &NodeId, range: ChildRange, container: ChildContainer) -> ChildPage {
+    let total: usize = 3;
+    let len = range.limit.min(total.saturating_sub(range.offset));
+    let items = (0..len)
+        .map(|index| fake_child_summary(parent, range, container, index))
+        .collect();
+    ChildPage {
+        total: Some(total),
+        items,
+    }
+}
+
+fn fake_child_summary(
+    parent: &NodeId,
+    range: ChildRange,
+    container: ChildContainer,
+    list_index: usize,
+) -> ObjectSummary {
+    let child_index = range.offset + list_index;
+    let doc = parent.document_id();
+    let id = match container {
+        ChildContainer::Dictionary => NodeId::DictEntry {
+            doc,
+            parent: Box::new(parent.clone()),
+            key: format!("Key{child_index}"),
+        },
+        ChildContainer::Array => NodeId::ArrayEntry {
+            doc,
+            parent: Box::new(parent.clone()),
+            index: child_index,
+        },
+    };
+    ObjectSummary {
+        id: id.clone(),
+        kind: ObjectKind::Dict,
+        label: format!("Object {child_index}"),
+        preview: "fake object".to_string(),
+        object: Some(ObjectId {
+            num: child_index as i32 + 1,
+            gen: 0,
+        }),
+        has_children: true,
+        has_stream: child_index == 0,
+        child_count: Some(3),
+        byte_size_hint: Some(128),
+        diagnostics: vec![fake_diagnostic(
+            DiagnosticCode::RepairWarning,
+            "fake child diagnostic",
+            Some(id),
+        )],
+    }
+}
+
+fn fake_stream_summary() -> StreamSummary {
+    StreamSummary {
+        object: ObjectId { num: 1, gen: 0 },
+        filters: vec!["FlateDecode".to_string()],
+        raw_size_hint: Some(32),
+        decoded_size_hint: Some(64),
+        can_decode: true,
+        image_preview_available: false,
+    }
+}
+
+fn fake_diagnostic(code: DiagnosticCode, message: &str, node: Option<NodeId>) -> DiagnosticSummary {
+    DiagnosticSummary {
+        severity: DiagnosticSeverity::Warning,
+        code,
+        message: message.to_string(),
+        node,
+        page_index: None,
+        object: Some(ObjectId { num: 1, gen: 0 }),
     }
 }
 
@@ -365,6 +832,7 @@ impl CancelToken {
         self.cancelled.load(Ordering::SeqCst)
     }
 
+    #[cfg(feature = "real-mupdf")]
     fn as_mut_ptr(&self) -> *mut raw::pdbg_cancel_token {
         self.raw.as_ptr()
     }
@@ -383,6 +851,7 @@ impl Drop for CancelToken {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgContext {
     raw: NonNull<raw::pdbg_context>,
     open_lock: Mutex<()>,
@@ -392,9 +861,12 @@ struct PdbgContext {
 // document context is created. The Rust root context is shared to keep that
 // lock table alive; root-context open/clone entry points are serialized by
 // `open_lock`, while document operations use per-document C handles.
+#[cfg(feature = "real-mupdf")]
 unsafe impl Send for PdbgContext {}
+#[cfg(feature = "real-mupdf")]
 unsafe impl Sync for PdbgContext {}
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgContext {
     fn new() -> Result<Self, ShimError> {
         unsafe {
@@ -509,17 +981,20 @@ impl PdbgContext {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgContext {
     fn drop(&mut self) {
         unsafe { raw::pdbg_context_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgDoc {
     raw: NonNull<raw::pdbg_doc>,
     _ctx: Arc<PdbgContext>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgDoc {
     fn open_path(
         ctx: Arc<PdbgContext>,
@@ -548,8 +1023,10 @@ impl PdbgDoc {
 // The C shim contract requires document handles to remain valid after open
 // without borrowing unsynchronized root-context state. Concurrent access must
 // go through `DocumentSession`, which serializes mutable document operations.
+#[cfg(feature = "real-mupdf")]
 unsafe impl Send for PdbgDoc {}
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgDoc {
     fn summary(&self, registry: &NodeTokenRegistry) -> Result<DocumentSummary, ShimError> {
         unsafe {
@@ -742,16 +1219,19 @@ impl PdbgDoc {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgDoc {
     fn drop(&mut self) {
         unsafe { raw::pdbg_document_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgNodeList {
     raw: NonNull<raw::pdbg_node_list>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgNodeList {
     fn new(raw: *mut raw::pdbg_node_list) -> Result<Self, ShimError> {
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -774,16 +1254,19 @@ impl PdbgNodeList {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgNodeList {
     fn drop(&mut self) {
         unsafe { raw::pdbg_node_list_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgBuffer {
     raw: NonNull<raw::pdbg_buffer>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgBuffer {
     fn new(raw: *mut raw::pdbg_buffer) -> Result<Self, ShimError> {
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -828,16 +1311,19 @@ impl PdbgBuffer {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgBuffer {
     fn drop(&mut self) {
         unsafe { raw::pdbg_buffer_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgImage {
     raw: NonNull<raw::pdbg_image>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgImage {
     fn new(raw: *mut raw::pdbg_image) -> Result<Self, ShimError> {
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -891,16 +1377,19 @@ impl PdbgImage {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgImage {
     fn drop(&mut self) {
         unsafe { raw::pdbg_image_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgTextPage {
     raw: NonNull<raw::pdbg_text_page>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgTextPage {
     fn new(raw: *mut raw::pdbg_text_page) -> Result<Self, ShimError> {
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -928,16 +1417,19 @@ impl PdbgTextPage {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgTextPage {
     fn drop(&mut self) {
         unsafe { raw::pdbg_text_page_drop(self.raw.as_ptr()) }
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 struct PdbgVisualPage {
     raw: NonNull<raw::pdbg_visual_page>,
 }
 
+#[cfg(feature = "real-mupdf")]
 impl PdbgVisualPage {
     fn new(raw: *mut raw::pdbg_visual_page) -> Result<Self, ShimError> {
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -968,6 +1460,7 @@ impl PdbgVisualPage {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 impl Drop for PdbgVisualPage {
     fn drop(&mut self) {
         unsafe { raw::pdbg_visual_page_drop(self.raw.as_ptr()) }
@@ -981,6 +1474,7 @@ fn check_status(status: raw::pdbg_status, err: &raw::pdbg_error) -> Result<(), S
     Err(ShimError::new(status, c_char_array_to_string(&err.message)))
 }
 
+#[cfg(feature = "real-mupdf")]
 fn check_open_status(status: raw::pdbg_status, err: &raw::pdbg_error) -> Result<(), ShimError> {
     if status == raw::pdbg_status::PDBG_OK {
         return Ok(());
@@ -1015,6 +1509,7 @@ fn c_char_array_to_string(bytes: &[std::os::raw::c_char]) -> String {
     String::from_utf8_lossy(&bounded).into_owned()
 }
 
+#[cfg(feature = "real-mupdf")]
 unsafe fn convert_document_summary(
     out: &raw::pdbg_document_summary_out,
     registry: &NodeTokenRegistry,
@@ -1069,6 +1564,7 @@ unsafe fn convert_document_summary(
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 unsafe fn convert_object_detail(
     registry: &mut NodeTokenRegistry,
     public_node: &NodeId,
@@ -1102,6 +1598,7 @@ unsafe fn convert_object_detail(
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 unsafe fn borrowed_node_list_to_child_page(
     list: *const raw::pdbg_node_list,
     registry: &mut NodeTokenRegistry,
@@ -1126,6 +1623,7 @@ unsafe fn borrowed_node_list_to_child_page(
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 unsafe fn borrowed_node_list_to_dict_entry_page(
     list: *const raw::pdbg_node_list,
     registry: &mut NodeTokenRegistry,
@@ -1150,6 +1648,7 @@ unsafe fn borrowed_node_list_to_dict_entry_page(
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 fn raw_node_from_public(node: &NodeId) -> Option<raw::pdbg_node_id> {
     let mut raw_node = raw::pdbg_node_id {
         document_id: node.document_id().0,
@@ -1203,6 +1702,7 @@ fn raw_node_from_public(node: &NodeId) -> Option<raw::pdbg_node_id> {
     Some(raw_node)
 }
 
+#[cfg(feature = "real-mupdf")]
 fn raw_resource_group(group: &ResourceGroup) -> raw::pdbg_resource_group {
     match group {
         ResourceGroup::Fonts => raw::pdbg_resource_group::PDBG_RESOURCE_FONTS,
@@ -1216,6 +1716,7 @@ fn raw_resource_group(group: &ResourceGroup) -> raw::pdbg_resource_group {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 fn raw_render_options(request: &RenderRequest) -> raw::pdbg_render_options {
     raw::pdbg_render_options {
         zoom: request.zoom,
@@ -1233,6 +1734,7 @@ fn raw_render_options(request: &RenderRequest) -> raw::pdbg_render_options {
     }
 }
 
+#[cfg(feature = "real-mupdf")]
 fn page_index_to_u32(page_index: usize) -> Result<u32, ShimError> {
     page_index.try_into().map_err(|_| {
         ShimError::new(
@@ -1498,10 +2000,11 @@ mod tests {
             let mut doc = shim
                 .open_document_fd(file.as_fd(), "fd-backed.pdf", &SafeModeConfig::default())
                 .unwrap();
-            owned_fd = unsafe { raw::pdbg_test_document_owned_fd(doc.doc.raw.as_ptr()) };
+            owned_fd = doc
+                .fake_owned_fd_raw()
+                .expect("fake document owns fd clone");
             assert!(owned_fd >= 0);
             assert_ne!(owned_fd, file.as_raw_fd());
-            assert_eq!(unsafe { raw::pdbg_test_fd_is_open(owned_fd) }, 1);
             owned_fd_identity = fd_file_identity(owned_fd).expect("owned fd identity before drop");
             assert_eq!(doc.summary().unwrap().file_path, "fake.pdf");
         }
