@@ -841,25 +841,31 @@ pub(crate) fn stream_chunk_display_text(chunk: &StreamChunk, view_mode: StreamVi
     }
 }
 
+pub(crate) fn hex_dump_row(line_offset: u64, chunk: &[u8]) -> String {
+    let mut out = format!("{line_offset:08x}  ");
+    for byte in chunk {
+        out.push_str(&format!("{byte:02x} "));
+    }
+    for _ in chunk.len()..HEX_VIEW_BYTES_PER_ROW {
+        out.push_str("   ");
+    }
+    out.push(' ');
+    for byte in chunk {
+        out.push(if byte.is_ascii_graphic() || *byte == b' ' {
+            *byte as char
+        } else {
+            '.'
+        });
+    }
+    out
+}
+
 pub(crate) fn hex_dump_bytes(base_offset: u64, bytes: &[u8]) -> String {
     let mut out = String::new();
-    for (line_index, chunk) in bytes.chunks(16).enumerate() {
-        let line_offset = base_offset.saturating_add((line_index as u64).saturating_mul(16));
-        out.push_str(&format!("{line_offset:08x}  "));
-        for byte in chunk {
-            out.push_str(&format!("{byte:02x} "));
-        }
-        for _ in chunk.len()..16 {
-            out.push_str("   ");
-        }
-        out.push(' ');
-        for byte in chunk {
-            out.push(if byte.is_ascii_graphic() || *byte == b' ' {
-                *byte as char
-            } else {
-                '.'
-            });
-        }
+    for (line_index, chunk) in bytes.chunks(HEX_VIEW_BYTES_PER_ROW).enumerate() {
+        let line_offset = base_offset
+            .saturating_add((line_index as u64).saturating_mul(HEX_VIEW_BYTES_PER_ROW as u64));
+        out.push_str(&hex_dump_row(line_offset, chunk));
         out.push('\n');
     }
     out
@@ -904,6 +910,7 @@ pub(crate) struct NiceStreamRenderLine {
 pub(crate) enum InspectorTab {
     Object,
     Stream,
+    Hex,
     Xref,
     Diagnostics,
 }

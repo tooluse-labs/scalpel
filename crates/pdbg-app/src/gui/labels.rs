@@ -130,6 +130,20 @@ pub(crate) fn summary_inline_text(summary: &ObjectSummary) -> String {
     out
 }
 
+pub(crate) fn parse_hex_jump_offset(input: &str) -> Option<u64> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    if let Some(hex) = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    input.parse::<u64>().ok()
+}
+
 pub(crate) fn xref_entry_section_label(entry: &XrefEntryInfo, sections: usize) -> String {
     match entry.section {
         Some(0) if sections <= 1 => "0".to_string(),

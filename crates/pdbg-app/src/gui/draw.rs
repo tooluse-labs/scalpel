@@ -356,6 +356,7 @@ impl GuiShellApp {
         self.pending_preview_stream_selection = None;
         self.preview_click = None;
         self.clear_xref_state();
+        self.reset_hex_state();
         self.copied_excerpt = None;
         self.status_log = model.status_log;
         self.refresh_real_render();
@@ -364,6 +365,9 @@ impl GuiShellApp {
     pub(crate) fn cancel_inflight_document_jobs(&mut self) {
         self.open_pdf_job = None;
         if let Some(job) = self.real_stream_job.take() {
+            job.cancel.cancel();
+        }
+        if let Some(job) = self.hex_job.take() {
             job.cancel.cancel();
         }
         if let Some(job) = self.real_render_job.take() {
@@ -1197,6 +1201,7 @@ impl GuiShellApp {
             &[
                 (InspectorTab::Object, "Object", true),
                 (InspectorTab::Stream, "Stream", true),
+                (InspectorTab::Hex, "Hex", true),
                 (InspectorTab::Xref, "Xref", true),
                 (InspectorTab::Diagnostics, "Diagnostics", true),
             ],
@@ -1206,8 +1211,186 @@ impl GuiShellApp {
         match self.selected_tab {
             InspectorTab::Object => self.draw_object_panel(ui),
             InspectorTab::Stream => self.draw_stream_panel(ui, ctx),
+            InspectorTab::Hex => self.draw_hex_panel(ui, ctx),
             InspectorTab::Xref => self.draw_xref_panel(ui),
             InspectorTab::Diagnostics => self.draw_diagnostics_panel(ui, ctx),
+        }
+    }
+
+    pub(crate) fn draw_hex_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if !self.tree.is_real() {
+            ui.label(RichText::new("Hex view requires a real PDF document").color(theme().muted));
+            return;
+        }
+        if let Some(err) = &self.real_detail_error {
+            ui.colored_label(theme().error_fg, err.clone());
+            return;
+        }
+        let Some(detail) = &self.real_detail else {
+            ui.label(RichText::new("No object selected").color(theme().muted));
+            return;
+        };
+        let Some(stream) = detail.stream.clone() else {
+            ui.label(RichText::new("Selected object has no stream").color(theme().muted));
+            return;
+        };
+
+        self.ensure_hex_chunk(&stream);
+
+        let mut mode_changed = false;
+        let mut requested_offset: Option<u64> = None;
+        section_frame().show(ui, |ui| {
+            section_header(
+                ui,
+                "Hex View",
+                Some(&format!("{} {} R", stream.object.num, stream.object.gen)),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Bytes").small().color(theme().muted));
+                mode_changed |= segmented_control(
+                    ui,
+                    &mut self.hex_mode,
+                    &[
+                        (StreamMode::Raw, "Raw", true),
+                        (StreamMode::Decoded, "Decoded", stream.can_decode),
+                    ],
+                );
+                ui.add_space(10.0);
+                ui.label(RichText::new("Offset").small().color(theme().muted));
+                let input = ui.add(
+                    TextEdit::singleline(&mut self.hex_jump_input)
+                        .desired_width(110.0)
+                        .hint_text("1024 or 0x400")
+                        .font(TextStyle::Monospace),
+                );
+                let submitted =
+                    input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if ui.button("Go").clicked() || submitted {
+                    match parse_hex_jump_offset(&self.hex_jump_input) {
+                        Some(offset) => requested_offset = Some(offset),
+                        None => {
+                            self.hex_error =
+                                Some("offset must be decimal or 0x-prefixed hex".to_string());
+                        }
+                    }
+                }
+            });
+        });
+
+        if mode_changed {
+            self.clear_hex_chunk();
+        }
+        if let Some(offset) = requested_offset.take() {
+            self.set_hex_offset(offset);
+        }
+
+        if self.hex_job.is_some() && self.hex_chunk.is_none() {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Loading bytes...").color(theme().muted));
+            return;
+        }
+        if let Some(err) = &self.hex_error {
+            ui.add_space(8.0);
+            ui.colored_label(theme().error_fg, err.clone());
+            return;
+        }
+        let Some(chunk) = self.hex_chunk.clone() else {
+            return;
+        };
+
+        let window_end = chunk.offset + chunk.bytes.len() as u64;
+        let has_more = chunk.truncated || chunk.total_size.is_some_and(|total| window_end < total);
+        let total_label = match chunk.total_size {
+            Some(total) => format!("of {total} bytes"),
+            None => "(total size unknown)".to_string(),
+        };
+
+        ui.add_space(8.0);
+        section_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(chunk.offset > 0, egui::Button::new("← Previous"))
+                    .clicked()
+                {
+                    requested_offset =
+                        Some(chunk.offset.saturating_sub(HEX_VIEW_WINDOW_BYTES as u64));
+                }
+                if ui
+                    .add_enabled(has_more, egui::Button::new("Next →"))
+                    .clicked()
+                {
+                    requested_offset = Some(window_end);
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{:#x}–{:#x} {total_label}",
+                        chunk.offset, window_end
+                    ))
+                    .small()
+                    .color(theme().muted),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Copy window").clicked() {
+                        let dump = hex_dump_bytes(chunk.offset, &chunk.bytes);
+                        let escaped = escape_pdf_text(
+                            &dump,
+                            EgressFormat::Markdown,
+                            HEX_VIEW_WINDOW_BYTES * 8,
+                        );
+                        ctx.copy_text(escaped.text.clone());
+                        self.status_log.push(format!(
+                            "copied hex window @ {:#x} ({} bytes{})",
+                            chunk.offset,
+                            chunk.bytes.len(),
+                            if escaped.truncated { ", truncated" } else { "" }
+                        ));
+                        self.copied_excerpt = Some(escaped);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            if chunk.bytes.is_empty() {
+                ui.label(RichText::new("Stream window is empty").color(theme().muted));
+            } else {
+                let row_count = chunk.bytes.len().div_ceil(HEX_VIEW_BYTES_PER_ROW);
+                let row_height = 15.0;
+                ScrollArea::both()
+                    .id_salt("hex_view_scroll")
+                    .auto_shrink([false, false])
+                    .max_height((ui.available_height() - 8.0).max(STREAM_VIEW_MIN_HEIGHT))
+                    .show_rows(ui, row_height, row_count, |ui, rows| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        for row in rows {
+                            let start = row * HEX_VIEW_BYTES_PER_ROW;
+                            let end = (start + HEX_VIEW_BYTES_PER_ROW).min(chunk.bytes.len());
+                            let line_offset = chunk.offset + start as u64;
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(hex_dump_row(
+                                        line_offset,
+                                        &chunk.bytes[start..end],
+                                    ))
+                                    .font(mono_font_id(STREAM_VIEW_FONT_SIZE))
+                                    .color(theme().text),
+                                )
+                                .extend()
+                                .selectable(true),
+                            );
+                        }
+                    });
+            }
+
+            if !chunk.decode_diagnostics.is_empty() {
+                ui.add_space(6.0);
+                for diagnostic in &chunk.decode_diagnostics {
+                    draw_diagnostic_card(ui, diagnostic);
+                }
+            }
+        });
+
+        if let Some(offset) = requested_offset {
+            self.set_hex_offset(offset);
         }
     }
 

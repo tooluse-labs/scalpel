@@ -85,6 +85,8 @@ const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
 const XREF_PAGE_SIZE: usize = 256;
+const HEX_VIEW_WINDOW_BYTES: usize = 4096;
+const HEX_VIEW_BYTES_PER_ROW: usize = 16;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
@@ -223,6 +225,13 @@ pub struct GuiShellApp {
     xref_slice: Option<XrefTableSlice>,
     xref_error: Option<String>,
     xref_offset: usize,
+    hex_mode: StreamMode,
+    hex_offset: u64,
+    hex_jump_input: String,
+    hex_key: Option<RealStreamKey>,
+    hex_job: Option<RealStreamJob>,
+    hex_chunk: Option<StreamChunk>,
+    hex_error: Option<String>,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
     copied_excerpt: Option<EscapedText>,
@@ -245,6 +254,7 @@ impl eframe::App for GuiShellApp {
         self.handle_dropped_pdf_files(&ctx);
         self.poll_open_pdf_job();
         self.poll_real_stream_job();
+        self.poll_hex_job();
         self.poll_real_render_job();
         self.poll_object_search_job();
         self.poll_text_search_job();
@@ -252,6 +262,7 @@ impl eframe::App for GuiShellApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         if self.open_pdf_job.is_some()
             || self.real_stream_job.is_some()
+            || self.hex_job.is_some()
             || self.real_render_job.is_some()
             || self.object_search_job.is_some()
             || self.text_search_job.is_some()

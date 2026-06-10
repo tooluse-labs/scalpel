@@ -1600,6 +1600,38 @@ fn recent_pdf_paths_are_deduped_bounded_and_persisted() {
 }
 
 #[test]
+fn hex_dump_rows_align_offset_hex_and_ascii_columns() {
+    let bytes: Vec<u8> = (0u8..20).chain(*b"Hi~\x7f").collect();
+
+    let full = hex_dump_row(0x10, &bytes[..16]);
+    assert!(full.starts_with("00000010  00 01 02 03 "));
+    assert!(full.ends_with("  ................"));
+
+    let partial = hex_dump_row(0x20, &bytes[16..]);
+    // Short rows pad the hex column so the ASCII column starts at the same
+    // position: 8 offset digits + 2 spaces + 16 * 3 hex cells + 1 space.
+    let ascii_start = 8 + 2 + 16 * 3 + 1;
+    assert_eq!(&full[ascii_start..], "................");
+    assert_eq!(&partial[ascii_start..], "....Hi~.");
+
+    let dump = hex_dump_bytes(0x10, &bytes);
+    assert_eq!(dump.lines().count(), 2);
+    assert!(dump.starts_with("00000010  "));
+    assert!(dump.contains("\n00000020  "));
+}
+
+#[test]
+fn hex_jump_offsets_parse_decimal_and_hex() {
+    assert_eq!(parse_hex_jump_offset("1024"), Some(1024));
+    assert_eq!(parse_hex_jump_offset(" 0x400 "), Some(0x400));
+    assert_eq!(parse_hex_jump_offset("0XFF"), Some(255));
+    assert_eq!(parse_hex_jump_offset(""), None);
+    assert_eq!(parse_hex_jump_offset("0x"), None);
+    assert_eq!(parse_hex_jump_offset("12g"), None);
+    assert_eq!(parse_hex_jump_offset("-4"), None);
+}
+
+#[test]
 fn xref_entry_location_labels_cover_all_kinds() {
     let object = ObjectId { num: 7, gen: 0 };
     let free = XrefEntryInfo {

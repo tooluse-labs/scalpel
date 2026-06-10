@@ -145,6 +145,13 @@ impl GuiShellApp {
             xref_slice: None,
             xref_error: None,
             xref_offset: 0,
+            hex_mode: StreamMode::Raw,
+            hex_offset: 0,
+            hex_jump_input: String::new(),
+            hex_key: None,
+            hex_job: None,
+            hex_chunk: None,
+            hex_error: None,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
             copied_excerpt: None,
@@ -616,6 +623,7 @@ impl GuiShellApp {
 
     pub(crate) fn refresh_real_detail_for_selection(&mut self) {
         self.clear_real_stream_chunk();
+        self.reset_hex_state();
         let TreeModel::Real(tree) = &self.tree else {
             return;
         };
@@ -889,6 +897,139 @@ impl GuiShellApp {
                 }
             }
         }
+    }
+
+    pub(crate) fn ensure_hex_chunk(&mut self, stream: &StreamSummary) {
+        let object = stream.object;
+        if self.hex_key.is_some_and(|key| key.object != object) {
+            self.reset_hex_state();
+        }
+        if !stream.can_decode && self.hex_mode == StreamMode::Decoded {
+            self.hex_mode = StreamMode::Raw;
+            self.clear_hex_chunk();
+        }
+        let key = RealStreamKey {
+            object,
+            mode: self.hex_mode,
+            offset: self.hex_offset,
+            limit: HEX_VIEW_WINDOW_BYTES,
+        };
+        if self.hex_key == Some(key)
+            && (self.hex_chunk.is_some() || self.hex_job.is_some() || self.hex_error.is_some())
+        {
+            return;
+        }
+        self.hex_key = Some(key);
+        self.hex_chunk = None;
+        self.hex_error = None;
+        if let Some(job) = self.hex_job.take() {
+            job.cancel.cancel();
+        }
+
+        if key.mode == StreamMode::Decoded {
+            if let Some(chunk) = self.decoded_stream_cache.get(&key) {
+                self.hex_chunk = Some(chunk);
+                return;
+            }
+        }
+
+        let Ok(state) = self.state.as_ref() else {
+            self.hex_error = Some("document is not open".to_string());
+            return;
+        };
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
+            Err(err) => {
+                self.hex_error = Some(err.message);
+                return;
+            }
+        };
+        let session = state.session.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = session
+                .run_task(|document| {
+                    document.stream_load_with_cancel_token(
+                        key.object,
+                        key.mode,
+                        key.offset,
+                        key.limit,
+                        worker_cancel.as_ref(),
+                    )
+                })
+                .map_err(|err| err.message);
+            let _ = sender.send(RealStreamJobOutput { key, result });
+        });
+        self.hex_job = Some(RealStreamJob {
+            key,
+            cancel,
+            receiver,
+        });
+    }
+
+    pub(crate) fn poll_hex_job(&mut self) {
+        let Some(polled) = self
+            .hex_job
+            .as_ref()
+            .and_then(|job| match job.receiver.try_recv() {
+                Ok(output) => Some(Ok(output)),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
+            })
+        else {
+            return;
+        };
+
+        self.hex_job = None;
+        match polled {
+            Ok(output) => {
+                if self.hex_key != Some(output.key) {
+                    return;
+                }
+                match output.result {
+                    Ok(chunk) => {
+                        if output.key.mode == StreamMode::Decoded {
+                            self.decoded_stream_cache.insert(output.key, chunk.clone());
+                        }
+                        self.hex_chunk = Some(chunk);
+                        self.hex_error = None;
+                    }
+                    Err(err) => {
+                        self.hex_chunk = None;
+                        self.hex_error = Some(err);
+                    }
+                }
+            }
+            Err(key) => {
+                if self.hex_key == Some(key) {
+                    self.hex_chunk = None;
+                    self.hex_error = Some("hex view worker disconnected".to_string());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clear_hex_chunk(&mut self) {
+        self.hex_key = None;
+        self.hex_chunk = None;
+        self.hex_error = None;
+        if let Some(job) = self.hex_job.take() {
+            job.cancel.cancel();
+        }
+    }
+
+    pub(crate) fn reset_hex_state(&mut self) {
+        self.hex_mode = StreamMode::Raw;
+        self.hex_offset = 0;
+        self.hex_jump_input.clear();
+        self.clear_hex_chunk();
+    }
+
+    pub(crate) fn set_hex_offset(&mut self, offset: u64) {
+        let aligned = offset - offset % HEX_VIEW_BYTES_PER_ROW as u64;
+        self.hex_offset = aligned;
+        self.clear_hex_chunk();
     }
 
     pub(crate) fn ensure_xref_slice(&mut self) {
