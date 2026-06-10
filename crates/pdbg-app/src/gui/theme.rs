@@ -107,6 +107,7 @@ pub(crate) fn pdbg_style() -> egui::Style {
     visuals.selection.bg_fill = theme().selected_bg;
     visuals.selection.stroke = egui::Stroke::new(1.0, theme().accent);
     visuals.widgets.noninteractive.fg_stroke.color = theme().text;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme().border);
     visuals.widgets.inactive.weak_bg_fill = theme().chip_bg;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme().border);
     visuals.widgets.hovered.weak_bg_fill = theme().selected_bg;
@@ -131,6 +132,8 @@ pub(crate) struct Palette {
     pub(crate) top_bar: Color32,
     pub(crate) top_bar_text: Color32,
     pub(crate) top_bar_muted: Color32,
+    pub(crate) top_bar_button: Color32,
+    pub(crate) top_bar_button_hover: Color32,
     pub(crate) text: Color32,
     pub(crate) muted: Color32,
     pub(crate) border: Color32,
@@ -152,9 +155,11 @@ const LIGHT_PALETTE: Palette = Palette {
     code_bg: Color32::from_rgb(245, 247, 250),
     chip_bg: Color32::from_rgb(238, 243, 247),
     selected_bg: Color32::from_rgb(232, 245, 246),
-    top_bar: Color32::from_rgb(28, 37, 48),
-    top_bar_text: Color32::from_rgb(236, 241, 246),
-    top_bar_muted: Color32::from_rgb(170, 183, 196),
+    top_bar: Color32::from_rgb(240, 243, 247),
+    top_bar_text: Color32::from_rgb(31, 41, 51),
+    top_bar_muted: Color32::from_rgb(122, 134, 148),
+    top_bar_button: Color32::from_rgb(252, 253, 254),
+    top_bar_button_hover: Color32::from_rgb(232, 245, 246),
     text: Color32::from_rgb(31, 41, 51),
     muted: Color32::from_rgb(104, 116, 131),
     border: Color32::from_rgb(207, 215, 225),
@@ -181,6 +186,8 @@ const DARK_PALETTE: Palette = Palette {
     top_bar: Color32::from_rgb(17, 22, 29),
     top_bar_text: Color32::from_rgb(236, 241, 246),
     top_bar_muted: Color32::from_rgb(170, 183, 196),
+    top_bar_button: Color32::from_rgb(42, 54, 68),
+    top_bar_button_hover: Color32::from_rgb(58, 72, 88),
     text: Color32::from_rgb(222, 228, 235),
     muted: Color32::from_rgb(146, 158, 172),
     border: Color32::from_rgb(58, 67, 79),

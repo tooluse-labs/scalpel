@@ -394,13 +394,14 @@ impl GuiShellApp {
 
     pub(crate) fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
             ui.label(
                 RichText::new("pdbg")
                     .strong()
                     .size(15.0)
                     .color(theme().top_bar_text),
             );
-            ui.add_space(8.0);
+            top_bar_separator(ui);
             if top_bar_button(ui, "Open PDF...", true).clicked() {
                 self.open_pdf_dialog_open = true;
                 self.open_pdf_error = None;
@@ -408,19 +409,20 @@ impl GuiShellApp {
             if !self.recent_pdf_paths.is_empty() {
                 let mut recent_to_open = None;
                 ui.scope(|ui| {
-                    // Match the dark top-bar buttons; the default widget fill is
-                    // light, which made the light "Recent" label invisible.
-                    let dark = Color32::from_rgb(42, 54, 68);
-                    let dark_hover = Color32::from_rgb(58, 72, 88);
+                    // Match the top-bar buttons; the default widget fill is
+                    // tuned for panels, not the bar.
+                    let button = theme().top_bar_button;
+                    let button_hover = theme().top_bar_button_hover;
+                    let stroke = egui::Stroke::new(1.0, theme().border);
                     let widgets = &mut ui.visuals_mut().widgets;
-                    widgets.inactive.weak_bg_fill = dark;
-                    widgets.inactive.bg_stroke = egui::Stroke::NONE;
-                    widgets.hovered.weak_bg_fill = dark_hover;
-                    widgets.hovered.bg_stroke = egui::Stroke::NONE;
-                    widgets.active.weak_bg_fill = dark_hover;
-                    widgets.active.bg_stroke = egui::Stroke::NONE;
-                    widgets.open.weak_bg_fill = dark_hover;
-                    widgets.open.bg_stroke = egui::Stroke::NONE;
+                    widgets.inactive.weak_bg_fill = button;
+                    widgets.inactive.bg_stroke = stroke;
+                    widgets.hovered.weak_bg_fill = button_hover;
+                    widgets.hovered.bg_stroke = stroke;
+                    widgets.active.weak_bg_fill = button_hover;
+                    widgets.active.bg_stroke = stroke;
+                    widgets.open.weak_bg_fill = button_hover;
+                    widgets.open.bg_stroke = stroke;
                     ui.menu_button(
                         RichText::new("Recent")
                             .size(12.0)
@@ -445,20 +447,13 @@ impl GuiShellApp {
                     self.open_pdf_from_path(path);
                 }
             }
-            ui.add_space(8.0);
+            top_bar_separator(ui);
             if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked() {
                 self.go_back();
             }
             if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward").clicked() {
                 self.go_forward();
             }
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new(self.document_file_label())
-                    .strong()
-                    .size(12.0)
-                    .color(theme().top_bar_text),
-            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (label, hover) = if dark_mode_enabled() {
                     ("Light", "Switch to the light theme")
@@ -471,6 +466,25 @@ impl GuiShellApp {
                 {
                     self.set_theme(ui.ctx(), !dark_mode_enabled());
                 }
+                // Document title centered in the space left between the
+                // action cluster and the theme toggle.
+                ui.with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        let title = ui.add(
+                            egui::Label::new(
+                                RichText::new(self.document_file_label())
+                                    .strong()
+                                    .size(12.0)
+                                    .color(theme().top_bar_text),
+                            )
+                            .truncate(),
+                        );
+                        if let Some(hover) = self.document_path_hover() {
+                            title.on_hover_text(hover);
+                        }
+                    },
+                );
             });
         });
     }
@@ -789,12 +803,6 @@ impl GuiShellApp {
             return;
         }
 
-        let preview_detail = if self.tree.is_real() {
-            ""
-        } else {
-            "sample data"
-        };
-        section_header(ui, "Page Preview", Some(preview_detail));
         if self.draw_real_page_preview(ui) {
             return;
         }
@@ -861,7 +869,6 @@ impl GuiShellApp {
     }
 
     pub(crate) fn draw_empty_page_preview(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Page Preview", Some("No document"));
         let available = ui.available_size();
         let desired = egui::vec2(available.x.max(320.0), available.y.max(360.0));
         section_frame().fill(theme().canvas).show(ui, |ui| {
@@ -895,7 +902,7 @@ impl GuiShellApp {
     }
 
     pub(crate) fn draw_real_page_preview(&mut self, ui: &mut egui::Ui) -> bool {
-        self.draw_real_render_controls(ui);
+        let content_rect = ui.available_rect_before_wrap();
         if self.real_render_job.is_some() {
             let available = ui.available_size();
             let desired = egui::vec2(
@@ -912,10 +919,12 @@ impl GuiShellApp {
                 egui::FontId::proportional(13.0),
                 theme().muted,
             );
+            self.draw_floating_preview_controls(ui, content_rect);
             return true;
         }
         if let Some(err) = &self.real_render_error {
-            ui.colored_label(theme().error_fg, err);
+            ui.colored_label(theme().error_fg, err.clone());
+            self.draw_floating_preview_controls(ui, content_rect);
             return true;
         }
         let Some(render) = &self.real_render else {
@@ -956,13 +965,10 @@ impl GuiShellApp {
             .filter(|hit| hit.page_index == render_page_index)
             .cloned();
 
-        let display_size = page_preview_display_size(
-            texture_size,
-            available,
-            PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT,
-            render_zoom,
-        );
-        let image_area_height = (available.y - PAGE_PREVIEW_FOOTER_RESERVED_HEIGHT).max(1.0);
+        // The zoom/pager controls are drawn above the preview, so the image
+        // can use the full remaining height; nothing is rendered below it.
+        let display_size = page_preview_display_size(texture_size, available, 0.0, render_zoom);
+        let image_area_height = available.y.max(1.0);
         ScrollArea::both()
             .id_salt("real_page_preview_scroll")
             .max_height(image_area_height)
@@ -1064,25 +1070,58 @@ impl GuiShellApp {
                     }
                 });
             });
-        ui.add_space(8.0);
+        self.draw_floating_preview_controls(ui, content_rect);
         true
     }
 
-    pub(crate) fn draw_real_render_controls(&mut self, ui: &mut egui::Ui) {
-        let page_count = self.page_count();
-        if page_count == 0 {
+    pub(crate) fn draw_floating_preview_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        content_rect: egui::Rect,
+    ) {
+        if self.page_count() == 0 {
             return;
         }
+        let layout = preview_controls_overlay_layout(content_rect);
+        egui::Area::new(egui::Id::new("preview_floating_controls"))
+            .order(egui::Order::Middle)
+            .fixed_pos(layout.pos)
+            .show(ui.ctx(), |ui| {
+                if layout.stacked {
+                    ui.vertical(|ui| {
+                        let mut rerender = false;
+                        ui.horizontal(|ui| rerender = self.draw_preview_zoom_group(ui));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(
+                                ((PREVIEW_ZOOM_CONTROL_WIDTH - PREVIEW_PAGER_CONTROL_WIDTH) * 0.5)
+                                    .max(0.0),
+                            );
+                            self.draw_real_preview_pager(ui);
+                        });
+                        if rerender {
+                            self.refresh_real_render();
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| self.draw_preview_control_groups(ui));
+                }
+            });
+    }
 
+    pub(crate) fn draw_preview_control_groups(&mut self, ui: &mut egui::Ui) {
+        let rerender = self.draw_preview_zoom_group(ui);
+        ui.add_space(PREVIEW_CONTROL_GAP);
+        self.draw_real_preview_pager(ui);
+        if rerender {
+            self.refresh_real_render();
+        }
+    }
+
+    pub(crate) fn draw_preview_zoom_group(&mut self, ui: &mut egui::Ui) -> bool {
         let mut rerender = false;
-        let total_width =
-            PREVIEW_ZOOM_CONTROL_WIDTH + PREVIEW_CONTROL_GAP + PREVIEW_PAGER_CONTROL_WIDTH;
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), PREVIEW_CONTROL_ROW_HEIGHT),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                let leading = ((ui.available_width() - total_width) * 0.5).max(0.0);
-                ui.add_space(leading);
+        {
+            {
                 preview_control_group(ui, PREVIEW_ZOOM_CONTROL_WIDTH, |ui| {
                     let previous_zoom = previous_render_zoom(self.render_zoom);
                     if preview_icon_button(
@@ -1137,14 +1176,9 @@ impl GuiShellApp {
                         rerender = true;
                     }
                 });
-                ui.add_space(PREVIEW_CONTROL_GAP);
-                self.draw_real_preview_pager(ui);
-            },
-        );
-        if rerender {
-            self.refresh_real_render();
+            }
         }
-        ui.add_space(6.0);
+        rerender
     }
 
     pub(crate) fn draw_real_preview_pager(&mut self, ui: &mut egui::Ui) {

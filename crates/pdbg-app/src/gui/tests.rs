@@ -163,6 +163,44 @@ fn page_preview_leading_space_does_not_hide_wide_image_left_edge() {
 }
 
 #[test]
+fn preview_controls_overlay_stays_inside_wide_preview() {
+    let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1000.0, 800.0));
+    let layout = preview_controls_overlay_layout(rect);
+
+    assert!(!layout.stacked);
+    assert_eq!(
+        layout.width,
+        PREVIEW_ZOOM_CONTROL_WIDTH + PREVIEW_CONTROL_GAP + PREVIEW_PAGER_CONTROL_WIDTH
+    );
+    // Centered, fully inside the content rect, anchored above the bottom.
+    assert_eq!(layout.pos.x, rect.center().x - layout.width * 0.5);
+    assert!(layout.pos.x >= rect.left());
+    assert!(layout.pos.x + layout.width <= rect.right());
+    assert!(layout.pos.y + layout.height < rect.bottom());
+}
+
+#[test]
+fn preview_controls_overlay_stacks_and_clamps_in_narrow_preview() {
+    // Narrower than the single-row layout (416px + margins) but at least the
+    // workspace minimum center width.
+    let rect = egui::Rect::from_min_size(egui::pos2(300.0, 0.0), egui::vec2(380.0, 600.0));
+    let layout = preview_controls_overlay_layout(rect);
+
+    assert!(layout.stacked);
+    assert_eq!(layout.width, PREVIEW_ZOOM_CONTROL_WIDTH);
+    assert_eq!(layout.height, 2.0 * PREVIEW_CONTROL_GROUP_HEIGHT + 8.0);
+    assert!(layout.pos.x >= rect.left());
+    assert!(layout.pos.x + layout.width <= rect.right());
+
+    // Degenerate width narrower than even the stacked overlay: pinned to the
+    // left margin without panicking on an inverted clamp range.
+    let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 600.0));
+    let pinned = preview_controls_overlay_layout(tiny);
+    assert!(pinned.stacked);
+    assert_eq!(pinned.pos.x, tiny.left() + 8.0);
+}
+
+#[test]
 fn render_zoom_steps_through_supported_levels() {
     assert_eq!(previous_render_zoom(0.5), None);
     assert_eq!(next_render_zoom(0.5), Some(1.0));
@@ -1880,7 +1918,7 @@ fn real_gui_model_loads_bounded_tree_and_detail_from_pdf_path() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(fixture.to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -1920,7 +1958,7 @@ fn real_gui_large_pdf_smoke_keeps_tree_bounded_and_records_timings() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -1987,7 +2025,7 @@ fn real_gui_stream_panel_loads_bounded_real_bytes() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2028,7 +2066,7 @@ fn real_gui_decoded_stream_cache_reuses_loaded_chunk() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2070,7 +2108,7 @@ fn real_gui_stream_job_can_be_cancelled_from_ui_state() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2104,7 +2142,7 @@ fn real_gui_page_controls_refresh_render_parameters() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2154,7 +2192,7 @@ fn real_gui_selecting_page_tree_row_refreshes_preview_page() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2200,7 +2238,7 @@ fn real_gui_pager_expands_and_selects_matching_page_tree_row() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2257,7 +2295,7 @@ fn real_gui_render_cache_reuses_previous_page() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2288,7 +2326,7 @@ fn real_gui_render_job_replacement_keeps_latest_page() {
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(path.to_string_lossy().to_string()),
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });
@@ -2328,7 +2366,7 @@ fn smoke_exit_option_is_stored_for_native_launch_tests() {
     let app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: Some(Duration::from_millis(250)),
         pdf_path: None,
-        recent_files_path: None,
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
         start_empty_when_no_pdf: false,
         render_max_dimension: None,
     });

@@ -1808,6 +1808,17 @@ impl GuiShellApp {
         "fake.pdf".to_string()
     }
 
+    pub(crate) fn document_path_hover(&self) -> Option<String> {
+        if self.empty_workspace {
+            return None;
+        }
+        self.state
+            .as_ref()
+            .ok()
+            .and_then(|state| state.panels.summary.as_ref())
+            .map(|summary| display_path_hover(&summary.file_path))
+    }
+
     pub(crate) fn safe_mode_active(&self) -> bool {
         self.state
             .as_ref()

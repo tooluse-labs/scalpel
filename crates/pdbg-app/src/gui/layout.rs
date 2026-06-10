@@ -268,6 +268,15 @@ pub(crate) fn draw_workspace_splitter(
     }
 }
 
+pub(crate) fn top_bar_separator(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        egui::Stroke::new(1.0, theme().border),
+    );
+}
+
 pub(crate) fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
     ui.add_enabled(
         enabled,
@@ -276,7 +285,7 @@ pub(crate) fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
         } else {
             theme().top_bar_muted
         }))
-        .fill(Color32::from_rgb(42, 54, 68)),
+        .fill(theme().top_bar_button),
     )
 }
 
@@ -293,7 +302,7 @@ pub(crate) fn top_bar_icon_button(
         } else {
             theme().top_bar_muted
         }))
-        .fill(Color32::from_rgb(42, 54, 68))
+        .fill(theme().top_bar_button)
         .min_size(egui::vec2(30.0, 24.0)),
     )
     .on_hover_text(hover_text.into())

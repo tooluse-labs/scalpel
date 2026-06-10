@@ -22,6 +22,45 @@ pub(crate) fn page_preview_leading_space(available_width: f32, display_width: f3
     ((available_width - display_width) * 0.5).max(0.0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreviewControlsLayout {
+    pub(crate) stacked: bool,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) pos: egui::Pos2,
+}
+
+pub(crate) fn preview_controls_overlay_layout(content_rect: egui::Rect) -> PreviewControlsLayout {
+    let margin = 8.0;
+    let total_width =
+        PREVIEW_ZOOM_CONTROL_WIDTH + PREVIEW_CONTROL_GAP + PREVIEW_PAGER_CONTROL_WIDTH;
+    // Stack the two groups vertically when the preview column is too narrow
+    // for the single-row layout.
+    let stacked = content_rect.width() < total_width + 2.0 * margin;
+    let width = if stacked {
+        PREVIEW_ZOOM_CONTROL_WIDTH
+    } else {
+        total_width
+    };
+    let height = if stacked {
+        2.0 * PREVIEW_CONTROL_GROUP_HEIGHT + 8.0
+    } else {
+        PREVIEW_CONTROL_GROUP_HEIGHT
+    };
+    let min_x = content_rect.left() + margin;
+    let max_x = (content_rect.right() - width - margin).max(min_x);
+    let pos = egui::pos2(
+        (content_rect.center().x - width * 0.5).clamp(min_x, max_x),
+        content_rect.bottom() - height - 14.0,
+    );
+    PreviewControlsLayout {
+        stacked,
+        width,
+        height,
+        pos,
+    }
+}
+
 pub(crate) fn previous_render_zoom(current: f32) -> Option<f32> {
     RENDER_ZOOM_LEVELS
         .iter()
