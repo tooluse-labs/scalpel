@@ -19,38 +19,61 @@ MUPDF_SHA256="${MUPDF_SHA256:-}"
 THIRD_PARTY_DIR="${PDBG_MUPDF_THIRD_PARTY_DIR:-$ROOT/third_party}"
 CACHE_DIR="${PDBG_MUPDF_CACHE_DIR:-$THIRD_PARTY_DIR/cache}"
 ARCHIVE="$CACHE_DIR/mupdf-$MUPDF_VERSION-source.tar.gz"
+ARCHIVE_PART="$ARCHIVE.part"
 SOURCE_DIR="${PDBG_MUPDF_SOURCE_DIR:-$THIRD_PARTY_DIR/mupdf-$MUPDF_VERSION-source}"
 ENV_FILE="${PDBG_MUPDF_ENV_FILE:-$THIRD_PARTY_DIR/mupdf.env}"
 
 mkdir -p "$CACHE_DIR"
 
-if [ ! -f "$ARCHIVE" ]; then
-  echo "downloading MuPDF $MUPDF_VERSION"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL "$MUPDF_SOURCE_URL" -o "$ARCHIVE"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$ARCHIVE" "$MUPDF_SOURCE_URL"
-  else
-    echo "curl or wget is required to download $MUPDF_SOURCE_URL" >&2
-    exit 1
-  fi
-else
-  echo "using cached archive $ARCHIVE"
-fi
-
-if [ -n "$MUPDF_SHA256" ]; then
+archive_sha256() {
   if command -v shasum >/dev/null 2>&1; then
-    ACTUAL_SHA256=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+    shasum -a 256 "$1" | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL_SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+    sha256sum "$1" | awk '{print $1}'
   else
     echo "shasum or sha256sum is required to verify MuPDF archive checksum" >&2
     exit 1
   fi
+}
+
+archive_matches_checksum() {
+  [ -f "$ARCHIVE" ] || return 1
+  [ -n "$MUPDF_SHA256" ] || return 0
+  [ "$(archive_sha256 "$ARCHIVE")" = "$MUPDF_SHA256" ]
+}
+
+download_archive() {
+  echo "downloading MuPDF $MUPDF_VERSION"
+  if [ -f "$ARCHIVE" ] && [ ! -f "$ARCHIVE_PART" ]; then
+    mv "$ARCHIVE" "$ARCHIVE_PART"
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fL --retry 5 --retry-delay 2 -C - "$MUPDF_SOURCE_URL" -o "$ARCHIVE_PART"; then
+      rm -f "$ARCHIVE_PART"
+      curl -fL --retry 5 --retry-delay 2 "$MUPDF_SOURCE_URL" -o "$ARCHIVE_PART"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    wget -c -O "$ARCHIVE_PART" "$MUPDF_SOURCE_URL"
+  else
+    echo "curl or wget is required to download $MUPDF_SOURCE_URL" >&2
+    exit 1
+  fi
+  mv "$ARCHIVE_PART" "$ARCHIVE"
+}
+
+if archive_matches_checksum; then
+  echo "using cached archive $ARCHIVE"
+else
+  download_archive
+fi
+
+if [ -n "$MUPDF_SHA256" ]; then
+  ACTUAL_SHA256=$(archive_sha256 "$ARCHIVE")
   if [ "$ACTUAL_SHA256" != "$MUPDF_SHA256" ]; then
     echo "MuPDF archive checksum mismatch" >&2
     echo "expected: $MUPDF_SHA256" >&2
     echo "actual:   $ACTUAL_SHA256" >&2
+    echo "remove $ARCHIVE and rerun this script to force a clean download" >&2
     exit 1
   fi
 fi
@@ -73,6 +96,18 @@ if [ ! -d "$SOURCE_DIR" ]; then
 else
   echo "using existing source tree $SOURCE_DIR"
 fi
+
+for REQUIRED_HEADER in \
+  "$SOURCE_DIR/include/mupdf/fitz.h" \
+  "$SOURCE_DIR/include/mupdf/pdf.h" \
+  "$SOURCE_DIR/include/mupdf/pdf/javascript.h"
+do
+  if [ ! -f "$REQUIRED_HEADER" ]; then
+    echo "MuPDF source tree is missing required header: $REQUIRED_HEADER" >&2
+    echo "remove $SOURCE_DIR and rerun this script to extract a clean source tree" >&2
+    exit 1
+  fi
+done
 
 if [ "${PDBG_MUPDF_SKIP_BUILD:-0}" != "1" ]; then
   if ! command -v make >/dev/null 2>&1; then

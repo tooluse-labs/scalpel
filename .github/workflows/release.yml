@@ -1,0 +1,114 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MUPDF_VERSION: 1.27.2
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build-unix:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+          - os: ubuntu-latest
+            platform: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Cache MuPDF archive
+        uses: actions/cache@v4
+        with:
+          path: third_party/cache
+          key: mupdf-source-${{ env.MUPDF_VERSION }}-${{ hashFiles('third_party/mupdf.version') }}
+
+      - name: Prepare MuPDF
+        run: sh scripts/setup-mupdf.sh
+
+      - name: Build pdbg-app
+        run: |
+          set -eu
+          . third_party/mupdf.env
+          cargo build --release -p pdbg-app
+
+      - name: Package
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          package="pdbg-app-${RELEASE_TAG}-${{ matrix.platform }}-${arch}"
+          mkdir -p "dist/${package}"
+          cp target/release/pdbg-app "dist/${package}/pdbg-app"
+          cp LICENSE NOTICES "dist/${package}/"
+          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+          shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs: build-unix
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
