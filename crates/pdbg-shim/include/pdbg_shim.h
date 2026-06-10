@@ -37,11 +37,30 @@ typedef struct pdbg_diagnostic_list pdbg_diagnostic_list;
 typedef struct pdbg_text_page pdbg_text_page;
 typedef struct pdbg_visual_page pdbg_visual_page;
 typedef struct pdbg_cancel_token pdbg_cancel_token;
+typedef struct pdbg_xref_table pdbg_xref_table;
 
 typedef struct pdbg_object_id {
     int num;
     int gen;
 } pdbg_object_id;
+
+typedef enum pdbg_xref_entry_kind {
+    PDBG_XREF_ENTRY_FREE = 0,
+    PDBG_XREF_ENTRY_NORMAL = 1,
+    PDBG_XREF_ENTRY_COMPRESSED = 2,
+} pdbg_xref_entry_kind;
+
+typedef struct pdbg_xref_entry_info {
+    int num;
+    int gen;          /* object generation (0 for compressed entries) */
+    int kind;         /* pdbg_xref_entry_kind */
+    uint64_t offset;  /* byte offset for normal entries; containing object
+                         stream number for compressed; raw value for free */
+    int objstm_index; /* index inside the object stream for compressed
+                         entries, -1 otherwise */
+    int section;      /* xref section the entry resolves from, newest = 0;
+                         -1 when the entry is undefined in every section */
+} pdbg_xref_entry_info;
 
 typedef enum pdbg_node_kind {
     PDBG_NODE_DOCUMENT_ROOT = 0,
@@ -370,6 +389,19 @@ pdbg_status pdbg_object_detail(
     const pdbg_node_id *node,
     pdbg_object_detail_out *out,
     pdbg_error *err);
+
+pdbg_status pdbg_xref_table_load(
+    pdbg_doc *doc,
+    size_t offset,
+    size_t limit,
+    pdbg_xref_table **out,
+    pdbg_error *err);
+void pdbg_xref_table_drop(pdbg_xref_table *table);
+size_t pdbg_xref_table_len(const pdbg_xref_table *table);
+size_t pdbg_xref_table_total(const pdbg_xref_table *table);
+size_t pdbg_xref_table_start(const pdbg_xref_table *table);
+size_t pdbg_xref_table_sections(const pdbg_xref_table *table);
+const pdbg_xref_entry_info *pdbg_xref_table_items(const pdbg_xref_table *table);
 
 pdbg_status pdbg_stream_load(
     pdbg_doc *doc,

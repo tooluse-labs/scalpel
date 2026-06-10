@@ -12,6 +12,7 @@ use pdbg_core::{
     RenderResultCache, ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary,
     StreamViewMode, TextPage, TextPageCache, TextRequest, TextSearchHit, TextSearchRequest,
     TextSearchResult, TextSpan, VisualElement, VisualElementKind, VisualPage, VisualRequest,
+    XrefEntryInfo, XrefEntryKind, XrefTableSlice,
 };
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
@@ -83,6 +84,7 @@ const MARKDOWN_REPORT_LIMIT_BYTES: usize = 64 * 1024;
 const REPORT_DIAGNOSTIC_LIMIT: usize = 128;
 const REPORT_SEARCH_HIT_LIMIT: usize = 64;
 const RECENT_PDF_MAX_ITEMS: usize = 10;
+const XREF_PAGE_SIZE: usize = 256;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
@@ -218,6 +220,9 @@ pub struct GuiShellApp {
     selected_visual_hit: Option<PreviewVisualHit>,
     pending_preview_stream_selection: Option<PendingPreviewStreamSelection>,
     preview_click: Option<PagePreviewClick>,
+    xref_slice: Option<XrefTableSlice>,
+    xref_error: Option<String>,
+    xref_offset: usize,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
     copied_excerpt: Option<EscapedText>,

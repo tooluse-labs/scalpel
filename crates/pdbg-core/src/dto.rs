@@ -440,6 +440,49 @@ pub struct StreamChunk {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XrefEntryKind {
+    Free,
+    Normal,
+    Compressed,
+}
+
+impl XrefEntryKind {
+    pub fn as_public_str(&self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Normal => "normal",
+            Self::Compressed => "compressed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XrefEntryInfo {
+    pub object: ObjectId,
+    pub kind: XrefEntryKind,
+    /// Byte offset for normal entries; containing object stream number for
+    /// compressed entries; raw stored value for free entries.
+    pub offset: u64,
+    /// Index inside the containing object stream for compressed entries.
+    pub objstm_index: Option<u32>,
+    /// Incremental-update section the entry resolves from: 0 is the original
+    /// document, higher values are later updates. `None` when the entry is
+    /// undefined in every section.
+    pub section: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XrefTableSlice {
+    pub items: Vec<XrefEntryInfo>,
+    /// First object number contained in `items`.
+    pub offset: usize,
+    /// Total number of xref entries in the document.
+    pub total: usize,
+    /// Number of xref sections (1 + the number of incremental updates).
+    pub sections: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenderColorMode {
     Rgba,
     Grayscale,

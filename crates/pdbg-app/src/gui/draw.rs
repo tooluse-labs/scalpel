@@ -355,6 +355,7 @@ impl GuiShellApp {
         self.selected_visual_hit = None;
         self.pending_preview_stream_selection = None;
         self.preview_click = None;
+        self.clear_xref_state();
         self.copied_excerpt = None;
         self.status_log = model.status_log;
         self.refresh_real_render();
@@ -1196,6 +1197,7 @@ impl GuiShellApp {
             &[
                 (InspectorTab::Object, "Object", true),
                 (InspectorTab::Stream, "Stream", true),
+                (InspectorTab::Xref, "Xref", true),
                 (InspectorTab::Diagnostics, "Diagnostics", true),
             ],
         );
@@ -1204,7 +1206,132 @@ impl GuiShellApp {
         match self.selected_tab {
             InspectorTab::Object => self.draw_object_panel(ui),
             InspectorTab::Stream => self.draw_stream_panel(ui, ctx),
+            InspectorTab::Xref => self.draw_xref_panel(ui),
             InspectorTab::Diagnostics => self.draw_diagnostics_panel(ui, ctx),
+        }
+    }
+
+    pub(crate) fn draw_xref_panel(&mut self, ui: &mut egui::Ui) {
+        self.ensure_xref_slice();
+
+        if let Some(err) = self.xref_error.clone() {
+            section_frame().show(ui, |ui| {
+                section_header(ui, "Xref Table", None);
+                ui.colored_label(theme().error_fg, err);
+            });
+            return;
+        }
+        let Some(slice) = self.xref_slice.clone() else {
+            return;
+        };
+
+        let first = slice.offset;
+        let last = first + slice.items.len().saturating_sub(1);
+        let detail = if slice.items.is_empty() {
+            format!("{} entries", slice.total)
+        } else {
+            format!("objects {first}–{last} of {}", slice.total)
+        };
+        let detail = if slice.sections > 1 {
+            format!("{detail} · {} sections", slice.sections)
+        } else {
+            detail
+        };
+
+        let mut requested_offset = None;
+        let mut follow_object = None;
+        section_frame().show(ui, |ui| {
+            section_header(ui, "Xref Table", Some(&detail));
+            if slice.total > XREF_PAGE_SIZE {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(first > 0, egui::Button::new("← Previous"))
+                        .clicked()
+                    {
+                        requested_offset = Some(first.saturating_sub(XREF_PAGE_SIZE));
+                    }
+                    let has_more = first + slice.items.len() < slice.total;
+                    if ui
+                        .add_enabled(has_more, egui::Button::new("Next →"))
+                        .clicked()
+                    {
+                        requested_offset = Some(first + XREF_PAGE_SIZE);
+                    }
+                    ui.label(
+                        RichText::new(format!("{} per page", XREF_PAGE_SIZE))
+                            .small()
+                            .color(theme().muted),
+                    );
+                });
+                ui.add_space(4.0);
+            }
+
+            let row_height = 18.0;
+            ScrollArea::vertical()
+                .id_salt("xref_table_scroll")
+                .auto_shrink([false, false])
+                .max_height((ui.available_height() - 8.0).max(STREAM_VIEW_MIN_HEIGHT))
+                .show_rows(ui, row_height, slice.items.len(), |ui, rows| {
+                    egui::Grid::new("xref_table_grid")
+                        .num_columns(4)
+                        .spacing([14.0, 3.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            dense_label(ui, "object");
+                            dense_label(ui, "type");
+                            dense_label(ui, "section");
+                            dense_label(ui, "location");
+                            ui.end_row();
+                            for entry in &slice.items[rows] {
+                                let object_text =
+                                    format!("{} {}", entry.object.num, entry.object.gen);
+                                let navigable =
+                                    self.tree.is_real() && entry.kind != XrefEntryKind::Free;
+                                if navigable {
+                                    if ui
+                                        .link(dense_monospace_text(object_text))
+                                        .on_hover_text("Show this object in the tree")
+                                        .clicked()
+                                    {
+                                        follow_object = Some(entry.object);
+                                    }
+                                } else {
+                                    ui.label(
+                                        dense_monospace_text(object_text).color(theme().muted),
+                                    );
+                                }
+                                let kind_color = match entry.kind {
+                                    XrefEntryKind::Free => theme().muted,
+                                    XrefEntryKind::Normal => theme().text,
+                                    XrefEntryKind::Compressed => theme().accent,
+                                };
+                                ui.label(
+                                    dense_monospace_text(entry.kind.as_public_str())
+                                        .color(kind_color),
+                                );
+                                let section_text = xref_entry_section_label(entry, slice.sections);
+                                let is_update = entry.section.is_some_and(|section| section > 0);
+                                ui.label(dense_monospace_text(section_text).color(if is_update {
+                                    theme().operator
+                                } else {
+                                    theme().muted
+                                }))
+                                .on_hover_text(
+                                    "Which xref section defines this entry: 0 is the original \
+                                     document, higher numbers are later incremental updates",
+                                );
+                                ui.label(dense_monospace_text(xref_entry_location_label(entry)));
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+
+        if let Some(offset) = requested_offset {
+            self.set_xref_offset(offset);
+        }
+        if let Some(object) = follow_object {
+            self.follow_real_reference(object);
         }
     }
 

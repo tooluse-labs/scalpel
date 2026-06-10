@@ -2377,6 +2377,165 @@ pdbg_status pdbg_node_children(
     return PDBG_OK;
 }
 
+struct pdbg_xref_table {
+    pdbg_xref_entry_info *items;
+    size_t len;
+    size_t total;
+    size_t start;
+    size_t sections;
+};
+
+/* Mirrors pdf_get_xref_entry_no_change's section walk (newest first) while
+ * also reporting which section the entry resolved from. */
+static pdf_xref_entry *xref_entry_with_section(
+    fz_context *ctx,
+    pdf_document *doc,
+    int num,
+    int *section_out)
+{
+    (void)ctx;
+    *section_out = -1;
+    for (int j = 0; j < doc->num_xref_sections; j++) {
+        pdf_xref *xref = &doc->xref_sections[j];
+        if (num >= xref->num_objects)
+            continue;
+        for (pdf_xref_subsec *sub = xref->subsec; sub != NULL; sub = sub->next) {
+            if (num < sub->start || num >= sub->start + sub->len)
+                continue;
+            pdf_xref_entry *entry = &sub->table[num - sub->start];
+            if (entry->type) {
+                *section_out = j;
+                return entry;
+            }
+        }
+    }
+    return NULL;
+}
+
+pdbg_status pdbg_xref_table_load(
+    pdbg_doc *doc,
+    size_t offset,
+    size_t limit,
+    pdbg_xref_table **out,
+    pdbg_error *err)
+{
+    if (!doc || !out || !doc->pdf_doc) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid xref table arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before xref inspection");
+        return PDBG_ERROR_PASSWORD;
+    }
+
+    fz_context *ctx = doc->ctx;
+    pdbg_status status = PDBG_OK;
+    pdbg_xref_table *table = NULL;
+    fz_var(status);
+    fz_var(table);
+
+    fz_try(ctx)
+    {
+        int xref_len = pdf_xref_len(ctx, doc->pdf_doc);
+        size_t total = xref_len > 0 ? (size_t)xref_len : 0;
+        size_t start = offset < total ? offset : total;
+        size_t len = total - start;
+        if (len > limit)
+            len = limit;
+        int sections = doc->pdf_doc->num_xref_sections;
+
+        table = (pdbg_xref_table *)calloc(1, sizeof(*table));
+        if (!table) {
+            status = PDBG_ERROR_OOM;
+            set_error(err, status, "out of memory");
+        } else {
+            table->total = total;
+            table->start = start;
+            table->len = len;
+            table->sections = sections > 0 ? (size_t)sections : 0;
+            if (len > 0) {
+                table->items = (pdbg_xref_entry_info *)calloc(len, sizeof(*table->items));
+                if (!table->items) {
+                    table->len = 0;
+                    status = PDBG_ERROR_OOM;
+                    set_error(err, status, "out of memory");
+                }
+            }
+        }
+
+        for (size_t i = 0; status == PDBG_OK && i < len; i++) {
+            int num = (int)(start + i);
+            pdbg_xref_entry_info *info = &table->items[i];
+            info->num = num;
+            info->gen = 0;
+            info->kind = PDBG_XREF_ENTRY_FREE;
+            info->offset = 0;
+            info->objstm_index = -1;
+            info->section = -1;
+
+            pdf_xref_entry *entry =
+                xref_entry_with_section(ctx, doc->pdf_doc, num, &info->section);
+            if (!entry)
+                continue;
+            switch (entry->type) {
+            case 'n':
+                info->kind = PDBG_XREF_ENTRY_NORMAL;
+                info->gen = entry->gen;
+                info->offset = (uint64_t)entry->ofs;
+                break;
+            case 'o':
+                info->kind = PDBG_XREF_ENTRY_COMPRESSED;
+                info->offset = (uint64_t)entry->ofs;
+                info->objstm_index = entry->gen;
+                break;
+            default:
+                info->gen = entry->gen;
+                info->offset = (uint64_t)entry->ofs;
+                break;
+            }
+        }
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status != PDBG_OK) {
+        pdbg_xref_table_drop(table);
+        return status;
+    }
+
+    *out = table;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
+}
+
+size_t pdbg_xref_table_len(const pdbg_xref_table *table)
+{
+    return table ? table->len : 0;
+}
+
+size_t pdbg_xref_table_total(const pdbg_xref_table *table)
+{
+    return table ? table->total : 0;
+}
+
+size_t pdbg_xref_table_start(const pdbg_xref_table *table)
+{
+    return table ? table->start : 0;
+}
+
+size_t pdbg_xref_table_sections(const pdbg_xref_table *table)
+{
+    return table ? table->sections : 0;
+}
+
+const pdbg_xref_entry_info *pdbg_xref_table_items(const pdbg_xref_table *table)
+{
+    return table ? table->items : NULL;
+}
+
 pdbg_status pdbg_object_detail(
     pdbg_doc *doc,
     const pdbg_node_id *node,
@@ -3141,6 +3300,14 @@ void pdbg_node_list_drop(pdbg_node_list *list)
     }
     free(list->items);
     free(list);
+}
+
+void pdbg_xref_table_drop(pdbg_xref_table *table)
+{
+    if (!table)
+        return;
+    free(table->items);
+    free(table);
 }
 
 void pdbg_text_page_drop(pdbg_text_page *text)

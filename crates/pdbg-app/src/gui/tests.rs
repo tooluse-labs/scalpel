@@ -1600,6 +1600,42 @@ fn recent_pdf_paths_are_deduped_bounded_and_persisted() {
 }
 
 #[test]
+fn xref_entry_location_labels_cover_all_kinds() {
+    let object = ObjectId { num: 7, gen: 0 };
+    let free = XrefEntryInfo {
+        object: ObjectId { num: 0, gen: 65535 },
+        kind: XrefEntryKind::Free,
+        offset: 0,
+        objstm_index: None,
+        section: None,
+    };
+    let normal = XrefEntryInfo {
+        object,
+        kind: XrefEntryKind::Normal,
+        offset: 1234,
+        objstm_index: None,
+        section: Some(0),
+    };
+    let compressed = XrefEntryInfo {
+        object,
+        kind: XrefEntryKind::Compressed,
+        offset: 12,
+        objstm_index: Some(3),
+        section: Some(2),
+    };
+
+    assert_eq!(xref_entry_location_label(&free), "—");
+    assert_eq!(xref_entry_location_label(&normal), "@ 1234");
+    assert_eq!(xref_entry_location_label(&compressed), "objstm 12 [3]");
+    assert_eq!(XrefEntryKind::Compressed.as_public_str(), "compressed");
+
+    assert_eq!(xref_entry_section_label(&free, 1), "—");
+    assert_eq!(xref_entry_section_label(&normal, 1), "0");
+    assert_eq!(xref_entry_section_label(&normal, 3), "0");
+    assert_eq!(xref_entry_section_label(&compressed, 3), "2 (latest)");
+}
+
+#[test]
 fn ui_settings_round_trip_and_validation() {
     let recent_path = temp_recent_file_path("ui-settings");
     let dir = recent_path.parent().unwrap().to_path_buf();

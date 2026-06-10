@@ -46,6 +46,26 @@ pub struct pdbg_cancel_token {
 }
 
 #[repr(C)]
+pub struct pdbg_xref_table {
+    _private: [u8; 0],
+}
+
+pub const PDBG_XREF_ENTRY_FREE: c_int = 0;
+pub const PDBG_XREF_ENTRY_NORMAL: c_int = 1;
+pub const PDBG_XREF_ENTRY_COMPRESSED: c_int = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct pdbg_xref_entry_info {
+    pub num: c_int,
+    pub gen: c_int,
+    pub kind: c_int,
+    pub offset: u64,
+    pub objstm_index: c_int,
+    pub section: c_int,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum pdbg_status {
     PDBG_OK = 0,
@@ -473,6 +493,20 @@ unsafe extern "C" {
         out: *mut pdbg_object_detail_out,
         err: *mut pdbg_error,
     ) -> pdbg_status;
+
+    pub fn pdbg_xref_table_load(
+        doc: *mut pdbg_doc,
+        offset: usize,
+        limit: usize,
+        out: *mut *mut pdbg_xref_table,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+    pub fn pdbg_xref_table_drop(table: *mut pdbg_xref_table);
+    pub fn pdbg_xref_table_len(table: *const pdbg_xref_table) -> usize;
+    pub fn pdbg_xref_table_total(table: *const pdbg_xref_table) -> usize;
+    pub fn pdbg_xref_table_start(table: *const pdbg_xref_table) -> usize;
+    pub fn pdbg_xref_table_sections(table: *const pdbg_xref_table) -> usize;
+    pub fn pdbg_xref_table_items(table: *const pdbg_xref_table) -> *const pdbg_xref_entry_info;
 
     pub fn pdbg_stream_load(
         doc: *mut pdbg_doc,

@@ -142,6 +142,9 @@ impl GuiShellApp {
             selected_visual_hit: None,
             pending_preview_stream_selection: None,
             preview_click: None,
+            xref_slice: None,
+            xref_error: None,
+            xref_offset: 0,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
             copied_excerpt: None,
@@ -886,6 +889,46 @@ impl GuiShellApp {
                 }
             }
         }
+    }
+
+    pub(crate) fn ensure_xref_slice(&mut self) {
+        if self.xref_slice.is_some() || self.xref_error.is_some() {
+            return;
+        }
+        let offset = self.xref_offset;
+        let result = match &self.state {
+            Ok(state) => state
+                .session
+                .run_task(|document| {
+                    document.xref_table(ChildRange {
+                        offset,
+                        limit: XREF_PAGE_SIZE,
+                    })
+                })
+                .map_err(|err| err.message),
+            Err(err) => Err(err.clone()),
+        };
+        match result {
+            Ok(slice) => {
+                self.xref_slice = Some(slice);
+                self.xref_error = None;
+            }
+            Err(err) => {
+                self.xref_error = Some(err);
+            }
+        }
+    }
+
+    pub(crate) fn set_xref_offset(&mut self, offset: usize) {
+        self.xref_offset = offset;
+        self.xref_slice = None;
+        self.xref_error = None;
+    }
+
+    pub(crate) fn clear_xref_state(&mut self) {
+        self.xref_slice = None;
+        self.xref_error = None;
+        self.xref_offset = 0;
     }
 
     pub(crate) fn page_count(&self) -> usize {

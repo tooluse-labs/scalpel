@@ -130,6 +130,26 @@ pub(crate) fn summary_inline_text(summary: &ObjectSummary) -> String {
     out
 }
 
+pub(crate) fn xref_entry_section_label(entry: &XrefEntryInfo, sections: usize) -> String {
+    match entry.section {
+        Some(0) if sections <= 1 => "0".to_string(),
+        Some(section) if section as usize + 1 == sections => format!("{section} (latest)"),
+        Some(section) => section.to_string(),
+        None => "—".to_string(),
+    }
+}
+
+pub(crate) fn xref_entry_location_label(entry: &XrefEntryInfo) -> String {
+    match entry.kind {
+        XrefEntryKind::Free => "—".to_string(),
+        XrefEntryKind::Normal => format!("@ {}", entry.offset),
+        XrefEntryKind::Compressed => match entry.objstm_index {
+            Some(index) => format!("objstm {} [{}]", entry.offset, index),
+            None => format!("objstm {}", entry.offset),
+        },
+    }
+}
+
 pub(crate) fn object_value_preview(value: &ObjectValue, fallback: &str) -> String {
     match value {
         ObjectValue::Null => "null".to_string(),

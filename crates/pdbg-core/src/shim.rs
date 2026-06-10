@@ -69,6 +69,7 @@ pub trait ShimDocument {
         node: &NodeId,
         range: ChildRange,
     ) -> Result<ObjectDetail, ShimError>;
+    fn xref_table(&mut self, range: ChildRange) -> Result<XrefTableSlice, ShimError>;
     fn stream_load(
         &mut self,
         object: ObjectId,
@@ -287,6 +288,14 @@ impl ShimDocument for OpenDocument {
                 doc.object_detail(&mut self.registry, &raw_node, node, range)
             }
             OpenDocumentBackend::Fake(doc) => Ok(doc.object_detail(node, range)),
+        }
+    }
+
+    fn xref_table(&mut self, range: ChildRange) -> Result<XrefTableSlice, ShimError> {
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => doc.xref_table(range),
+            OpenDocumentBackend::Fake(doc) => Ok(doc.xref_table(range)),
         }
     }
 
@@ -551,6 +560,44 @@ impl FakeDoc {
                 "fake object diagnostic",
                 Some(node.clone()),
             )],
+        }
+    }
+
+    fn xref_table(&self, range: ChildRange) -> XrefTableSlice {
+        // Mirrors the fake summary's xref_size of 3: the free-list head plus
+        // two in-use objects at deterministic offsets.
+        let total = 3usize;
+        let start = range.offset.min(total);
+        let len = (total - start).min(range.limit);
+        let items = (start..start + len)
+            .map(|num| {
+                if num == 0 {
+                    XrefEntryInfo {
+                        object: ObjectId { num: 0, gen: 65535 },
+                        kind: XrefEntryKind::Free,
+                        offset: 0,
+                        objstm_index: None,
+                        section: Some(0),
+                    }
+                } else {
+                    XrefEntryInfo {
+                        object: ObjectId {
+                            num: num as i32,
+                            gen: 0,
+                        },
+                        kind: XrefEntryKind::Normal,
+                        offset: 100 * num as u64,
+                        objstm_index: None,
+                        section: Some(0),
+                    }
+                }
+            })
+            .collect();
+        XrefTableSlice {
+            items,
+            offset: start,
+            total,
+            sections: 1,
         }
     }
 
@@ -1080,6 +1127,57 @@ impl PdbgDoc {
             let detail = convert_object_detail(registry, public_node, range, &out);
             raw::pdbg_object_detail_out_drop(&mut out);
             Ok(detail)
+        }
+    }
+
+    fn xref_table(&self, range: ChildRange) -> Result<XrefTableSlice, ShimError> {
+        unsafe {
+            let mut table = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_xref_table_load(
+                self.raw.as_ptr(),
+                range.offset,
+                range.limit,
+                &mut table,
+                &mut err,
+            );
+            check_status(status, &err)?;
+            let len = raw::pdbg_xref_table_len(table);
+            let total = raw::pdbg_xref_table_total(table);
+            let start = raw::pdbg_xref_table_start(table);
+            let sections = raw::pdbg_xref_table_sections(table);
+            let raw_items = raw::pdbg_xref_table_items(table);
+            let mut items = Vec::with_capacity(len);
+            for index in 0..len {
+                let info = *raw_items.add(index);
+                let kind = match info.kind {
+                    raw::PDBG_XREF_ENTRY_NORMAL => XrefEntryKind::Normal,
+                    raw::PDBG_XREF_ENTRY_COMPRESSED => XrefEntryKind::Compressed,
+                    _ => XrefEntryKind::Free,
+                };
+                // The shim reports MuPDF's section index (newest = 0); flip it
+                // so 0 is the original document and higher means later update.
+                let section = (info.section >= 0 && (info.section as usize) < sections)
+                    .then(|| (sections - 1 - info.section as usize) as u32);
+                items.push(XrefEntryInfo {
+                    object: ObjectId {
+                        num: info.num,
+                        gen: info.gen,
+                    },
+                    kind,
+                    offset: info.offset,
+                    objstm_index: (kind == XrefEntryKind::Compressed && info.objstm_index >= 0)
+                        .then_some(info.objstm_index as u32),
+                    section,
+                });
+            }
+            raw::pdbg_xref_table_drop(table);
+            Ok(XrefTableSlice {
+                items,
+                offset: start,
+                total,
+                sections,
+            })
         }
     }
 
@@ -2676,6 +2774,162 @@ mod tests {
             diagnostic.code == DiagnosticCode::RepairWarning
                 && diagnostic.severity == DiagnosticSeverity::Warning
         }));
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fake_shim_xref_table_is_bounded_and_deterministic() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+
+        let all = doc
+            .xref_table(ChildRange {
+                offset: 0,
+                limit: 16,
+            })
+            .unwrap();
+        assert_eq!(all.total, 3);
+        assert_eq!(all.offset, 0);
+        assert_eq!(all.items.len(), 3);
+        assert_eq!(all.items[0].kind, XrefEntryKind::Free);
+        assert_eq!(all.items[0].object.gen, 65535);
+        assert_eq!(all.items[1].kind, XrefEntryKind::Normal);
+        assert_eq!(all.items[1].offset, 100);
+
+        let tail = doc
+            .xref_table(ChildRange {
+                offset: 2,
+                limit: 16,
+            })
+            .unwrap();
+        assert_eq!(tail.offset, 2);
+        assert_eq!(tail.items.len(), 1);
+
+        let beyond = doc
+            .xref_table(ChildRange {
+                offset: 10,
+                limit: 4,
+            })
+            .unwrap();
+        assert!(beyond.items.is_empty());
+        assert_eq!(beyond.total, 3);
+        assert_eq!(all.sections, 1);
+        assert!(all.items.iter().all(|entry| entry.section == Some(0)));
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_incremental_update_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.1\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n",
+        );
+
+        let first_xref = pdf.len();
+        pdf.push_str("xref\n0 4\n0000000000 65535 f \n");
+        for offset in &offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 4 >>\nstartxref\n{first_xref}\n%%EOF\n"
+        ));
+
+        // Incremental update rewriting the page object.
+        let updated_obj_offset = pdf.len();
+        pdf.push_str("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 144] >>\nendobj\n");
+        let second_xref = pdf.len();
+        pdf.push_str("xref\n3 1\n");
+        pdf.push_str(&format!("{updated_obj_offset:010} 00000 n \n"));
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 4 /Prev {first_xref} >>\nstartxref\n{second_xref}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_reports_xref_sections_for_incremental_updates() {
+        let path = write_temp_real_pdf("xref-incremental", &synthetic_incremental_update_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let summary = doc.summary().unwrap();
+        assert!(
+            !summary.safety.repaired_or_damaged,
+            "fixture should parse without repair"
+        );
+
+        let slice = doc
+            .xref_table(ChildRange {
+                offset: 0,
+                limit: 64,
+            })
+            .unwrap();
+        assert_eq!(slice.sections, 2);
+        assert_eq!(slice.total, 4);
+        assert_eq!(slice.items[1].section, Some(0));
+        assert_eq!(slice.items[2].section, Some(0));
+        assert_eq!(slice.items[3].section, Some(1));
+        assert_eq!(slice.items[3].kind, XrefEntryKind::Normal);
+        assert!(slice.items[3].offset > slice.items[2].offset);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_exposes_xref_entries_with_offsets() {
+        let path = write_temp_real_pdf("xref-table", &synthetic_external_reference_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let slice = doc
+            .xref_table(ChildRange {
+                offset: 0,
+                limit: 64,
+            })
+            .unwrap();
+        assert_eq!(slice.total, 5);
+        assert_eq!(slice.items.len(), 5);
+        assert_eq!(slice.items[0].kind, XrefEntryKind::Free);
+        for entry in &slice.items[1..] {
+            assert_eq!(entry.kind, XrefEntryKind::Normal);
+            assert!(entry.offset > 0);
+        }
+        assert!(slice.items[1].offset < slice.items[2].offset);
+
+        let page = doc
+            .xref_table(ChildRange {
+                offset: 3,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(page.offset, 3);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].object.num, 3);
+        assert_eq!(page.total, 5);
+        assert_eq!(slice.sections, 1);
+        assert!(slice.items.iter().all(|entry| entry.section == Some(0)));
 
         drop(doc);
         let _ = std::fs::remove_file(path);

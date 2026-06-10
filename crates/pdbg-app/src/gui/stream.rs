@@ -904,5 +904,6 @@ pub(crate) struct NiceStreamRenderLine {
 pub(crate) enum InspectorTab {
     Object,
     Stream,
+    Xref,
     Diagnostics,
 }
