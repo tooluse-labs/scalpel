@@ -39,83 +39,120 @@ impl RealRenderKey {
     }
 }
 
-pub(crate) struct RealRenderJob {
-    pub(crate) key: RealRenderKey,
-    pub(crate) cancel: Arc<CancelToken>,
-    pub(crate) receiver: mpsc::Receiver<RealRenderJobOutput>,
+/// A keyed background task, optionally backed by a cancel token.
+///
+/// `key` identifies the request the job answers; poll sites compare it to the
+/// currently desired key to discard stale results. Dropping the job cancels
+/// its token when present, so replacing or clearing a cancellable job slot
+/// asks the worker to stop.
+pub(crate) struct BackgroundJob<K, T> {
+    key: K,
+    /// `None` for uncancellable jobs and for jobs whose token could not be
+    /// created (those deliver their failure through the channel instead).
+    cancel: Option<Arc<CancelToken>>,
+    receiver: mpsc::Receiver<JobOutput<K, T>>,
 }
 
-impl Drop for RealRenderJob {
-    fn drop(&mut self) {
-        self.cancel.cancel();
+pub(crate) struct JobOutput<K, T> {
+    pub(crate) key: K,
+    pub(crate) result: Result<T, String>,
+}
+
+pub(crate) enum JobPoll<K, T> {
+    Pending,
+    Finished(JobOutput<K, T>),
+    Disconnected(K),
+}
+
+impl<K, T> BackgroundJob<K, T>
+where
+    K: Clone + Send + 'static,
+    T: Send + 'static,
+{
+    pub(crate) fn spawn<F>(key: K, worker: F) -> Self
+    where
+        F: FnOnce(&CancelToken) -> Result<T, String> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        let cancel = match CancelToken::new() {
+            Ok(cancel) => Arc::new(cancel),
+            Err(err) => {
+                // Token allocation failed; report it like a worker error so
+                // the poll site's normal error handling (and logging) runs.
+                let _ = sender.send(JobOutput {
+                    key: key.clone(),
+                    result: Err(err.message),
+                });
+                return Self {
+                    key,
+                    cancel: None,
+                    receiver,
+                };
+            }
+        };
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_key = key.clone();
+        thread::spawn(move || {
+            let result = worker(worker_cancel.as_ref());
+            let _ = sender.send(JobOutput {
+                key: worker_key,
+                result,
+            });
+        });
+        Self {
+            key,
+            cancel: Some(cancel),
+            receiver,
+        }
+    }
+
+    /// For work that cannot be interrupted mid-flight (e.g. opening a
+    /// document); no cancel token is allocated.
+    pub(crate) fn spawn_uncancellable<F>(key: K, worker: F) -> Self
+    where
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        let worker_key = key.clone();
+        thread::spawn(move || {
+            let _ = sender.send(JobOutput {
+                key: worker_key,
+                result: worker(),
+            });
+        });
+        Self {
+            key,
+            cancel: None,
+            receiver,
+        }
+    }
+
+    pub(crate) fn key(&self) -> &K {
+        &self.key
+    }
+
+    pub(crate) fn poll(&self) -> JobPoll<K, T> {
+        match self.receiver.try_recv() {
+            Ok(output) => JobPoll::Finished(output),
+            Err(mpsc::TryRecvError::Empty) => JobPoll::Pending,
+            Err(mpsc::TryRecvError::Disconnected) => JobPoll::Disconnected(self.key.clone()),
+        }
     }
 }
 
-pub(crate) struct RealRenderJobOutput {
-    pub(crate) key: RealRenderKey,
-    pub(crate) result: Result<RenderResult, String>,
-}
-
-pub(crate) struct RealStreamJob {
-    pub(crate) key: RealStreamKey,
-    pub(crate) cancel: Arc<CancelToken>,
-    pub(crate) receiver: mpsc::Receiver<RealStreamJobOutput>,
-}
-
-impl Drop for RealStreamJob {
+impl<K, T> Drop for BackgroundJob<K, T> {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
     }
 }
 
-pub(crate) struct RealStreamJobOutput {
-    pub(crate) key: RealStreamKey,
-    pub(crate) result: Result<StreamChunk, String>,
-}
-
-pub(crate) struct RealTextSearchJob {
-    pub(crate) query: String,
-    pub(crate) cancel: Arc<CancelToken>,
-    pub(crate) receiver: mpsc::Receiver<RealTextSearchJobOutput>,
-}
-
-impl Drop for RealTextSearchJob {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
-}
-
-pub(crate) struct RealTextSearchJobOutput {
-    pub(crate) query: String,
-    pub(crate) result: Result<(TextSearchResult, TextPageCache), String>,
-}
-
-pub(crate) struct RealObjectSearchJob {
-    pub(crate) query: String,
-    pub(crate) cancel: Arc<CancelToken>,
-    pub(crate) receiver: mpsc::Receiver<RealObjectSearchJobOutput>,
-}
-
-impl Drop for RealObjectSearchJob {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
-}
-
-pub(crate) struct RealObjectSearchJobOutput {
-    pub(crate) query: String,
-    pub(crate) result: Result<ObjectSearchResult, String>,
-}
-
-pub(crate) struct OpenPdfJob {
-    pub(crate) path: String,
-    pub(crate) receiver: mpsc::Receiver<OpenPdfJobOutput>,
-}
-
-pub(crate) struct OpenPdfJobOutput {
-    pub(crate) path: String,
-    pub(crate) result: Result<OpenPdfJobResult, String>,
-}
+pub(crate) type RealRenderJob = BackgroundJob<RealRenderKey, RenderResult>;
+pub(crate) type RealStreamJob = BackgroundJob<RealStreamKey, StreamChunk>;
+pub(crate) type RealTextSearchJob = BackgroundJob<String, (TextSearchResult, TextPageCache)>;
+pub(crate) type RealObjectSearchJob = BackgroundJob<String, ObjectSearchResult>;
+pub(crate) type OpenPdfJob = BackgroundJob<String, OpenPdfJobResult>;
 
 pub(crate) enum OpenPdfJobResult {
     Opened(Box<OpenedPdfModel>),

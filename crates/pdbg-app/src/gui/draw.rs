@@ -219,26 +219,17 @@ impl GuiShellApp {
         if let Some(job) = self.open_pdf_job.take() {
             self.status_log.push(format!(
                 "discarded pending open {}",
-                display_file_chip_label(&job.path)
+                display_file_chip_label(job.key())
             ));
         }
 
         let worker_path = path.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = open_pdf_worker_result(worker_path.clone(), password);
-            let _ = sender.send(OpenPdfJobOutput {
-                path: worker_path,
-                result,
-            });
-        });
-
+        self.open_pdf_job = Some(BackgroundJob::spawn_uncancellable(
+            path.clone(),
+            move || open_pdf_worker_result(worker_path, password),
+        ));
         self.open_pdf_path_input = path.clone();
         self.open_pdf_error = None;
-        self.open_pdf_job = Some(OpenPdfJob {
-            path: path.clone(),
-            receiver,
-        });
         self.status_log
             .push(format!("opening {}", display_file_chip_label(&path)));
     }
@@ -248,51 +239,43 @@ impl GuiShellApp {
             self.open_pdf_error = Some("open cancelled".to_string());
             self.status_log.push(format!(
                 "discarded pending open {}",
-                display_file_chip_label(&job.path)
+                display_file_chip_label(job.key())
             ));
         }
     }
 
     pub(crate) fn poll_open_pdf_job(&mut self) {
-        let Some(polled) =
-            self.open_pdf_job
-                .as_ref()
-                .and_then(|job| match job.receiver.try_recv() {
-                    Ok(output) => Some(Ok(output)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.path.clone())),
-                })
-        else {
-            return;
-        };
-
-        self.open_pdf_job = None;
-        match polled {
-            Ok(output) => match output.result {
-                Ok(OpenPdfJobResult::Opened(model)) => {
-                    self.apply_opened_pdf_model(*model);
-                    self.open_pdf_path_input = output.path.clone();
-                    self.open_pdf_password_input.clear();
-                    self.open_pdf_dialog_open = false;
-                    self.open_pdf_error = None;
-                    self.record_recent_pdf_path(&output.path);
+        match self.open_pdf_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.open_pdf_job = None;
+                match output.result {
+                    Ok(OpenPdfJobResult::Opened(model)) => {
+                        self.apply_opened_pdf_model(*model);
+                        self.open_pdf_path_input = output.key.clone();
+                        self.open_pdf_password_input.clear();
+                        self.open_pdf_dialog_open = false;
+                        self.open_pdf_error = None;
+                        self.record_recent_pdf_path(&output.key);
+                    }
+                    Ok(OpenPdfJobResult::NeedsPassword) => {
+                        self.open_pdf_path_input = output.key;
+                        self.open_pdf_dialog_open = true;
+                        self.open_pdf_error = Some("Password required".to_string());
+                        self.status_log
+                            .push("document requires a password before inspection".to_string());
+                    }
+                    Err(err) => {
+                        self.open_pdf_error = Some(err.clone());
+                        self.status_log.push(format!(
+                            "failed to open {}: {err}",
+                            display_file_chip_label(&output.key)
+                        ));
+                    }
                 }
-                Ok(OpenPdfJobResult::NeedsPassword) => {
-                    self.open_pdf_path_input = output.path;
-                    self.open_pdf_dialog_open = true;
-                    self.open_pdf_error = Some("Password required".to_string());
-                    self.status_log
-                        .push("document requires a password before inspection".to_string());
-                }
-                Err(err) => {
-                    self.open_pdf_error = Some(err.clone());
-                    self.status_log.push(format!(
-                        "failed to open {}: {err}",
-                        display_file_chip_label(&output.path)
-                    ));
-                }
-            },
-            Err(path) => {
+            }
+            Some(JobPoll::Disconnected(path)) => {
+                self.open_pdf_job = None;
                 self.open_pdf_error = Some("open worker disconnected".to_string());
                 self.status_log.push(format!(
                     "open {} worker disconnected",
@@ -363,22 +346,14 @@ impl GuiShellApp {
     }
 
     pub(crate) fn cancel_inflight_document_jobs(&mut self) {
+        // Dropping cancellable BackgroundJobs cancels their tokens; open jobs
+        // are uncancellable and just detached from the UI state.
         self.open_pdf_job = None;
-        if let Some(job) = self.real_stream_job.take() {
-            job.cancel.cancel();
-        }
-        if let Some(job) = self.hex_job.take() {
-            job.cancel.cancel();
-        }
-        if let Some(job) = self.real_render_job.take() {
-            job.cancel.cancel();
-        }
-        if let Some(job) = self.object_search_job.take() {
-            job.cancel.cancel();
-        }
-        if let Some(job) = self.text_search_job.take() {
-            job.cancel.cancel();
-        }
+        self.real_stream_job = None;
+        self.hex_job = None;
+        self.real_render_job = None;
+        self.object_search_job = None;
+        self.text_search_job = None;
     }
 
     pub(crate) fn record_recent_pdf_path(&mut self, path: &str) {

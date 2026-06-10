@@ -1,5 +1,20 @@
 use super::*;
 
+/// Shared by the Stream tab and the Hex tab, which load windows of the same
+/// stream bytes with different keys.
+pub(crate) fn spawn_stream_load_job(state: &AppState, key: RealStreamKey) -> RealStreamJob {
+    let session = state.session.clone();
+    BackgroundJob::spawn(key, move |cancel| {
+        session
+            .run_task(|document| {
+                document.stream_load_with_cancel_token(
+                    key.object, key.mode, key.offset, key.limit, cancel,
+                )
+            })
+            .map_err(|err| err.message)
+    })
+}
+
 impl GuiShellApp {
     pub fn new() -> Self {
         Self::new_with_options(GuiRunOptions::default())
@@ -301,22 +316,12 @@ impl GuiShellApp {
             return;
         }
 
-        if let Some(job) = self.object_search_job.take() {
-            job.cancel.cancel();
-        }
+        self.object_search_job = None;
 
         let Ok(state) = self.state.as_ref() else {
             self.object_search_result = None;
             self.object_search_error = Some("document is not open".to_string());
             return;
-        };
-        let cancel = match CancelToken::new() {
-            Ok(cancel) => Arc::new(cancel),
-            Err(err) => {
-                self.object_search_result = None;
-                self.object_search_error = Some(err.message);
-                return;
-            }
         };
         let request = ObjectSearchRequest {
             query: query.clone(),
@@ -329,78 +334,56 @@ impl GuiShellApp {
             inspect_details: false,
         };
         let session = state.session.clone();
-        let worker_cancel = Arc::clone(&cancel);
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = session
-                .run_task(|document| {
-                    search_objects_with_cancel(document, &request, worker_cancel.as_ref())
-                })
-                .map_err(|err| err.message);
-            let _ = sender.send(RealObjectSearchJobOutput { query, result });
-        });
-
+        self.object_search_job = Some(BackgroundJob::spawn(query.clone(), move |cancel| {
+            session
+                .run_task(|document| search_objects_with_cancel(document, &request, cancel))
+                .map_err(|err| err.message)
+        }));
         self.object_search_result = None;
         self.object_search_error = None;
-        self.object_search_job = Some(RealObjectSearchJob {
-            query: self.object_search_query.trim().to_string(),
-            cancel,
-            receiver,
-        });
-        self.status_log.push(format!(
-            "queued object search {:?}",
-            self.object_search_query.trim()
-        ));
+        self.status_log
+            .push(format!("queued object search {query:?}"));
     }
 
     pub(crate) fn cancel_object_search_job(&mut self) {
         if let Some(job) = self.object_search_job.take() {
-            job.cancel.cancel();
             self.object_search_error = Some("object search cancelled".to_string());
             self.status_log
-                .push(format!("cancelled object search {:?}", job.query));
+                .push(format!("cancelled object search {:?}", job.key()));
         }
     }
 
     pub(crate) fn poll_object_search_job(&mut self) {
-        let Some(polled) =
-            self.object_search_job
-                .as_ref()
-                .and_then(|job| match job.receiver.try_recv() {
-                    Ok(output) => Some(Ok(output)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.query.clone())),
-                })
-        else {
-            return;
-        };
-
-        self.object_search_job = None;
-        match polled {
-            Ok(output) => match output.result {
-                Ok(result) => {
-                    self.status_log.push(format!(
-                        "object search {:?}: {} hits across {} nodes{}",
-                        output.query,
-                        result.hits.len(),
-                        result.searched_nodes,
-                        if result.truncated { " (truncated)" } else { "" }
-                    ));
-                    self.object_search_result = Some(result);
-                    self.object_search_error = None;
+        match self.object_search_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.object_search_job = None;
+                match output.result {
+                    Ok(result) => {
+                        self.status_log.push(format!(
+                            "object search {:?}: {} hits across {} nodes{}",
+                            output.key,
+                            result.hits.len(),
+                            result.searched_nodes,
+                            if result.truncated { " (truncated)" } else { "" }
+                        ));
+                        self.object_search_result = Some(result);
+                        self.object_search_error = None;
+                    }
+                    Err(err) => {
+                        self.object_search_result = None;
+                        self.object_search_error = Some(err.clone());
+                        self.status_log
+                            .push(format!("object search {:?} failed: {err}", output.key));
+                    }
                 }
-                Err(err) => {
-                    self.object_search_result = None;
-                    self.object_search_error = Some(err.clone());
-                    self.status_log
-                        .push(format!("object search {:?} failed: {err}", output.query));
-                }
-            },
-            Err(query) => {
+            }
+            Some(JobPoll::Disconnected(query)) => {
+                self.object_search_job = None;
                 self.object_search_result = None;
                 self.object_search_error = Some("object search worker disconnected".to_string());
                 self.status_log
-                    .push(format!("object search {:?} worker disconnected", query));
+                    .push(format!("object search {query:?} worker disconnected"));
             }
         }
     }
@@ -416,9 +399,7 @@ impl GuiShellApp {
             return;
         }
 
-        if let Some(job) = self.text_search_job.take() {
-            job.cancel.cancel();
-        }
+        self.text_search_job = None;
 
         let page_count = self.page_count();
         if page_count == 0 {
@@ -432,14 +413,6 @@ impl GuiShellApp {
             self.text_search_error = Some("document is not open".to_string());
             return;
         };
-        let cancel = match CancelToken::new() {
-            Ok(cancel) => Arc::new(cancel),
-            Err(err) => {
-                self.text_search_result = None;
-                self.text_search_error = Some(err.message);
-                return;
-            }
-        };
 
         let request = TextSearchRequest {
             query: query.clone(),
@@ -450,87 +423,67 @@ impl GuiShellApp {
             ..TextSearchRequest::new(query.clone())
         };
         let session = state.session.clone();
-        let worker_cancel = Arc::clone(&cancel);
         let mut cache = self.text_search_cache.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = session
+        self.text_search_job = Some(BackgroundJob::spawn(query.clone(), move |cancel| {
+            session
                 .run_task(|document| {
                     search_text_with_cache(page_count, &mut cache, &request, |text_request| {
-                        document
-                            .extract_text_with_cancel_token(text_request, worker_cancel.as_ref())
+                        document.extract_text_with_cancel_token(text_request, cancel)
                     })
                 })
                 .map(|result| (result, cache))
-                .map_err(|err| err.message);
-            let _ = sender.send(RealTextSearchJobOutput { query, result });
-        });
-
+                .map_err(|err| err.message)
+        }));
         self.text_search_result = None;
         self.text_search_error = None;
         self.selected_text_hit = None;
         self.selected_visual_hit = None;
-        self.text_search_job = Some(RealTextSearchJob {
-            query: self.text_search_query.trim().to_string(),
-            cancel,
-            receiver,
-        });
         self.status_log.push(format!(
-            "queued text search {:?} across up to {} pages",
-            self.text_search_query.trim(),
+            "queued text search {query:?} across up to {} pages",
             page_count.min(TEXT_SEARCH_MAX_PAGES)
         ));
     }
 
     pub(crate) fn cancel_text_search_job(&mut self) {
         if let Some(job) = self.text_search_job.take() {
-            job.cancel.cancel();
             self.text_search_error = Some("text search cancelled".to_string());
             self.status_log
-                .push(format!("cancelled text search {:?}", job.query));
+                .push(format!("cancelled text search {:?}", job.key()));
         }
     }
 
     pub(crate) fn poll_text_search_job(&mut self) {
-        let Some(polled) =
-            self.text_search_job
-                .as_ref()
-                .and_then(|job| match job.receiver.try_recv() {
-                    Ok(output) => Some(Ok(output)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.query.clone())),
-                })
-        else {
-            return;
-        };
-
-        self.text_search_job = None;
-        match polled {
-            Ok(output) => match output.result {
-                Ok((result, cache)) => {
-                    self.status_log.push(format!(
-                        "text search {:?}: {} hits across {} pages{}",
-                        output.query,
-                        result.hits.len(),
-                        result.searched_pages,
-                        if result.truncated { " (truncated)" } else { "" }
-                    ));
-                    self.text_search_cache = cache;
-                    self.text_search_result = Some(result);
-                    self.text_search_error = None;
+        match self.text_search_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.text_search_job = None;
+                match output.result {
+                    Ok((result, cache)) => {
+                        self.status_log.push(format!(
+                            "text search {:?}: {} hits across {} pages{}",
+                            output.key,
+                            result.hits.len(),
+                            result.searched_pages,
+                            if result.truncated { " (truncated)" } else { "" }
+                        ));
+                        self.text_search_cache = cache;
+                        self.text_search_result = Some(result);
+                        self.text_search_error = None;
+                    }
+                    Err(err) => {
+                        self.text_search_result = None;
+                        self.text_search_error = Some(err.clone());
+                        self.status_log
+                            .push(format!("text search {:?} failed: {err}", output.key));
+                    }
                 }
-                Err(err) => {
-                    self.text_search_result = None;
-                    self.text_search_error = Some(err.clone());
-                    self.status_log
-                        .push(format!("text search {:?} failed: {err}", output.query));
-                }
-            },
-            Err(query) => {
+            }
+            Some(JobPoll::Disconnected(query)) => {
+                self.text_search_job = None;
                 self.text_search_result = None;
                 self.text_search_error = Some("text search worker disconnected".to_string());
                 self.status_log
-                    .push(format!("text search {:?} worker disconnected", query));
+                    .push(format!("text search {query:?} worker disconnected"));
             }
         }
     }
@@ -654,9 +607,7 @@ impl GuiShellApp {
     }
 
     pub(crate) fn clear_real_stream_chunk(&mut self) {
-        if let Some(job) = self.real_stream_job.take() {
-            job.cancel.cancel();
-        }
+        self.real_stream_job = None;
         self.real_stream_key = None;
         self.real_stream_chunk = None;
         self.real_stream_windows.clear();
@@ -676,7 +627,7 @@ impl GuiShellApp {
         if self
             .real_stream_job
             .as_ref()
-            .is_some_and(|job| job.key == key)
+            .is_some_and(|job| *job.key() == key)
         {
             return;
         }
@@ -689,9 +640,7 @@ impl GuiShellApp {
         if self.real_stream_key == Some(key) && self.real_stream_job.is_some() {
             return;
         }
-        if let Some(job) = self.real_stream_job.take() {
-            job.cancel.cancel();
-        }
+        self.real_stream_job = None;
         self.real_stream_key = Some(key);
         if self.real_stream_windows.is_empty() {
             self.real_stream_chunk = None;
@@ -714,35 +663,7 @@ impl GuiShellApp {
             self.real_stream_error = Some("document is not open".to_string());
             return;
         };
-        let cancel = match CancelToken::new() {
-            Ok(cancel) => Arc::new(cancel),
-            Err(err) => {
-                self.real_stream_error = Some(err.message);
-                return;
-            }
-        };
-        let session = state.session.clone();
-        let worker_cancel = Arc::clone(&cancel);
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = session
-                .run_task(|document| {
-                    document.stream_load_with_cancel_token(
-                        key.object,
-                        key.mode,
-                        key.offset,
-                        key.limit,
-                        worker_cancel.as_ref(),
-                    )
-                })
-                .map_err(|err| err.message);
-            let _ = sender.send(RealStreamJobOutput { key, result });
-        });
-        self.real_stream_job = Some(RealStreamJob {
-            key,
-            cancel,
-            receiver,
-        });
+        self.real_stream_job = Some(spawn_stream_load_job(state, key));
         self.status_log.push(format!(
             "queued {} stream chunk {} {} R @ {}",
             stream_mode_label(key.mode),
@@ -754,15 +675,15 @@ impl GuiShellApp {
 
     pub(crate) fn cancel_real_stream_job(&mut self) {
         if let Some(job) = self.real_stream_job.take() {
-            job.cancel.cancel();
+            let key = *job.key();
             self.real_stream_chunk = None;
             self.real_stream_error = Some("stream chunk load cancelled".to_string());
             self.status_log.push(format!(
                 "cancelled {} stream chunk {} {} R @ {}",
-                stream_mode_label(job.key.mode),
-                job.key.object.num,
-                job.key.object.gen,
-                job.key.offset
+                stream_mode_label(key.mode),
+                key.object.num,
+                key.object.gen,
+                key.offset
             ));
         }
     }
@@ -832,21 +753,10 @@ impl GuiShellApp {
     }
 
     pub(crate) fn poll_real_stream_job(&mut self) {
-        let Some(polled) =
-            self.real_stream_job
-                .as_ref()
-                .and_then(|job| match job.receiver.try_recv() {
-                    Ok(output) => Some(Ok(output)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
-                })
-        else {
-            return;
-        };
-
-        self.real_stream_job = None;
-        match polled {
-            Ok(output) => {
+        match self.real_stream_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.real_stream_job = None;
                 if self.real_stream_key != Some(output.key) {
                     self.status_log.push(format!(
                         "discarded stale {} stream chunk {} {} R @ {}",
@@ -890,7 +800,8 @@ impl GuiShellApp {
                     }
                 }
             }
-            Err(key) => {
+            Some(JobPoll::Disconnected(key)) => {
+                self.real_stream_job = None;
                 if self.real_stream_key == Some(key) {
                     self.real_stream_chunk = None;
                     self.real_stream_error = Some("stream worker disconnected".to_string());
@@ -922,9 +833,7 @@ impl GuiShellApp {
         self.hex_key = Some(key);
         self.hex_chunk = None;
         self.hex_error = None;
-        if let Some(job) = self.hex_job.take() {
-            job.cancel.cancel();
-        }
+        self.hex_job = None;
 
         if key.mode == StreamMode::Decoded {
             if let Some(chunk) = self.decoded_stream_cache.get(&key) {
@@ -937,53 +846,14 @@ impl GuiShellApp {
             self.hex_error = Some("document is not open".to_string());
             return;
         };
-        let cancel = match CancelToken::new() {
-            Ok(cancel) => Arc::new(cancel),
-            Err(err) => {
-                self.hex_error = Some(err.message);
-                return;
-            }
-        };
-        let session = state.session.clone();
-        let worker_cancel = Arc::clone(&cancel);
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = session
-                .run_task(|document| {
-                    document.stream_load_with_cancel_token(
-                        key.object,
-                        key.mode,
-                        key.offset,
-                        key.limit,
-                        worker_cancel.as_ref(),
-                    )
-                })
-                .map_err(|err| err.message);
-            let _ = sender.send(RealStreamJobOutput { key, result });
-        });
-        self.hex_job = Some(RealStreamJob {
-            key,
-            cancel,
-            receiver,
-        });
+        self.hex_job = Some(spawn_stream_load_job(state, key));
     }
 
     pub(crate) fn poll_hex_job(&mut self) {
-        let Some(polled) = self
-            .hex_job
-            .as_ref()
-            .and_then(|job| match job.receiver.try_recv() {
-                Ok(output) => Some(Ok(output)),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
-            })
-        else {
-            return;
-        };
-
-        self.hex_job = None;
-        match polled {
-            Ok(output) => {
+        match self.hex_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.hex_job = None;
                 if self.hex_key != Some(output.key) {
                     return;
                 }
@@ -1001,7 +871,8 @@ impl GuiShellApp {
                     }
                 }
             }
-            Err(key) => {
+            Some(JobPoll::Disconnected(key)) => {
+                self.hex_job = None;
                 if self.hex_key == Some(key) {
                     self.hex_chunk = None;
                     self.hex_error = Some("hex view worker disconnected".to_string());
@@ -1014,9 +885,7 @@ impl GuiShellApp {
         self.hex_key = None;
         self.hex_chunk = None;
         self.hex_error = None;
-        if let Some(job) = self.hex_job.take() {
-            job.cancel.cancel();
-        }
+        self.hex_job = None;
     }
 
     pub(crate) fn reset_hex_state(&mut self) {
@@ -1667,9 +1536,7 @@ impl GuiShellApp {
         {
             return;
         }
-        if let Some(job) = self.real_render_job.take() {
-            job.cancel.cancel();
-        }
+        self.real_render_job = None;
         self.real_render_texture = None;
         self.real_render = None;
         self.real_render_error = None;
@@ -1691,30 +1558,13 @@ impl GuiShellApp {
             self.real_render_error = Some("document is not open".to_string());
             return;
         };
-        let cancel = match CancelToken::new() {
-            Ok(cancel) => Arc::new(cancel),
-            Err(err) => {
-                self.real_render_error = Some(err.message);
-                return;
-            }
-        };
-        let (sender, receiver) = mpsc::channel();
         let session = state.session.clone();
-        let worker_cancel = Arc::clone(&cancel);
-        thread::spawn(move || {
+        self.real_render_job = Some(BackgroundJob::spawn(key, move |cancel| {
             let request = key.request();
-            let result = session
-                .run_task(|document| {
-                    document.render_page_with_cancel_token(&request, worker_cancel.as_ref())
-                })
-                .map_err(|err| err.message);
-            let _ = sender.send(RealRenderJobOutput { key, result });
-        });
-        self.real_render_job = Some(RealRenderJob {
-            key,
-            cancel,
-            receiver,
-        });
+            session
+                .run_task(|document| document.render_page_with_cancel_token(&request, cancel))
+                .map_err(|err| err.message)
+        }));
         self.status_log.push(format!(
             "queued page {} @ {:.0}% rot {} render",
             key.page_index + 1,
@@ -1724,21 +1574,10 @@ impl GuiShellApp {
     }
 
     pub(crate) fn poll_real_render_job(&mut self) {
-        let Some(polled) =
-            self.real_render_job
-                .as_ref()
-                .and_then(|job| match job.receiver.try_recv() {
-                    Ok(output) => Some(Ok(output)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(job.key)),
-                })
-        else {
-            return;
-        };
-
-        self.real_render_job = None;
-        match polled {
-            Ok(output) => {
+        match self.real_render_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.real_render_job = None;
                 if self.current_render_key() != Some(output.key) {
                     self.status_log.push(format!(
                         "discarded stale page {} render",
@@ -1787,7 +1626,8 @@ impl GuiShellApp {
                     }
                 }
             }
-            Err(key) => {
+            Some(JobPoll::Disconnected(key)) => {
+                self.real_render_job = None;
                 if self.current_render_key() == Some(key) {
                     self.real_render = None;
                     self.real_render_error = Some("render worker disconnected".to_string());
@@ -1832,7 +1672,7 @@ impl GuiShellApp {
         if let Some(job) = &self.open_pdf_job {
             return format!(
                 "Opening {} - {APP_TITLE}",
-                display_file_chip_label(&job.path)
+                display_file_chip_label(job.key())
             );
         }
         if self.empty_workspace {
