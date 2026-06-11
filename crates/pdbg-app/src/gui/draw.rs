@@ -1332,18 +1332,30 @@ impl GuiShellApp {
         };
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("/{resource_name}"))
-                    .font(mono_font_id(DENSE_ROW_FONT_SIZE))
-                    .color(theme().accent),
-            );
-            ui.add_space(4.0);
-            if ui.button("Open XObject").clicked() {
-                self.select_xobject_resource_from_current_page(&resource_name);
-            }
-        });
-        ui.add_space(4.0);
+        egui::Frame::new()
+            .fill(theme().code_bg)
+            .stroke(egui::Stroke::new(1.0, theme().border))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("XObject").small().color(theme().muted));
+                    ui.label(
+                        RichText::new(format!("/{resource_name}"))
+                            .font(mono_font_id(DENSE_ROW_FONT_SIZE))
+                            .color(theme().accent),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Open XObject").clicked() {
+                            self.select_xobject_resource_from_stream_context(
+                                stream_object,
+                                &resource_name,
+                            );
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
     }
 
     pub(crate) fn draw_hex_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -2122,6 +2134,7 @@ impl GuiShellApp {
             && self.real_stream_chunk.is_none()
             && self.real_stream_job.is_none()
         {
+            self.real_stream_preset = real_stream_initial_preset(&stream);
             self.apply_real_stream_preset(&stream);
         }
 
@@ -2129,9 +2142,11 @@ impl GuiShellApp {
         let mut request_changed = false;
         let mut force_reload = false;
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream View", None);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("View").small().color(theme().muted));
+            section_header_with_controls(ui, "Stream View", |ui| {
+                if ui.button("Reload").clicked() {
+                    force_reload = true;
+                }
+                ui.add_space(6.0);
                 if segmented_control(
                     ui,
                     &mut self.real_stream_preset,
@@ -2141,10 +2156,6 @@ impl GuiShellApp {
                     ],
                 ) {
                     request_changed |= self.apply_real_stream_preset(&stream);
-                }
-                ui.add_space(6.0);
-                if ui.button("Reload").clicked() {
-                    force_reload = true;
                 }
             });
             ui.collapsing("Advanced", |ui| {

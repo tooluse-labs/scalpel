@@ -49,6 +49,31 @@ pub(crate) fn dict_entry_summary<'a>(
         .map(|entry| &entry.value)
 }
 
+pub(crate) fn resolve_xobject_resource_from_detail(
+    state: &AppState,
+    detail: &ObjectDetail,
+    resource_name: &str,
+) -> Result<(ObjectId, bool), String> {
+    let resources = dict_entry_summary(detail, "Resources")
+        .ok_or_else(|| "has no /Resources dictionary".to_string())?;
+    let resources_detail = load_object_detail(state, &resources.id)?;
+    let xobjects = dict_entry_summary(&resources_detail, "XObject")
+        .ok_or_else(|| "resources have no /XObject dictionary".to_string())?;
+    let xobjects_detail = load_object_detail(state, &xobjects.id)?;
+    let resource = dict_entry_summary(&xobjects_detail, resource_name)
+        .ok_or_else(|| format!("no /{resource_name} entry in /XObject resources"))?;
+    let object = resource
+        .object
+        .or_else(|| resource.id.object_id())
+        .ok_or_else(|| format!("/{resource_name} is not an indirect object"))?;
+    let detail = load_object_detail(state, &resource.id)?;
+    let is_image = detail
+        .stream
+        .as_ref()
+        .is_some_and(|stream| stream.image_preview_available);
+    Ok((object, is_image))
+}
+
 impl GuiShellApp {
     pub fn new() -> Self {
         Self::new_with_options(GuiRunOptions::default())
@@ -1304,45 +1329,99 @@ impl GuiShellApp {
         }
     }
 
-    pub(crate) fn select_xobject_resource_from_current_page(&mut self, resource_name: &str) {
-        match self.resolve_page_xobject_resource(self.render_page_index, resource_name) {
-            Ok((object, is_image)) => {
-                let Some(page_id) =
-                    self.ensure_tree_page_row(self.render_page_index)
-                        .and_then(|row| match &self.tree {
-                            TreeModel::Real(tree) => {
-                                tree.summary(row).map(|summary| summary.id.clone())
-                            }
-                            TreeModel::Virtual(_) => None,
-                        })
+    pub(crate) fn select_xobject_resource_from_stream_context(
+        &mut self,
+        stream_object: ObjectId,
+        resource_name: &str,
+    ) {
+        let page_index = self
+            .tree
+            .real_row_page_index(self.selected_row)
+            .unwrap_or(self.render_page_index);
+        match self.resolve_stream_xobject_resource(stream_object, Some(page_index), resource_name) {
+            Ok((object, is_image, source)) => {
+                let Some(doc) = self
+                    .state
+                    .as_ref()
+                    .ok()
+                    .and_then(|state| state.panels.summary.as_ref())
+                    .map(|summary| summary.doc.clone())
                 else {
-                    self.status_log.push(format!(
-                        "resolved /{} but page {} tree row is unavailable",
-                        resource_name,
-                        self.render_page_index + 1
-                    ));
+                    self.status_log
+                        .push(format!("resolved /{resource_name} but document is unavailable"));
                     return;
                 };
-                let row = self
-                    .tree
-                    .ensure_real_object_row(page_id.document_id(), object);
+                let row = self.tree.ensure_real_object_row(doc, object);
                 self.select_row_from_tree(row);
+                self.scroll_selected_tree_row = true;
                 self.selected_tab = InspectorTab::Stream;
                 self.status_log.push(format!(
-                    "selected /{} XObject {}{}",
+                    "selected /{} XObject {}{} from {}",
                     resource_name,
                     object_ref_text(object),
-                    if is_image { " image" } else { "" }
+                    if is_image { " image" } else { "" },
+                    source,
                 ));
             }
             Err(err) => {
                 self.status_log.push(format!(
-                    "cannot resolve /{} on page {}: {err}",
+                    "cannot resolve /{} near stream {}: {err}",
                     resource_name,
-                    self.render_page_index + 1
+                    object_ref_text(stream_object)
                 ));
             }
         }
+    }
+
+    pub(crate) fn resolve_stream_xobject_resource(
+        &mut self,
+        stream_object: ObjectId,
+        fallback_page_index: Option<usize>,
+        resource_name: &str,
+    ) -> Result<(ObjectId, bool, String), String> {
+        let state = self
+            .state
+            .as_ref()
+            .map_err(|err| format!("document is not open: {err}"))?;
+        let doc = state
+            .panels
+            .summary
+            .as_ref()
+            .map(|summary| summary.doc.clone())
+            .ok_or_else(|| "document summary is unavailable".to_string())?;
+
+        let stream_id = NodeId::XrefObject {
+            doc: doc.clone(),
+            object: stream_object,
+        };
+        let stream_result = load_object_detail(state, &stream_id)
+            .map_err(|err| err.to_string())
+            .and_then(|detail| resolve_xobject_resource_from_detail(state, &detail, resource_name));
+        if let Ok((object, is_image)) = stream_result {
+            return Ok((
+                object,
+                is_image,
+                format!("stream {}", object_ref_text(stream_object)),
+            ));
+        }
+
+        if let Some(page_index) = fallback_page_index {
+            match self.resolve_page_xobject_resource(page_index, resource_name) {
+                Ok((object, is_image)) => {
+                    return Ok((object, is_image, format!("page {}", page_index + 1)));
+                }
+                Err(page_err) => {
+                    return Err(format!(
+                        "stream resources: {}; page {} resources: {}",
+                        stream_result.unwrap_err(),
+                        page_index + 1,
+                        page_err
+                    ));
+                }
+            }
+        }
+
+        Err(format!("stream resources: {}", stream_result.unwrap_err()))
     }
 
     pub(crate) fn resolve_page_xobject_resource(
@@ -1367,24 +1446,8 @@ impl GuiShellApp {
             .as_ref()
             .map_err(|err| format!("document is not open: {err}"))?;
         let page_detail = load_object_detail(state, &page_id)?;
-        let resources = dict_entry_summary(&page_detail, "Resources")
-            .ok_or_else(|| "page has no /Resources dictionary".to_string())?;
-        let resources_detail = load_object_detail(state, &resources.id)?;
-        let xobjects = dict_entry_summary(&resources_detail, "XObject")
-            .ok_or_else(|| "page resources have no /XObject dictionary".to_string())?;
-        let xobjects_detail = load_object_detail(state, &xobjects.id)?;
-        let resource = dict_entry_summary(&xobjects_detail, resource_name)
-            .ok_or_else(|| format!("no /{resource_name} entry in page /XObject resources"))?;
-        let object = resource
-            .object
-            .or_else(|| resource.id.object_id())
-            .ok_or_else(|| format!("/{resource_name} is not an indirect object"))?;
-        let detail = load_object_detail(state, &resource.id)?;
-        let is_image = detail
-            .stream
-            .as_ref()
-            .is_some_and(|stream| stream.image_preview_available);
-        Ok((object, is_image))
+        resolve_xobject_resource_from_detail(state, &page_detail, resource_name)
+            .map_err(|err| format!("page {page_index} {err}"))
     }
 
     pub(crate) fn select_text_hit_for_preview_click(&mut self, click: PagePreviewClick) {

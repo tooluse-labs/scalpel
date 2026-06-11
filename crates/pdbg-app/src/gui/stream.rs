@@ -159,6 +159,14 @@ pub(crate) fn real_stream_preset_defaults(
     }
 }
 
+pub(crate) fn real_stream_initial_preset(stream: &StreamSummary) -> RealStreamPreset {
+    if stream.image_preview_available {
+        RealStreamPreset::Raw
+    } else {
+        RealStreamPreset::Nice
+    }
+}
+
 pub(crate) fn real_stream_default_limit(stream: &StreamSummary, mode: StreamMode) -> usize {
     let size_hint = match mode {
         StreamMode::Raw => stream.raw_size_hint,

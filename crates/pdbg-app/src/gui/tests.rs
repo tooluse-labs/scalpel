@@ -1413,6 +1413,22 @@ fn real_stream_view_presets_choose_nice_text_and_raw_hex() {
 }
 
 #[test]
+fn image_streams_default_to_raw_preset() {
+    let mut stream = StreamSummary {
+        object: ObjectId { num: 4, gen: 0 },
+        filters: vec!["DCTDecode".to_string()],
+        raw_size_hint: Some(1308),
+        decoded_size_hint: Some(17_400),
+        can_decode: true,
+        image_preview_available: true,
+    };
+    assert_eq!(real_stream_initial_preset(&stream), RealStreamPreset::Raw);
+
+    stream.image_preview_available = false;
+    assert_eq!(real_stream_initial_preset(&stream), RealStreamPreset::Nice);
+}
+
+#[test]
 fn render_result_color_image_compacts_padded_stride() {
     let render = RenderResult {
         page_index: 0,
@@ -2698,6 +2714,72 @@ fn synthetic_image_pdf() -> Vec<u8> {
     pdf.into_bytes()
 }
 
+#[cfg(feature = "real-mupdf")]
+fn synthetic_form_xobject_image_pdf() -> Vec<u8> {
+    fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+        offsets.push(pdf.len());
+        pdf.push_str(body);
+    }
+
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] \
+         /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 6 0 R >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "4 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\n\
+         stream\nAAABBBCCCDDD\nendstream\nendobj\n",
+    );
+    let form_stream = "/Im0 Do";
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        &format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 72 72] \
+             /Resources << /XObject << /Im0 4 0 R >> >> /Length {} >>\n\
+             stream\n{}\nendstream\nendobj\n",
+            form_stream.len(),
+            form_stream
+        ),
+    );
+    let page_stream = "q /Fm0 Do Q";
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        &format!(
+            "6 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            page_stream.len(),
+            page_stream
+        ),
+    );
+
+    let xref_offset = pdf.len();
+    pdf.push_str("xref\n0 7\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Root 1 0 R /Size 7 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
 #[test]
 fn export_file_names_pick_native_extensions() {
     let object = ObjectId { num: 7, gen: 0 };
@@ -2789,6 +2871,28 @@ fn selected_do_resource_resolves_to_image_xobject() {
 
     let err = app.resolve_page_xobject_resource(0, "Missing").unwrap_err();
     assert!(err.contains("no /Missing entry"), "got: {err}");
+
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[cfg(feature = "real-mupdf")]
+#[test]
+fn selected_do_resource_resolves_against_stream_resources_first() {
+    let pdf_path = write_temp_pdf("do-resource-form-xobject", &synthetic_form_xobject_image_pdf());
+    let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+        smoke_exit_after: None,
+        pdf_path: Some(pdf_path.to_string_lossy().to_string()),
+        recent_files_path: Some(temp_recent_file_path("gui-do-resource-form")),
+        start_empty_when_no_pdf: false,
+        render_max_dimension: None,
+    });
+
+    let (object, is_image, source) = app
+        .resolve_stream_xobject_resource(ObjectId { num: 5, gen: 0 }, Some(0), "Im0")
+        .unwrap();
+    assert_eq!(object, ObjectId { num: 4, gen: 0 });
+    assert!(is_image);
+    assert_eq!(source, "stream 5 0 R");
 
     let _ = std::fs::remove_file(&pdf_path);
 }
