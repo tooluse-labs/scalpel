@@ -70,6 +70,18 @@ pub trait ShimDocument {
         range: ChildRange,
     ) -> Result<ObjectDetail, ShimError>;
     fn xref_table(&mut self, range: ChildRange) -> Result<XrefTableSlice, ShimError>;
+    fn image_preview(
+        &mut self,
+        object: ObjectId,
+        max_dimension: u32,
+    ) -> Result<ImagePreview, ShimError>;
+    fn stream_save(
+        &mut self,
+        object: ObjectId,
+        mode: StreamMode,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<StreamSaveOutcome, ShimError>;
     fn stream_load(
         &mut self,
         object: ObjectId,
@@ -299,6 +311,36 @@ impl ShimDocument for OpenDocument {
         }
     }
 
+    fn image_preview(
+        &mut self,
+        object: ObjectId,
+        max_dimension: u32,
+    ) -> Result<ImagePreview, ShimError> {
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.image_preview(object, max_dimension, ptr::null_mut())
+            }
+            OpenDocumentBackend::Fake(doc) => doc.image_preview(object, max_dimension),
+        }
+    }
+
+    fn stream_save(
+        &mut self,
+        object: ObjectId,
+        mode: StreamMode,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<StreamSaveOutcome, ShimError> {
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.stream_save(object, mode, path, max_bytes, ptr::null_mut())
+            }
+            OpenDocumentBackend::Fake(doc) => doc.stream_save(object, mode, path, max_bytes, None),
+        }
+    }
+
     fn stream_load(
         &mut self,
         object: ObjectId,
@@ -374,6 +416,43 @@ impl OpenDocument {
             ),
             OpenDocumentBackend::Fake(doc) => {
                 doc.stream_load(object, mode, offset, limit, Some(cancel))
+            }
+        }
+    }
+
+    pub fn stream_save_with_cancel_token(
+        &mut self,
+        object: ObjectId,
+        mode: StreamMode,
+        path: &str,
+        max_bytes: u64,
+        cancel: &CancelToken,
+    ) -> Result<StreamSaveOutcome, ShimError> {
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.stream_save(object, mode, path, max_bytes, cancel.as_mut_ptr())
+            }
+            OpenDocumentBackend::Fake(doc) => {
+                doc.stream_save(object, mode, path, max_bytes, Some(cancel))
+            }
+        }
+    }
+
+    pub fn image_preview_with_cancel_token(
+        &mut self,
+        object: ObjectId,
+        max_dimension: u32,
+        cancel: &CancelToken,
+    ) -> Result<ImagePreview, ShimError> {
+        match &self.backend {
+            #[cfg(feature = "real-mupdf")]
+            OpenDocumentBackend::Real(doc) => {
+                doc.image_preview(object, max_dimension, cancel.as_mut_ptr())
+            }
+            OpenDocumentBackend::Fake(doc) => {
+                let _ = cancel;
+                doc.image_preview(object, max_dimension)
             }
         }
     }
@@ -601,6 +680,17 @@ impl FakeDoc {
         }
     }
 
+    fn image_preview(
+        &self,
+        _object: ObjectId,
+        _max_dimension: u32,
+    ) -> Result<ImagePreview, ShimError> {
+        Err(ShimError::new(
+            raw::pdbg_status::PDBG_ERROR_UNSUPPORTED,
+            "fake shim has no image preview",
+        ))
+    }
+
     fn stream_load(
         &self,
         _object: ObjectId,
@@ -632,6 +722,43 @@ impl FakeDoc {
                 "fake stream diagnostic",
                 None,
             )],
+        })
+    }
+
+    fn stream_save(
+        &self,
+        _object: ObjectId,
+        mode: StreamMode,
+        path: &str,
+        max_bytes: u64,
+        cancel: Option<&CancelToken>,
+    ) -> Result<StreamSaveOutcome, ShimError> {
+        check_fake_cancel(cancel)?;
+        let bytes: &[u8] = match mode {
+            StreamMode::Raw => b"fake stream bytes",
+            StreamMode::Decoded => b"fake decoded stream expands beyond the configured cap",
+        };
+        let capped = max_bytes > 0 && (bytes.len() as u64) > max_bytes;
+        let write_len = if capped {
+            max_bytes as usize
+        } else {
+            bytes.len()
+        };
+        // Mirror the real shim: temp file + rename so failures never clobber
+        // an existing destination.
+        let tmp_path = format!("{path}.pdbg-tmp");
+        std::fs::write(&tmp_path, &bytes[..write_len])
+            .map_err(|err| ShimError::new(raw::pdbg_status::PDBG_ERROR_GENERIC, err.to_string()))?;
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                err.to_string(),
+            ));
+        }
+        Ok(StreamSaveOutcome {
+            bytes_written: write_len as u64,
+            capped,
         })
     }
 
@@ -1181,6 +1308,67 @@ impl PdbgDoc {
         }
     }
 
+    fn image_preview(
+        &self,
+        object: ObjectId,
+        max_dimension: u32,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<ImagePreview, ShimError> {
+        unsafe {
+            let mut image = ptr::null_mut();
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_image_object_load(
+                self.raw.as_ptr(),
+                wire::raw_object_id(object),
+                max_dimension,
+                0,
+                cancel,
+                &mut image,
+                &mut err,
+            );
+            check_status(status, &err)?;
+            let image = PdbgImage::new(image)?;
+            image.to_image_preview()
+        }
+    }
+
+    fn stream_save(
+        &self,
+        object: ObjectId,
+        mode: StreamMode,
+        path: &str,
+        max_bytes: u64,
+        cancel: *mut raw::pdbg_cancel_token,
+    ) -> Result<StreamSaveOutcome, ShimError> {
+        let path = CString::new(path).map_err(|_| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_GENERIC,
+                "export path contains a NUL byte",
+            )
+        })?;
+        unsafe {
+            let mut bytes_written = 0u64;
+            let mut capped = 0i32;
+            let mut err = raw::pdbg_error::default();
+            let status = raw::pdbg_stream_save(
+                self.raw.as_ptr(),
+                wire::raw_object_id(object),
+                matches!(mode, StreamMode::Decoded) as i32,
+                path.as_ptr(),
+                max_bytes,
+                cancel,
+                &mut bytes_written,
+                &mut capped,
+                &mut err,
+            );
+            check_status(status, &err)?;
+            Ok(StreamSaveOutcome {
+                bytes_written,
+                capped: capped != 0,
+            })
+        }
+    }
+
     fn stream_load(
         &self,
         registry: &NodeTokenRegistry,
@@ -1470,6 +1658,38 @@ impl PdbgImage {
             stride,
             pixels_rgba,
             duration_ms: 0,
+            diagnostics,
+        })
+    }
+
+    unsafe fn to_image_preview(&self) -> Result<ImagePreview, ShimError> {
+        let width = raw::pdbg_image_width(self.raw.as_ptr());
+        let height = raw::pdbg_image_height(self.raw.as_ptr());
+        let stride = raw::pdbg_image_stride(self.raw.as_ptr());
+        let byte_len = stride.checked_mul(height as usize).ok_or_else(|| {
+            ShimError::new(
+                raw::pdbg_status::PDBG_ERROR_LIMIT,
+                "image output byte size overflow",
+            )
+        })?;
+        let pixels_rgba =
+            wire::copy_bytes(raw::pdbg_image_rgba_pixels(self.raw.as_ptr()), byte_len);
+        let diagnostic_count = raw::pdbg_image_diagnostic_count(self.raw.as_ptr());
+        let mut diagnostics = Vec::with_capacity(diagnostic_count);
+        for index in 0..diagnostic_count {
+            let mut diagnostic = std::mem::zeroed::<raw::pdbg_diagnostic>();
+            let mut err = raw::pdbg_error::default();
+            if raw::pdbg_image_diagnostic_get(self.raw.as_ptr(), index, &mut diagnostic, &mut err)
+                == raw::pdbg_status::PDBG_OK
+            {
+                diagnostics.push(wire::diagnostic(&diagnostic, &|_| None));
+            }
+        }
+        Ok(ImagePreview {
+            width,
+            height,
+            stride,
+            pixels_rgba,
             diagnostics,
         })
     }
@@ -2863,6 +3083,392 @@ mod tests {
             "trailer\n<< /Root 1 0 R /Size 4 /Prev {first_xref} >>\nstartxref\n{second_xref}\n%%EOF\n"
         ));
         pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_image_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] \
+             /Resources << /XObject << /Im0 4 0 R >> >> >>\nendobj\n",
+        );
+        // 2x2 uncompressed RGB image; pixel bytes chosen ASCII-safe.
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\n\
+             stream\nAAABBBCCCDDD\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[test]
+    fn fake_shim_stream_save_writes_and_caps() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let object = ObjectId { num: 2, gen: 0 };
+        let path = std::env::temp_dir().join(format!(
+            "pdbg-fake-save-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_str = path.to_string_lossy().into_owned();
+
+        let outcome = doc
+            .stream_save(object, StreamMode::Raw, &path_str, 0)
+            .unwrap();
+        assert_eq!(outcome.bytes_written, 17);
+        assert!(!outcome.capped);
+        assert_eq!(std::fs::read(&path).unwrap(), b"fake stream bytes");
+
+        let capped = doc
+            .stream_save(object, StreamMode::Raw, &path_str, 5)
+            .unwrap();
+        assert_eq!(capped.bytes_written, 5);
+        assert!(capped.capped);
+        assert_eq!(std::fs::read(&path).unwrap(), b"fake ");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fake_shim_image_preview_is_unsupported() {
+        let shim = FakeShim::new().unwrap();
+        let mut doc = shim.open_document("fake.pdf").unwrap();
+        let err = doc
+            .image_preview(ObjectId { num: 2, gen: 0 }, 64)
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_large_stream_pdf(stream_len: usize) -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>\nendobj\n",
+        );
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("4 0 obj\n<< /Length {stream_len} >>\nstream\n"));
+        pdf.push_str(&"A".repeat(stream_len));
+        pdf.push_str("\nendstream\nendobj\n");
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn temp_save_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pdbg-save-{}-{}-{}.bin",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_stream_save_streams_large_objects_in_one_pass() {
+        // 200 KB forces several 64 KB read iterations inside pdbg_stream_save.
+        let stream_len = 200_000usize;
+        let pdf_path =
+            write_temp_real_pdf("stream-save-large", &synthetic_large_stream_pdf(stream_len));
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document(pdf_path.to_string_lossy().as_ref())
+            .unwrap();
+        let object = ObjectId { num: 4, gen: 0 };
+
+        let raw_path = temp_save_path("raw");
+        let outcome = doc
+            .stream_save(object, StreamMode::Raw, &raw_path.to_string_lossy(), 0)
+            .unwrap();
+        assert_eq!(outcome.bytes_written, stream_len as u64);
+        assert!(!outcome.capped);
+        let written = std::fs::read(&raw_path).unwrap();
+        assert_eq!(written.len(), stream_len);
+        assert!(written.iter().all(|byte| *byte == b'A'));
+
+        // No filter: the decoded branch must produce identical bytes.
+        let decoded_path = temp_save_path("decoded");
+        let decoded = doc
+            .stream_save(
+                object,
+                StreamMode::Decoded,
+                &decoded_path.to_string_lossy(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(decoded.bytes_written, stream_len as u64);
+        assert_eq!(std::fs::read(&decoded_path).unwrap(), written);
+
+        let _ = std::fs::remove_file(&raw_path);
+        let _ = std::fs::remove_file(&decoded_path);
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_stream_save_honors_cap_cancel_and_rejects_non_streams() {
+        let stream_len = 100_000usize;
+        let pdf_path =
+            write_temp_real_pdf("stream-save-edges", &synthetic_large_stream_pdf(stream_len));
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document(pdf_path.to_string_lossy().as_ref())
+            .unwrap();
+        let object = ObjectId { num: 4, gen: 0 };
+
+        // Size cap: stops exactly at max_bytes and reports it.
+        let capped_path = temp_save_path("capped");
+        let capped = doc
+            .stream_save(
+                object,
+                StreamMode::Raw,
+                &capped_path.to_string_lossy(),
+                1000,
+            )
+            .unwrap();
+        assert_eq!(capped.bytes_written, 1000);
+        assert!(capped.capped);
+        assert_eq!(std::fs::read(&capped_path).unwrap().len(), 1000);
+
+        // Cancellation: fails with CANCELLED and removes the partial file.
+        let cancelled_path = temp_save_path("cancelled");
+        let token = CancelToken::new().unwrap();
+        token.cancel();
+        let err = doc
+            .stream_save_with_cancel_token(
+                object,
+                StreamMode::Raw,
+                &cancelled_path.to_string_lossy(),
+                0,
+                &token,
+            )
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_CANCELLED);
+        assert!(!cancelled_path.exists());
+
+        // Non-stream object: rejected without creating a file.
+        let rejected_path = temp_save_path("rejected");
+        let err = doc
+            .stream_save(
+                ObjectId { num: 1, gen: 0 },
+                StreamMode::Raw,
+                &rejected_path.to_string_lossy(),
+                0,
+            )
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+        assert!(!rejected_path.exists());
+
+        let _ = std::fs::remove_file(&capped_path);
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[cfg(all(feature = "real-mupdf", unix))]
+    #[test]
+    fn real_mupdf_stream_save_replaces_path_without_following_symlink() {
+        let pdf_path = write_temp_real_pdf("stream-save-symlink", &synthetic_large_stream_pdf(6));
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document(pdf_path.to_string_lossy().as_ref())
+            .unwrap();
+        let protected_path = temp_save_path("protected");
+        let target_path = temp_save_path("symlink-target");
+        std::fs::write(&protected_path, b"keep me").unwrap();
+        let _ = std::fs::remove_file(&target_path);
+        std::os::unix::fs::symlink(&protected_path, &target_path).unwrap();
+
+        // A direct fopen(path, "wb") follows the symlink and corrupts the
+        // protected file. The export path must write a sibling temp file and
+        // rename it over the selected path instead.
+        let object = ObjectId { num: 4, gen: 0 };
+        let outcome = doc
+            .stream_save(object, StreamMode::Raw, &target_path.to_string_lossy(), 0)
+            .unwrap();
+        assert_eq!(outcome.bytes_written, 6);
+        assert_eq!(std::fs::read(&protected_path).unwrap(), b"keep me");
+        assert!(!std::fs::symlink_metadata(&target_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"AAAAAA");
+
+        let _ = std::fs::remove_file(&protected_path);
+        let _ = std::fs::remove_file(&target_path);
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_gray_image_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] \
+             /Resources << /XObject << /Im0 4 0 R >> >> >>\nendobj\n",
+        );
+        // 2x2 grayscale: two dark pixels, two light pixels.
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\n  zz\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_image_preview_converts_gray_colorspace() {
+        let pdf_path = write_temp_real_pdf("gray-image", &synthetic_gray_image_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document(pdf_path.to_string_lossy().as_ref())
+            .unwrap();
+
+        let preview = doc.image_preview(ObjectId { num: 4, gen: 0 }, 64).unwrap();
+        assert_eq!((preview.width, preview.height), (2, 2));
+        assert_eq!(preview.pixels_rgba.len(), 16);
+        for pixel in preview.pixels_rgba.chunks(4) {
+            // Gray converts to R == G == B with synthesized opaque alpha.
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], 0xFF);
+        }
+        // Dark pixels (0x20) and light pixels (0x7A) stay distinguishable.
+        assert_ne!(preview.pixels_rgba[0], preview.pixels_rgba[8]);
+
+        drop(doc);
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_decodes_image_object_preview() {
+        let path = write_temp_real_pdf("image-preview", &synthetic_image_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let summary = doc.summary().unwrap();
+        let image_object = ObjectId { num: 4, gen: 0 };
+        let node = NodeId::XrefObject {
+            doc: summary.doc.clone(),
+            object: image_object,
+        };
+        let detail = doc
+            .object_detail(
+                &node,
+                ChildRange {
+                    offset: 0,
+                    limit: 8,
+                },
+            )
+            .unwrap();
+        let stream = detail.stream.expect("image object has a stream");
+        assert!(stream.image_preview_available);
+
+        let preview = doc.image_preview(image_object, 64).unwrap();
+        assert_eq!((preview.width, preview.height), (2, 2));
+        assert_eq!(preview.stride, 8);
+        assert_eq!(preview.pixels_rgba.len(), 16);
+        // First pixel: bytes 'AAA' with synthesized opaque alpha.
+        assert_eq!(&preview.pixels_rgba[0..4], &[0x41, 0x41, 0x41, 0xFF]);
+
+        // Non-image objects are rejected rather than decoded.
+        let err = doc
+            .image_preview(ObjectId { num: 1, gen: 0 }, 64)
+            .unwrap_err();
+        assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_UNSUPPORTED);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "real-mupdf")]

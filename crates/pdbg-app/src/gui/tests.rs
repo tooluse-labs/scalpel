@@ -2556,6 +2556,181 @@ fn synthetic_large_xref_pdf(object_count: usize) -> Vec<u8> {
 }
 
 #[cfg(feature = "real-mupdf")]
+fn synthetic_image_pdf() -> Vec<u8> {
+    fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+        offsets.push(pdf.len());
+        pdf.push_str(body);
+    }
+
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] \
+         /Resources << /XObject << /Im0 4 0 R >> >> >>\nendobj\n",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        "4 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\n\
+         stream\nAAABBBCCCDDD\nendstream\nendobj\n",
+    );
+
+    let xref_offset = pdf.len();
+    pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
+#[test]
+fn export_file_names_pick_native_extensions() {
+    let object = ObjectId { num: 7, gen: 0 };
+    assert_eq!(
+        suggested_export_file_name(object, StreamMode::Raw, &["DCTDecode".to_string()]),
+        "object-7-0-raw.jpg"
+    );
+    assert_eq!(
+        suggested_export_file_name(object, StreamMode::Raw, &["JPXDecode".to_string()]),
+        "object-7-0-raw.jp2"
+    );
+    assert_eq!(
+        suggested_export_file_name(object, StreamMode::Raw, &["FlateDecode".to_string()]),
+        "object-7-0-raw.bin"
+    );
+    assert_eq!(
+        suggested_export_file_name(
+            object,
+            StreamMode::Raw,
+            &["FlateDecode".to_string(), "DCTDecode".to_string()]
+        ),
+        "object-7-0-raw.bin"
+    );
+    assert_eq!(
+        suggested_export_file_name(object, StreamMode::Decoded, &["DCTDecode".to_string()]),
+        "object-7-0-decoded.bin"
+    );
+}
+
+#[cfg(feature = "real-mupdf")]
+#[test]
+fn stream_export_writes_full_raw_bytes_to_file() {
+    let pdf_path = write_temp_pdf("export-src", &synthetic_image_pdf());
+    let state = open_app_state(Some(pdf_path.to_string_lossy().as_ref()), None).unwrap();
+    let out_path = std::env::temp_dir().join(format!(
+        "pdbg-export-{}-{}.bin",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let key = StreamExportKey {
+        object: ObjectId { num: 4, gen: 0 },
+        mode: StreamMode::Raw,
+        path: out_path.to_string_lossy().into_owned(),
+    };
+    let cancel = CancelToken::new().unwrap();
+    let outcome = stream_export_worker(state.session.clone(), &key, &cancel).unwrap();
+
+    assert_eq!(outcome.bytes_written, 12);
+    assert!(!outcome.capped);
+    assert_eq!(std::fs::read(&out_path).unwrap(), b"AAABBBCCCDDD");
+
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[cfg(feature = "real-mupdf")]
+#[test]
+fn stream_export_into_missing_directory_fails_cleanly() {
+    let pdf_path = write_temp_pdf("export-badpath", &synthetic_image_pdf());
+    let state = open_app_state(Some(pdf_path.to_string_lossy().as_ref()), None).unwrap();
+    let out_path = std::env::temp_dir()
+        .join(format!("pdbg-no-such-dir-{}", std::process::id()))
+        .join("export.bin");
+
+    let key = StreamExportKey {
+        object: ObjectId { num: 4, gen: 0 },
+        mode: StreamMode::Raw,
+        path: out_path.to_string_lossy().into_owned(),
+    };
+    let cancel = CancelToken::new().unwrap();
+    let err = stream_export_worker(state.session.clone(), &key, &cancel).unwrap_err();
+    assert!(err.contains("cannot create export file"), "got: {err}");
+    assert!(!out_path.exists());
+
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[cfg(feature = "real-mupdf")]
+#[test]
+fn image_preview_decodes_for_image_objects() {
+    let pdf_path = write_temp_pdf("image-preview-gui", &synthetic_image_pdf());
+    let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+        smoke_exit_after: None,
+        pdf_path: Some(pdf_path.to_string_lossy().to_string()),
+        recent_files_path: Some(temp_recent_file_path("gui-isolated")),
+        start_empty_when_no_pdf: false,
+        render_max_dimension: None,
+    });
+
+    let image_object = ObjectId { num: 4, gen: 0 };
+    app.ensure_image_preview(image_object);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.image_preview_job.is_some() && Instant::now() < deadline {
+        app.poll_image_preview_job();
+        if app.image_preview_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    app.poll_image_preview_job();
+
+    let (object, preview) = app
+        .image_preview_result
+        .as_ref()
+        .expect("image preview should decode");
+    assert_eq!(*object, image_object);
+    assert_eq!((preview.width, preview.height), (2, 2));
+    assert_eq!(&preview.pixels_rgba[0..4], &[0x41, 0x41, 0x41, 0xFF]);
+
+    // Re-keying to a non-image object reports an error instead of a preview.
+    app.ensure_image_preview(ObjectId { num: 1, gen: 0 });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.image_preview_job.is_some() && Instant::now() < deadline {
+        app.poll_image_preview_job();
+        if app.image_preview_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    app.poll_image_preview_job();
+    assert!(app.image_preview_result.is_none());
+    assert!(app
+        .image_preview_error
+        .as_ref()
+        .is_some_and(|(object, _)| object.num == 1));
+
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[cfg(feature = "real-mupdf")]
 fn synthetic_two_page_pdf() -> Vec<u8> {
     let mut pdf = String::from("%PDF-1.7\n");
     let mut offsets = vec![0usize; 7];

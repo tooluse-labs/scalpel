@@ -6,10 +6,11 @@ use pdbg_core::{
     build_markdown_report, diagnostics_payload_to_json_string, escape_pdf_text,
     search_objects_with_cancel, search_text_with_cache, CancelToken, ChildContainer, ChildPage,
     ChildRange, DiagnosticCode, DiagnosticFilter, DiagnosticSeverity, DiagnosticSummary,
-    DocumentDiagnostics, EgressFormat, EscapedText, MarkdownReportInput, NodeId, NodePathSegment,
-    ObjectDetail, ObjectId, ObjectKind, ObjectSearchField, ObjectSearchHit, ObjectSearchRequest,
-    ObjectSearchResult, ObjectSummary, ObjectValue, PageRect, RenderRequest, RenderResult,
-    RenderResultCache, ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSummary,
+    DocumentDiagnostics, DocumentSession, EgressFormat, EscapedText, ImagePreview,
+    MarkdownReportInput, NodeId, NodePathSegment, ObjectDetail, ObjectId, ObjectKind,
+    ObjectSearchField, ObjectSearchHit, ObjectSearchRequest, ObjectSearchResult, ObjectSummary,
+    ObjectValue, OpenDocument, PageRect, RenderRequest, RenderResult, RenderResultCache,
+    ShimDocument, StreamChunk, StreamChunkCache, StreamMode, StreamSaveOutcome, StreamSummary,
     StreamViewMode, TextPage, TextPageCache, TextRequest, TextSearchHit, TextSearchRequest,
     TextSearchResult, TextSpan, VisualElement, VisualElementKind, VisualPage, VisualRequest,
     XrefEntryInfo, XrefEntryKind, XrefTableSlice,
@@ -36,6 +37,10 @@ mod tests;
 mod theme;
 mod tree;
 
+// app.rs mostly holds GuiShellApp impl blocks; its free helpers are only
+// referenced by name from tests.
+#[cfg(test)]
+use app::*;
 use files::*;
 use jobs::*;
 use labels::*;
@@ -86,6 +91,9 @@ const RECENT_PDF_MAX_ITEMS: usize = 10;
 const XREF_PAGE_SIZE: usize = 256;
 const HEX_VIEW_WINDOW_BYTES: usize = 4096;
 const HEX_VIEW_BYTES_PER_ROW: usize = 16;
+const IMAGE_PREVIEW_MAX_DIMENSION: u32 = 1024;
+const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 280.0;
+const STREAM_EXPORT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
@@ -230,6 +238,11 @@ pub struct GuiShellApp {
     hex_job: Option<RealStreamJob>,
     hex_chunk: Option<StreamChunk>,
     hex_error: Option<String>,
+    image_preview_job: Option<ImagePreviewJob>,
+    image_preview_result: Option<(ObjectId, ImagePreview)>,
+    image_preview_error: Option<(ObjectId, String)>,
+    image_preview_texture: Option<(ObjectId, egui::TextureHandle)>,
+    stream_export_job: Option<StreamExportJob>,
     diagnostic_min_severity: Option<DiagnosticSeverity>,
     diagnostic_code_filter: String,
     copied_excerpt: Option<EscapedText>,
@@ -253,6 +266,8 @@ impl eframe::App for GuiShellApp {
         self.poll_open_pdf_job();
         self.poll_real_stream_job();
         self.poll_hex_job();
+        self.poll_image_preview_job();
+        self.poll_stream_export_job();
         self.poll_real_render_job();
         self.poll_object_search_job();
         self.poll_text_search_job();
@@ -261,6 +276,8 @@ impl eframe::App for GuiShellApp {
         if self.open_pdf_job.is_some()
             || self.real_stream_job.is_some()
             || self.hex_job.is_some()
+            || self.image_preview_job.is_some()
+            || self.stream_export_job.is_some()
             || self.real_render_job.is_some()
             || self.object_search_job.is_some()
             || self.text_search_job.is_some()

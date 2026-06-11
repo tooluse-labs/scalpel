@@ -519,6 +519,28 @@ unsafe extern "C" {
         err: *mut pdbg_error,
     ) -> pdbg_status;
 
+    pub fn pdbg_image_object_load(
+        doc: *mut pdbg_doc,
+        object: pdbg_object_id,
+        max_dimension: u32,
+        max_output_bytes: u64,
+        cancel: *mut pdbg_cancel_token,
+        out: *mut *mut pdbg_image,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+
+    pub fn pdbg_stream_save(
+        doc: *mut pdbg_doc,
+        object: pdbg_object_id,
+        decoded: c_int,
+        path: *const c_char,
+        max_bytes: u64,
+        cancel: *mut pdbg_cancel_token,
+        bytes_written: *mut u64,
+        capped: *mut c_int,
+        err: *mut pdbg_error,
+    ) -> pdbg_status;
+
     pub fn pdbg_page_render(
         doc: *mut pdbg_doc,
         page_index: u32,

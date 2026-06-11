@@ -16,6 +16,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <io.h>
+#include <wchar.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -50,6 +51,58 @@ static void pdbg_mutex_unlock(pdbg_mutex_t *mutex)
 #define pdbg_dup_fd _dup
 #define pdbg_close_fd _close
 #define pdbg_fdopen _fdopen
+
+static wchar_t *pdbg_utf8_to_wide_path(const char *path)
+{
+    if (!path)
+        return NULL;
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (len <= 0)
+        return NULL;
+    wchar_t *wide = (wchar_t *)malloc((size_t)len * sizeof(wchar_t));
+    if (!wide)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, len) != len) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static FILE *pdbg_fopen_write_binary(const char *path)
+{
+    wchar_t *wide = pdbg_utf8_to_wide_path(path);
+    if (!wide)
+        return NULL;
+    FILE *file = _wfopen(wide, L"wb");
+    free(wide);
+    return file;
+}
+
+static void pdbg_remove_file(const char *path)
+{
+    wchar_t *wide = pdbg_utf8_to_wide_path(path);
+    if (!wide)
+        return;
+    DeleteFileW(wide);
+    free(wide);
+}
+
+static int pdbg_replace_file(const char *tmp_path, const char *path)
+{
+    wchar_t *wide_tmp = pdbg_utf8_to_wide_path(tmp_path);
+    wchar_t *wide_path = pdbg_utf8_to_wide_path(path);
+    int ok = 0;
+    if (wide_tmp && wide_path) {
+        ok = MoveFileExW(
+                 wide_tmp,
+                 wide_path,
+                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    free(wide_tmp);
+    free(wide_path);
+    return ok;
+}
 #else
 typedef pthread_mutex_t pdbg_mutex_t;
 
@@ -76,6 +129,21 @@ static void pdbg_mutex_unlock(pdbg_mutex_t *mutex)
 #define pdbg_dup_fd dup
 #define pdbg_close_fd close
 #define pdbg_fdopen fdopen
+
+static FILE *pdbg_fopen_write_binary(const char *path)
+{
+    return fopen(path, "wb");
+}
+
+static void pdbg_remove_file(const char *path)
+{
+    remove(path);
+}
+
+static int pdbg_replace_file(const char *tmp_path, const char *path)
+{
+    return rename(tmp_path, path) == 0;
+}
 #endif
 
 #define PDBG_STEXT_MAX_STRUCT_DEPTH 256
@@ -177,6 +245,7 @@ typedef struct pdbg_cancel_cookie_scope {
 } pdbg_cancel_cookie_scope;
 
 static atomic_uint_fast64_t next_document_id = 1;
+static atomic_uint_fast64_t next_export_tmp_id = 1;
 
 struct pdbg_path_binding {
     uint64_t token;
@@ -988,6 +1057,8 @@ static int fill_stream_summary(fz_context *ctx, pdbg_stream_summary *stream, pdb
         return 0;
 
     stream->can_decode = 1;
+    if (pdf_name_eq(ctx, pdf_dict_get(ctx, obj, PDF_NAME(Subtype)), PDF_NAME(Image)))
+        stream->image_preview_available = 1;
     return 1;
 }
 
@@ -2864,6 +2935,312 @@ pdbg_status pdbg_stream_load(
     }
 
     *out = buffer;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
+}
+
+pdbg_status pdbg_image_object_load(
+    pdbg_doc *doc,
+    pdbg_object_id object,
+    uint32_t max_dimension,
+    uint64_t max_output_bytes,
+    pdbg_cancel_token *cancel,
+    pdbg_image **out,
+    pdbg_error *err)
+{
+    if (!doc || !out || !doc->pdf_doc) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid image load arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *out = NULL;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before image preview");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && atomic_load(&cancel->cancelled)) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+    if (max_dimension == 0)
+        max_dimension = 2048;
+    if (max_output_bytes == 0)
+        max_output_bytes = 64ULL * 1024ULL * 1024ULL;
+
+    fz_context *ctx = doc->ctx;
+    pdf_obj *obj = NULL;
+    fz_image *fz_img = NULL;
+    fz_pixmap *pixmap = NULL;
+    fz_pixmap *converted = NULL;
+    pdbg_image *image = NULL;
+    pdbg_status status = PDBG_OK;
+    pdbg_warning_capture warning_capture;
+    fz_warning_cb *old_warning_cb = NULL;
+    void *old_warning_user = NULL;
+    int warning_capture_installed = 0;
+    fz_var(obj);
+    fz_var(fz_img);
+    fz_var(pixmap);
+    fz_var(converted);
+    fz_var(image);
+    fz_var(status);
+    fz_var(old_warning_cb);
+    fz_var(old_warning_user);
+    fz_var(warning_capture_installed);
+    memset(&warning_capture, 0, sizeof(warning_capture));
+
+    fz_try(ctx)
+    {
+        old_warning_cb = fz_warning_callback(ctx, &old_warning_user);
+        fz_set_warning_callback(ctx, capture_mupdf_warning, &warning_capture);
+        warning_capture_installed = 1;
+        /* pdf_load_image opens the stream through the reference, which must
+         * stay indirect so MuPDF can recover the object number. */
+        obj = pdf_new_indirect(ctx, doc->pdf_doc, object.num, object.gen);
+        if (!pdf_name_eq(ctx, pdf_dict_get(ctx, obj, PDF_NAME(Subtype)), PDF_NAME(Image))) {
+            status = PDBG_ERROR_UNSUPPORTED;
+            set_error(err, status, "object is not an image stream");
+        } else {
+            fz_img = pdf_load_image(ctx, doc->pdf_doc, obj);
+            int want_w = (int)max_dimension;
+            int want_h = (int)max_dimension;
+            pixmap = fz_get_pixmap_from_image(ctx, fz_img, NULL, NULL, &want_w, &want_h);
+
+            if (fz_pixmap_colorspace(ctx, pixmap) != fz_device_rgb(ctx)) {
+                converted = fz_convert_pixmap(
+                    ctx,
+                    pixmap,
+                    fz_device_rgb(ctx),
+                    NULL,
+                    NULL,
+                    fz_default_color_params,
+                    fz_pixmap_alpha(ctx, pixmap) ? 1 : 0);
+                fz_drop_pixmap(ctx, pixmap);
+                pixmap = converted;
+                converted = NULL;
+            }
+
+            int width = fz_pixmap_width(ctx, pixmap);
+            int height = fz_pixmap_height(ctx, pixmap);
+            int components = fz_pixmap_components(ctx, pixmap);
+            int alpha = fz_pixmap_alpha(ctx, pixmap);
+            int src_stride = fz_pixmap_stride(ctx, pixmap);
+            const unsigned char *samples = fz_pixmap_samples(ctx, pixmap);
+
+            if (width <= 0 || height <= 0 || components < 3 || components > 4) {
+                status = PDBG_ERROR_FORMAT;
+                set_error(err, status, "decoded image has unsupported layout");
+            } else if ((uint64_t)width * 4ULL > UINT64_MAX / (uint64_t)height) {
+                status = PDBG_ERROR_LIMIT;
+                set_error(err, status, "image output byte size overflow");
+            } else {
+                uint64_t byte_len = (uint64_t)width * 4ULL * (uint64_t)height;
+                if (byte_len > max_output_bytes || byte_len > SIZE_MAX) {
+                    status = PDBG_ERROR_LIMIT;
+                    set_error(err, status, "image output exceeds configured byte limit");
+                } else {
+                    image = (pdbg_image *)calloc(1, sizeof(pdbg_image));
+                    if (image)
+                        image->pixels = (uint8_t *)malloc((size_t)byte_len);
+                    if (!image || !image->pixels) {
+                        status = PDBG_ERROR_OOM;
+                        set_error(err, status, "out of memory");
+                    } else {
+                        image->width = (uint32_t)width;
+                        image->height = (uint32_t)height;
+                        image->stride = (size_t)width * 4;
+                        for (int y = 0; y < height; y++) {
+                            const unsigned char *src = samples + (size_t)y * (size_t)src_stride;
+                            uint8_t *dst = image->pixels + (size_t)y * image->stride;
+                            for (int x = 0; x < width; x++) {
+                                const unsigned char *px = src + (size_t)x * (size_t)components;
+                                dst[0] = px[0];
+                                dst[1] = px[1];
+                                dst[2] = px[2];
+                                dst[3] = alpha && components == 4 ? px[3] : 0xFF;
+                                dst += 4;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fz_always(ctx)
+    {
+        if (warning_capture_installed) {
+            fz_set_warning_callback(ctx, old_warning_cb, old_warning_user);
+            warning_capture_installed = 0;
+        }
+        if (converted)
+            fz_drop_pixmap(ctx, converted);
+        if (pixmap)
+            fz_drop_pixmap(ctx, pixmap);
+        if (fz_img)
+            fz_drop_image(ctx, fz_img);
+        if (obj)
+            pdf_drop_obj(ctx, obj);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (status == PDBG_OK && warning_capture.seen) {
+        if (!attach_single_diag(
+                &image->diagnostics,
+                PDBG_DIAG_STREAM_DECODE_FAILURE,
+                warning_capture.message)) {
+            status = PDBG_ERROR_OOM;
+            set_error(err, status, "out of memory");
+        } else {
+            image->diagnostics->items[0].object = object;
+            image->diagnostics->items[0].has_object = 1;
+        }
+    }
+
+    if (status != PDBG_OK) {
+        free_image(image);
+        return status;
+    }
+
+    *out = image;
+    set_error(err, PDBG_OK, "");
+    return PDBG_OK;
+}
+
+pdbg_status pdbg_stream_save(
+    pdbg_doc *doc,
+    pdbg_object_id object,
+    int decoded,
+    const char *path,
+    uint64_t max_bytes,
+    pdbg_cancel_token *cancel,
+    uint64_t *bytes_written,
+    int *capped,
+    pdbg_error *err)
+{
+    if (!doc || !path || !bytes_written || !capped || !doc->pdf_doc) {
+        set_error(err, PDBG_ERROR_GENERIC, "invalid stream save arguments");
+        return PDBG_ERROR_GENERIC;
+    }
+    *bytes_written = 0;
+    *capped = 0;
+    if (!doc->authenticated) {
+        set_error(err, PDBG_ERROR_PASSWORD, "document requires password before stream save");
+        return PDBG_ERROR_PASSWORD;
+    }
+    if (cancel && atomic_load(&cancel->cancelled)) {
+        set_error(err, PDBG_ERROR_CANCELLED, "cancelled");
+        return PDBG_ERROR_CANCELLED;
+    }
+    if (object.num <= 0) {
+        set_error(err, PDBG_ERROR_UNSUPPORTED, "object is not a stream");
+        return PDBG_ERROR_UNSUPPORTED;
+    }
+
+    /* Write to a sibling temp file and rename into place on success, so a
+     * failed or cancelled export never destroys an existing destination. */
+    uint64_t tmp_id = atomic_fetch_add(&next_export_tmp_id, 1);
+#ifdef _WIN32
+    unsigned long process_id = (unsigned long)GetCurrentProcessId();
+#else
+    unsigned long process_id = (unsigned long)getpid();
+#endif
+    size_t tmp_len = strlen(path) + 96;
+    char *tmp_path = (char *)malloc(tmp_len);
+    if (!tmp_path) {
+        set_error(err, PDBG_ERROR_OOM, "out of memory");
+        return PDBG_ERROR_OOM;
+    }
+    snprintf(
+        tmp_path,
+        tmp_len,
+        "%s.pdbg-tmp-%lu-%llu",
+        path,
+        process_id,
+        (unsigned long long)tmp_id);
+
+    fz_context *ctx = doc->ctx;
+    fz_stream *stream = NULL;
+    FILE *file = NULL;
+    pdbg_status status = PDBG_OK;
+    uint64_t total = 0;
+    int done = 0;
+    fz_var(stream);
+    fz_var(file);
+    fz_var(status);
+    fz_var(total);
+    fz_var(done);
+
+    fz_try(ctx)
+    {
+        if (!pdf_obj_num_is_stream(ctx, doc->pdf_doc, object.num)) {
+            status = PDBG_ERROR_UNSUPPORTED;
+            set_error(err, status, "object is not a stream");
+        } else {
+            file = pdbg_fopen_write_binary(tmp_path);
+            if (!file) {
+                status = PDBG_ERROR_GENERIC;
+                set_error(err, status, "cannot create export file");
+            }
+        }
+
+        if (status == PDBG_OK) {
+            stream = decoded ? pdf_open_stream_number(ctx, doc->pdf_doc, object.num)
+                             : pdf_open_raw_stream_number(ctx, doc->pdf_doc, object.num);
+            unsigned char scratch[65536];
+            while (status == PDBG_OK && !done) {
+                if (cancel && atomic_load(&cancel->cancelled)) {
+                    status = PDBG_ERROR_CANCELLED;
+                    set_error(err, status, "cancelled");
+                    break;
+                }
+                size_t n = fz_read(ctx, stream, scratch, sizeof(scratch));
+                if (n == 0)
+                    break;
+                size_t to_write = n;
+                if (max_bytes > 0 && (uint64_t)n > max_bytes - total) {
+                    to_write = (size_t)(max_bytes - total);
+                    *capped = 1;
+                    done = 1;
+                }
+                if (to_write > 0 && fwrite(scratch, 1, to_write, file) != to_write) {
+                    status = PDBG_ERROR_GENERIC;
+                    set_error(err, status, "failed to write export file");
+                    break;
+                }
+                total += (uint64_t)to_write;
+            }
+        }
+    }
+    fz_always(ctx)
+    {
+        if (stream)
+            fz_drop_stream(ctx, stream);
+    }
+    fz_catch(ctx)
+    {
+        status = set_mupdf_error(ctx, err);
+    }
+
+    if (file) {
+        int close_failed = fclose(file) != 0;
+        if (status == PDBG_OK && close_failed) {
+            status = PDBG_ERROR_GENERIC;
+            set_error(err, status, "failed to finalize export file");
+        }
+        if (status == PDBG_OK && !pdbg_replace_file(tmp_path, path)) {
+            status = PDBG_ERROR_GENERIC;
+            set_error(err, status, "failed to move export file into place");
+        }
+        if (status != PDBG_OK)
+            pdbg_remove_file(tmp_path);
+    }
+    free(tmp_path);
+    if (status != PDBG_OK)
+        return status;
+
+    *bytes_written = total;
     set_error(err, PDBG_OK, "");
     return PDBG_OK;
 }

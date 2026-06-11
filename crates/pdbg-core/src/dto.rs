@@ -439,6 +439,24 @@ pub struct StreamChunk {
     pub decode_diagnostics: Vec<DiagnosticSummary>,
 }
 
+/// A decoded image XObject, downscaled to fit the requested bounds.
+#[derive(Clone, Debug)]
+pub struct ImagePreview {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub pixels_rgba: Vec<u8>,
+    pub diagnostics: Vec<DiagnosticSummary>,
+}
+
+/// Result of saving a full stream to a file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamSaveOutcome {
+    pub bytes_written: u64,
+    /// True when the save stopped at the requested size cap.
+    pub capped: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XrefEntryKind {
     Free,

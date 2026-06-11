@@ -413,6 +413,34 @@ pdbg_status pdbg_stream_load(
     pdbg_buffer **out,
     pdbg_error *err);
 
+/* Decode an image XObject into RGBA pixels. `max_dimension` bounds the decoded
+ * width/height (the image is downscaled when larger); `max_output_bytes`
+ * bounds the RGBA buffer (0 selects the default). Decode warnings are
+ * reported through the image diagnostics. */
+pdbg_status pdbg_image_object_load(
+    pdbg_doc *doc,
+    pdbg_object_id object,
+    uint32_t max_dimension,
+    uint64_t max_output_bytes,
+    pdbg_cancel_token *cancel,
+    pdbg_image **out,
+    pdbg_error *err);
+
+/* Stream the full object contents (raw or decoded) to a file in one pass.
+ * Stops at `max_bytes` when non-zero (reported via `capped`). Output goes to
+ * a sibling temp file that is renamed into place on success, so errors and
+ * cancellation never modify an existing destination. */
+pdbg_status pdbg_stream_save(
+    pdbg_doc *doc,
+    pdbg_object_id object,
+    int decoded,
+    const char *path,
+    uint64_t max_bytes,
+    pdbg_cancel_token *cancel,
+    uint64_t *bytes_written,
+    int *capped,
+    pdbg_error *err);
+
 pdbg_status pdbg_page_render(
     pdbg_doc *doc,
     uint32_t page_index,

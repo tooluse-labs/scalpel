@@ -15,6 +15,27 @@ pub(crate) fn spawn_stream_load_job(state: &AppState, key: RealStreamKey) -> Rea
     })
 }
 
+/// Single-pass save through the shim: the C side streams to a sibling temp
+/// file (O(n) regardless of stream size) and renames it into place on
+/// success, so failures never clobber an existing destination.
+pub(crate) fn stream_export_worker(
+    session: DocumentSession<OpenDocument>,
+    key: &StreamExportKey,
+    cancel: &CancelToken,
+) -> Result<StreamSaveOutcome, String> {
+    session
+        .run_task(|document| {
+            document.stream_save_with_cancel_token(
+                key.object,
+                key.mode,
+                &key.path,
+                STREAM_EXPORT_MAX_BYTES,
+                cancel,
+            )
+        })
+        .map_err(|err| err.message)
+}
+
 impl GuiShellApp {
     pub fn new() -> Self {
         Self::new_with_options(GuiRunOptions::default())
@@ -167,6 +188,11 @@ impl GuiShellApp {
             hex_job: None,
             hex_chunk: None,
             hex_error: None,
+            image_preview_job: None,
+            image_preview_result: None,
+            image_preview_error: None,
+            image_preview_texture: None,
+            stream_export_job: None,
             diagnostic_min_severity: None,
             diagnostic_code_filter: String::new(),
             copied_excerpt: None,
@@ -899,6 +925,152 @@ impl GuiShellApp {
         let aligned = offset - offset % HEX_VIEW_BYTES_PER_ROW as u64;
         self.hex_offset = aligned;
         self.clear_hex_chunk();
+    }
+
+    pub(crate) fn ensure_image_preview(&mut self, object: ObjectId) {
+        let current = self
+            .image_preview_result
+            .as_ref()
+            .map(|(result_object, _)| *result_object)
+            .or_else(|| {
+                self.image_preview_error
+                    .as_ref()
+                    .map(|(error_object, _)| *error_object)
+            })
+            .or_else(|| self.image_preview_job.as_ref().map(|job| *job.key()));
+        if current == Some(object) {
+            return;
+        }
+
+        self.image_preview_job = None;
+        self.image_preview_result = None;
+        self.image_preview_error = None;
+        self.image_preview_texture = None;
+
+        let Ok(state) = self.state.as_ref() else {
+            self.image_preview_error = Some((object, "document is not open".to_string()));
+            return;
+        };
+        let session = state.session.clone();
+        self.image_preview_job = Some(BackgroundJob::spawn(object, move |cancel| {
+            session
+                .run_task(|document| {
+                    document.image_preview_with_cancel_token(
+                        object,
+                        IMAGE_PREVIEW_MAX_DIMENSION,
+                        cancel,
+                    )
+                })
+                .map_err(|err| err.message)
+        }));
+    }
+
+    pub(crate) fn poll_image_preview_job(&mut self) {
+        match self.image_preview_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.image_preview_job = None;
+                match output.result {
+                    Ok(preview) => {
+                        self.image_preview_result = Some((output.key, preview));
+                        self.image_preview_error = None;
+                    }
+                    Err(err) => {
+                        self.image_preview_result = None;
+                        self.image_preview_error = Some((output.key, err));
+                    }
+                }
+            }
+            Some(JobPoll::Disconnected(object)) => {
+                self.image_preview_job = None;
+                self.image_preview_error =
+                    Some((object, "image preview worker disconnected".to_string()));
+            }
+        }
+    }
+
+    pub(crate) fn clear_image_preview(&mut self) {
+        self.image_preview_job = None;
+        self.image_preview_result = None;
+        self.image_preview_error = None;
+        self.image_preview_texture = None;
+    }
+
+    pub(crate) fn start_stream_export(&mut self, object: ObjectId, mode: StreamMode, path: String) {
+        if let Some(job) = &self.stream_export_job {
+            self.status_log.push(format!(
+                "export already running for {} {} R",
+                job.key().object.num,
+                job.key().object.gen
+            ));
+            return;
+        }
+        let Ok(state) = self.state.as_ref() else {
+            self.status_log
+                .push("export failed: document is not open".to_string());
+            return;
+        };
+        let key = StreamExportKey { object, mode, path };
+        let session = state.session.clone();
+        let worker_key = key.clone();
+        self.stream_export_job = Some(BackgroundJob::spawn(key.clone(), move |cancel| {
+            stream_export_worker(session, &worker_key, cancel)
+        }));
+        self.status_log.push(format!(
+            "exporting {} stream {} {} R to {}",
+            stream_mode_label(mode),
+            object.num,
+            object.gen,
+            display_file_chip_label(&key.path)
+        ));
+    }
+
+    pub(crate) fn cancel_stream_export_job(&mut self) {
+        if let Some(job) = self.stream_export_job.take() {
+            self.status_log.push(format!(
+                "cancelled export of {} {} R",
+                job.key().object.num,
+                job.key().object.gen
+            ));
+        }
+    }
+
+    pub(crate) fn poll_stream_export_job(&mut self) {
+        match self.stream_export_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.stream_export_job = None;
+                match output.result {
+                    Ok(outcome) => {
+                        self.status_log.push(format!(
+                            "exported {} bytes of {} {} R to {}{}",
+                            outcome.bytes_written,
+                            output.key.object.num,
+                            output.key.object.gen,
+                            display_file_chip_label(&output.key.path),
+                            if outcome.capped {
+                                " (stopped at size cap)"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    Err(err) => {
+                        self.status_log.push(format!(
+                            "export of {} {} R failed: {err} (destination left unchanged)",
+                            output.key.object.num, output.key.object.gen
+                        ));
+                    }
+                }
+            }
+            Some(JobPoll::Disconnected(key)) => {
+                self.stream_export_job = None;
+                self.status_log.push(format!(
+                    "export of {} {} R worker disconnected",
+                    key.object.num, key.object.gen
+                ));
+            }
+        }
     }
 
     pub(crate) fn ensure_xref_slice(&mut self) {

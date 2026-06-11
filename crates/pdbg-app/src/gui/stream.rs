@@ -81,21 +81,44 @@ pub(crate) fn summary_flag(ui: &mut egui::Ui, value: bool) {
 }
 
 pub(crate) fn render_result_color_image(render: &RenderResult) -> Option<egui::ColorImage> {
-    let width = render.width as usize;
-    let height = render.height as usize;
-    if width == 0 || height == 0 || render.stride < width.checked_mul(4)? {
+    rgba_color_image(
+        render.width,
+        render.height,
+        render.stride,
+        &render.pixels_rgba,
+    )
+}
+
+pub(crate) fn image_preview_color_image(preview: &ImagePreview) -> Option<egui::ColorImage> {
+    rgba_color_image(
+        preview.width,
+        preview.height,
+        preview.stride,
+        &preview.pixels_rgba,
+    )
+}
+
+pub(crate) fn rgba_color_image(
+    width: u32,
+    height: u32,
+    stride: usize,
+    pixels_rgba: &[u8],
+) -> Option<egui::ColorImage> {
+    let width = width as usize;
+    let height = height as usize;
+    if width == 0 || height == 0 || stride < width.checked_mul(4)? {
         return None;
     }
-    let required = render.stride.checked_mul(height)?;
-    if render.pixels_rgba.len() < required {
+    let required = stride.checked_mul(height)?;
+    if pixels_rgba.len() < required {
         return None;
     }
 
     let row_len = width * 4;
     let mut compact = Vec::with_capacity(row_len * height);
     for row in 0..height {
-        let start = row * render.stride;
-        compact.extend_from_slice(&render.pixels_rgba[start..start + row_len]);
+        let start = row * stride;
+        compact.extend_from_slice(&pixels_rgba[start..start + row_len]);
     }
     Some(egui::ColorImage::from_rgba_unmultiplied(
         [width, height],

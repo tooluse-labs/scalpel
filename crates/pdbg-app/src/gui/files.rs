@@ -30,6 +30,36 @@ pub(crate) fn choose_pdf_file() -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+pub(crate) fn choose_stream_export_path(suggested_file_name: &str) -> Option<String> {
+    rfd::FileDialog::new()
+        .set_file_name(suggested_file_name)
+        .save_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Raw single-filter image streams keep their native container extension so
+/// the exported file opens directly in image viewers.
+pub(crate) fn suggested_export_file_name(
+    object: ObjectId,
+    mode: StreamMode,
+    filters: &[String],
+) -> String {
+    let extension = match mode {
+        StreamMode::Raw => match filters {
+            [single] if single == "DCTDecode" => "jpg",
+            [single] if single == "JPXDecode" => "jp2",
+            _ => "bin",
+        },
+        StreamMode::Decoded => "bin",
+    };
+    format!(
+        "object-{}-{}-{}.{extension}",
+        object.num,
+        object.gen,
+        stream_mode_label(mode)
+    )
+}
+
 pub(crate) fn default_recent_files_path() -> PathBuf {
     if let Some(path) = std::env::var_os("PDBG_RECENT_FILES_PATH").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);

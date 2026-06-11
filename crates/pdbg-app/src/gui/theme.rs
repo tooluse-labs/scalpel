@@ -270,6 +270,19 @@ pub(crate) fn section_header(ui: &mut egui::Ui, title: &str, detail: Option<&str
     ui.add_space(4.0);
 }
 
+/// Section title with custom right-aligned controls (buttons, status text).
+pub(crate) fn section_header_with_controls(
+    ui: &mut egui::Ui,
+    title: &str,
+    controls: impl FnOnce(&mut egui::Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).strong().size(13.0).color(theme().text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), controls);
+    });
+    ui.add_space(4.0);
+}
+
 pub(crate) fn search_match_label(hits: usize, truncated: bool) -> String {
     let noun = if hits == 1 { "match" } else { "matches" };
     let suffix = if truncated { " · truncated" } else { "" };

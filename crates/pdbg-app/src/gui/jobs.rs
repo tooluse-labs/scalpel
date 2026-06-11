@@ -153,6 +153,15 @@ pub(crate) type RealStreamJob = BackgroundJob<RealStreamKey, StreamChunk>;
 pub(crate) type RealTextSearchJob = BackgroundJob<String, (TextSearchResult, TextPageCache)>;
 pub(crate) type RealObjectSearchJob = BackgroundJob<String, ObjectSearchResult>;
 pub(crate) type OpenPdfJob = BackgroundJob<String, OpenPdfJobResult>;
+pub(crate) type ImagePreviewJob = BackgroundJob<ObjectId, ImagePreview>;
+pub(crate) type StreamExportJob = BackgroundJob<StreamExportKey, StreamSaveOutcome>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StreamExportKey {
+    pub(crate) object: ObjectId,
+    pub(crate) mode: StreamMode,
+    pub(crate) path: String,
+}
 
 pub(crate) enum OpenPdfJobResult {
     Opened(Box<OpenedPdfModel>),

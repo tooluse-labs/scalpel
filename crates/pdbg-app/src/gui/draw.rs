@@ -340,6 +340,7 @@ impl GuiShellApp {
         self.preview_click = None;
         self.clear_xref_state();
         self.reset_hex_state();
+        self.clear_image_preview();
         self.copied_excerpt = None;
         self.status_log = model.status_log;
         self.refresh_real_render();
@@ -351,6 +352,8 @@ impl GuiShellApp {
         self.open_pdf_job = None;
         self.real_stream_job = None;
         self.hex_job = None;
+        self.image_preview_job = None;
+        self.stream_export_job = None;
         self.real_render_job = None;
         self.object_search_job = None;
         self.text_search_job = None;
@@ -1226,6 +1229,93 @@ impl GuiShellApp {
         }
     }
 
+    pub(crate) fn export_stream_with_dialog(&mut self, stream: &StreamSummary, mode: StreamMode) {
+        let suggested = suggested_export_file_name(stream.object, mode, &stream.filters);
+        if let Some(path) = choose_stream_export_path(&suggested) {
+            self.start_stream_export(stream.object, mode, path);
+        }
+    }
+
+    pub(crate) fn draw_image_preview_section(&mut self, ui: &mut egui::Ui, object: ObjectId) {
+        self.ensure_image_preview(object);
+
+        section_frame().show(ui, |ui| {
+            section_header(ui, "Image Preview", None);
+            if self.image_preview_job.is_some() {
+                ui.label(RichText::new("Decoding image...").color(theme().muted));
+                return;
+            }
+            if let Some((error_object, err)) = &self.image_preview_error {
+                if *error_object == object {
+                    ui.colored_label(theme().error_fg, err.clone());
+                }
+                return;
+            }
+            if !self
+                .image_preview_result
+                .as_ref()
+                .is_some_and(|(result_object, _)| *result_object == object)
+            {
+                return;
+            }
+
+            let needs_texture = self
+                .image_preview_texture
+                .as_ref()
+                .is_none_or(|(texture_object, _)| *texture_object != object);
+            if needs_texture {
+                let Some((_, preview)) = &mut self.image_preview_result else {
+                    return;
+                };
+                let Some(color_image) = image_preview_color_image(preview) else {
+                    ui.colored_label(theme().error_fg, "image preview has invalid RGBA layout");
+                    return;
+                };
+                // The GPU texture is the only consumer of the pixel buffer;
+                // drop the CPU copy (dimensions and diagnostics stay).
+                preview.pixels_rgba = Vec::new();
+                let texture = ui.ctx().load_texture(
+                    "image-object-preview",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                );
+                self.image_preview_texture = Some((object, texture));
+            }
+            let Some((_, texture)) = &self.image_preview_texture else {
+                return;
+            };
+            let Some((_, preview)) = &self.image_preview_result else {
+                return;
+            };
+
+            let texture_size = texture.size_vec2();
+            let scale = (ui.available_width() / texture_size.x)
+                .min(IMAGE_PREVIEW_MAX_HEIGHT / texture_size.y)
+                .clamp(0.01, 1.0);
+            ui.add(
+                egui::Image::new((texture.id(), texture_size * scale))
+                    .bg_fill(theme().page)
+                    .corner_radius(3),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{}×{} px{}",
+                    preview.width,
+                    preview.height,
+                    if scale < 1.0 { " (scaled to fit)" } else { "" }
+                ))
+                .small()
+                .color(theme().muted),
+            );
+            if !preview.diagnostics.is_empty() {
+                ui.add_space(4.0);
+                for diagnostic in preview.diagnostics.clone() {
+                    draw_diagnostic_card(ui, &diagnostic);
+                }
+            }
+        });
+    }
+
     pub(crate) fn draw_hex_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if !self.tree.is_real() {
             ui.label(RichText::new("Hex view requires a real PDF document").color(theme().muted));
@@ -1963,7 +2053,28 @@ impl GuiShellApp {
         };
 
         section_frame().show(ui, |ui| {
-            section_header(ui, "Stream Summary", None);
+            section_header_with_controls(ui, "Stream Summary", |ui| {
+                if self.stream_export_job.is_some() {
+                    if ui.button("Cancel export").clicked() {
+                        self.cancel_stream_export_job();
+                    }
+                    ui.label(RichText::new("exporting...").small().color(theme().muted));
+                } else {
+                    ui.menu_button("Export", |ui| {
+                        if ui
+                            .add_enabled(stream.can_decode, egui::Button::new("Decoded bytes..."))
+                            .clicked()
+                        {
+                            ui.close();
+                            self.export_stream_with_dialog(&stream, StreamMode::Decoded);
+                        }
+                        if ui.button("Raw bytes...").clicked() {
+                            ui.close();
+                            self.export_stream_with_dialog(&stream, StreamMode::Raw);
+                        }
+                    });
+                }
+            });
             let decoded_size = self
                 .real_stream_chunk
                 .as_ref()
@@ -1971,6 +2082,11 @@ impl GuiShellApp {
                 .and_then(|chunk| chunk.total_size);
             draw_stream_summary_grid(ui, &stream, decoded_size);
         });
+
+        if stream.image_preview_available {
+            ui.add_space(8.0);
+            self.draw_image_preview_section(ui, stream.object);
+        }
 
         if self.real_stream_key.is_none()
             && self.real_stream_chunk.is_none()
@@ -2098,14 +2214,10 @@ impl GuiShellApp {
                 self.real_stream_view_mode,
                 self.real_stream_preset,
             );
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(real_stream_preset_label(self.real_stream_preset))
-                        .strong()
-                        .size(13.0)
-                        .color(theme().text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            section_header_with_controls(
+                ui,
+                real_stream_preset_label(self.real_stream_preset),
+                |ui| {
                     if ui.button("Copy visible text").clicked() {
                         let escaped = escape_pdf_text(
                             &visible_text,
@@ -2130,8 +2242,8 @@ impl GuiShellApp {
                             .small()
                             .color(theme().muted),
                     );
-                });
-            });
+                },
+            );
             let view_height = (ui.available_height() - 32.0).max(STREAM_VIEW_MIN_HEIGHT);
             let scroll_output = ScrollArea::both()
                 .id_salt((
