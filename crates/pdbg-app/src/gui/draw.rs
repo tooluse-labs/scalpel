@@ -79,8 +79,15 @@ impl GuiShellApp {
             .max_height(max_height)
             .show(ui, |ui| {
                 for path in self.recent_pdf_paths.clone() {
+                    let label = display_file_chip_label(&path);
+                    let row_width = ui.available_width().max(160.0);
                     if ui
-                        .selectable_label(false, display_file_chip_label(&path))
+                        .add_sized(
+                            egui::vec2(row_width, 28.0),
+                            egui::Button::selectable(false, ())
+                                .left_text(RichText::new(label).size(12.0).color(theme().text))
+                                .truncate(),
+                        )
                         .on_hover_text(display_path_hover(&path))
                         .clicked()
                     {
@@ -103,107 +110,339 @@ impl GuiShellApp {
         self.open_pdf_from_path(path.to_string_lossy().into_owned());
     }
 
+    pub(crate) fn open_pdf_with_file_dialog(&mut self) {
+        if let Some(path) = choose_pdf_file() {
+            self.open_pdf_dialog_open = false;
+            self.open_pdf_password_input.clear();
+            self.open_pdf_error = None;
+            self.open_pdf_from_path(path);
+        }
+    }
+
     pub(crate) fn draw_open_pdf_dialog(&mut self, ctx: &egui::Context) {
         if !self.open_pdf_dialog_open {
             return;
         }
 
-        let mut window_open = self.open_pdf_dialog_open;
         let mut path_to_open = None;
-        egui::Window::new("Open PDF")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(520.0)
-            .open(&mut window_open)
+        let mut choose_another = false;
+        let mut close_requested = false;
+        let opening = self.open_pdf_job.is_some();
+        let password_required = self.open_pdf_error.as_deref() == Some("Password required");
+        let show_password = password_required || !self.open_pdf_password_input.is_empty();
+        let title = if show_password {
+            "Password Required"
+        } else {
+            "Open PDF Failed"
+        };
+
+        let modal_response = egui::Modal::new(egui::Id::new("open_pdf_dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(72))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme().surface)
+                    .stroke(egui::Stroke::new(1.0, theme().strong_border))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(0))
+                    .shadow(egui::Shadow {
+                        offset: [0, 16],
+                        blur: 32,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(46),
+                    }),
+            )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let opening = self.open_pdf_job.is_some();
-                    let response = ui.add_enabled(
-                        !opening,
-                        TextEdit::singleline(&mut self.open_pdf_path_input)
-                            .desired_width(380.0)
-                            .hint_text("/path/to/file.pdf"),
-                    );
-                    if ui
-                        .add_enabled(!opening, egui::Button::new("Choose..."))
-                        .clicked()
-                    {
-                        if let Some(path) = choose_pdf_file() {
-                            self.open_pdf_path_input = path;
+                ui.set_width(440.0);
+                egui::Frame::new()
+                    .fill(theme().panel)
+                    .inner_margin(egui::Margin::symmetric(18, 14))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(title).strong().size(17.0).color(theme().text));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(28.0, 28.0),
+                                            egui::Button::new(
+                                                RichText::new("×").size(18.0).color(theme().muted),
+                                            )
+                                            .fill(theme().chip_bg),
+                                        )
+                                        .on_hover_text("Close")
+                                        .clicked()
+                                    {
+                                        close_requested = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        if !self.open_pdf_path_input.trim().is_empty() {
+                            ui.label(RichText::new("PDF file").small().color(theme().muted));
+                            ui.add_space(4.0);
+                            egui::Frame::new()
+                                .fill(theme().code_bg)
+                                .stroke(egui::Stroke::new(1.0, theme().border))
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    truncated_label(
+                                        ui,
+                                        RichText::new(display_file_chip_label(
+                                            &self.open_pdf_path_input,
+                                        ))
+                                        .color(theme().text),
+                                        ui.available_width(),
+                                        Some(&display_path_hover(&self.open_pdf_path_input)),
+                                    );
+                                });
+                            ui.add_space(12.0);
                         }
-                    }
-                    if !opening
-                        && response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        path_to_open = Some(self.open_pdf_path_input.clone());
-                    }
-                });
 
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let opening = self.open_pdf_job.is_some();
-                    ui.label(RichText::new("Password").color(theme().muted));
-                    let response = ui.add_enabled(
-                        !opening,
-                        TextEdit::singleline(&mut self.open_pdf_password_input)
-                            .desired_width(380.0)
-                            .password(true),
-                    );
-                    if !opening
-                        && response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        path_to_open = Some(self.open_pdf_path_input.clone());
-                    }
-                });
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if self.open_pdf_job.is_some() {
-                        ui.label(RichText::new("Opening PDF...").color(theme().muted));
-                        if ui.button("Cancel open").clicked() {
-                            self.cancel_open_pdf_job();
-                            self.open_pdf_dialog_open = false;
-                            self.open_pdf_password_input.clear();
+                        if let Some(err) = &self.open_pdf_error {
+                            let message = if err == "Password required" {
+                                "This PDF requires a password."
+                            } else {
+                                err
+                            };
+                            egui::Frame::new()
+                                .fill(theme().error_bg)
+                                .stroke(egui::Stroke::new(1.0, theme().error_fg))
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.colored_label(theme().error_fg, message);
+                                });
                         }
-                    } else {
-                        let can_open = !self.open_pdf_path_input.trim().is_empty();
-                        if ui
-                            .add_enabled(can_open, egui::Button::new("Open"))
-                            .clicked()
-                        {
-                            path_to_open = Some(self.open_pdf_path_input.clone());
+
+                        if show_password {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Password").small().color(theme().muted));
+                            ui.add_space(4.0);
+                            let response = ui.add_enabled(
+                                !opening,
+                                TextEdit::singleline(&mut self.open_pdf_password_input)
+                                    .desired_width(ui.available_width())
+                                    .password(true)
+                                    .hint_text("Enter PDF password"),
+                            );
+                            if !opening
+                                && response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                path_to_open = Some(self.open_pdf_path_input.clone());
+                            }
+                            if !opening && !ctx.memory(|memory| memory.has_focus(response.id)) {
+                                response.request_focus();
+                            }
                         }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.cancel_open_pdf_job();
-                        self.open_pdf_dialog_open = false;
-                        self.open_pdf_password_input.clear();
-                    }
-                });
 
-                if let Some(err) = &self.open_pdf_error {
-                    ui.add_space(8.0);
-                    ui.colored_label(theme().error_fg, err);
-                }
-
-                if !self.recent_pdf_paths.is_empty() {
-                    ui.add_space(12.0);
-                    section_header(ui, "Recent Files", None);
-                    if let Some(path) = self.draw_recent_file_list(ui, "recent_pdf_paths", 180.0) {
-                        path_to_open = Some(path);
-                    }
-                }
+                        ui.add_space(18.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if opening {
+                                if ui.button("Cancel open").clicked() {
+                                    self.cancel_open_pdf_job();
+                                    close_requested = true;
+                                    self.open_pdf_password_input.clear();
+                                }
+                                ui.label(RichText::new("Opening PDF...").color(theme().muted));
+                            } else if show_password {
+                                let can_unlock = !self.open_pdf_path_input.trim().is_empty();
+                                if ui
+                                    .add_enabled(
+                                        can_unlock,
+                                        egui::Button::new(
+                                            RichText::new("Unlock").color(theme().surface),
+                                        )
+                                        .fill(theme().accent)
+                                        .min_size(egui::vec2(78.0, 30.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    path_to_open = Some(self.open_pdf_path_input.clone());
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close_requested = true;
+                                    self.open_pdf_password_input.clear();
+                                }
+                            } else {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Choose another...")
+                                                .color(theme().surface),
+                                        )
+                                        .fill(theme().accent)
+                                        .min_size(egui::vec2(128.0, 30.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    choose_another = true;
+                                }
+                                if ui.button("Close").clicked() {
+                                    close_requested = true;
+                                }
+                            }
+                        });
+                    });
             });
 
-        if !window_open && self.open_pdf_job.is_some() {
+        if modal_response.should_close() {
+            close_requested = true;
+        }
+        if choose_another {
+            self.open_pdf_password_input.clear();
+            self.open_pdf_error = None;
+            self.open_pdf_with_file_dialog();
+        }
+        if close_requested && self.open_pdf_job.is_some() {
             self.cancel_open_pdf_job();
             self.open_pdf_password_input.clear();
         }
-        self.open_pdf_dialog_open = window_open && self.open_pdf_dialog_open;
+        if choose_another || close_requested {
+            self.open_pdf_dialog_open = false;
+        }
         if let Some(path) = path_to_open {
             self.open_pdf_from_path(path);
+        }
+    }
+
+    pub(crate) fn draw_about_dialog(&mut self, ctx: &egui::Context) {
+        if !self.about_dialog_open {
+            return;
+        }
+
+        let mut close_requested = false;
+        let mupdf_version = mupdf_version_label();
+        let backend = backend_label(&mupdf_version);
+        let platform = platform_label();
+        let render_limit = format!("{} px max dimension", self.render_max_dimension);
+        let about_text = about_info_text(&backend, &platform, &render_limit);
+        let modal_response = egui::Modal::new(egui::Id::new("about_dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(72))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme().surface)
+                    .stroke(egui::Stroke::new(1.0, theme().strong_border))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(0))
+                    .shadow(egui::Shadow {
+                        offset: [0, 16],
+                        blur: 32,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(46),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                egui::Frame::new()
+                    .fill(theme().panel)
+                    .inner_margin(egui::Margin::symmetric(22, 16))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("Scalpel")
+                                        .strong()
+                                        .size(22.0)
+                                        .color(theme().text),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new("PDF structure dissection tool")
+                                        .size(12.5)
+                                        .color(theme().muted),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(28.0, 28.0),
+                                            egui::Button::new(
+                                                RichText::new("×").size(18.0).color(theme().muted),
+                                            )
+                                            .fill(theme().chip_bg),
+                                        )
+                                        .on_hover_text("Close")
+                                        .clicked()
+                                    {
+                                        close_requested = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(22, 18))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Dissect object trees, streams, xref tables, rendered pages, text positions, image resources, and diagnostics.",
+                            )
+                            .size(13.5)
+                            .color(theme().muted),
+                        );
+                        ui.add_space(18.0);
+
+                        egui::Frame::new()
+                            .fill(theme().code_bg)
+                            .stroke(egui::Stroke::new(1.0, theme().border))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(16, 13))
+                            .show(ui, |ui| {
+                                egui::Grid::new("about_info_grid")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(24.0, 10.0))
+                                    .show(ui, |ui| {
+                                        about_info_row(ui, "Version", env!("CARGO_PKG_VERSION"));
+                                        about_info_row(ui, "Commit", build_commit_label());
+                                        about_info_row(ui, "Release date", release_date_label());
+                                        about_info_row(ui, "Backend", &backend);
+                                        about_info_row(ui, "OS", &platform);
+                                        about_info_row(ui, "Build", build_profile_label());
+                                        about_info_row(ui, "Render limit", &render_limit);
+                                        about_link_row(ui, "GitHub", APP_GITHUB_URL);
+                                    });
+                            });
+
+                        ui.add_space(18.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Close").size(13.0).color(theme().surface),
+                                    )
+                                    .fill(theme().accent)
+                                    .min_size(egui::vec2(88.0, 34.0)),
+                                )
+                                .clicked()
+                            {
+                                close_requested = true;
+                            }
+                            if ui
+                                .add_sized(
+                                    egui::vec2(92.0, 34.0),
+                                    egui::Button::new(RichText::new("Copy Info").size(13.0)),
+                                )
+                                .clicked()
+                            {
+                                ctx.copy_text(about_text.clone());
+                            }
+                        });
+                    });
+            });
+
+        if modal_response.should_close() || close_requested {
+            self.about_dialog_open = false;
         }
     }
 
@@ -267,6 +506,7 @@ impl GuiShellApp {
                     }
                     Err(err) => {
                         self.open_pdf_error = Some(err.clone());
+                        self.open_pdf_dialog_open = true;
                         self.status_log.push(format!(
                             "failed to open {}: {err}",
                             display_file_chip_label(&output.key)
@@ -277,6 +517,7 @@ impl GuiShellApp {
             Some(JobPoll::Disconnected(path)) => {
                 self.open_pdf_job = None;
                 self.open_pdf_error = Some("open worker disconnected".to_string());
+                self.open_pdf_dialog_open = true;
                 self.status_log.push(format!(
                     "open {} worker disconnected",
                     display_file_chip_label(&path)
@@ -378,16 +619,26 @@ impl GuiShellApp {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
                 ui.spacing_mut().interact_size.y = TOP_BAR_BUTTON_HEIGHT;
-                ui.label(
-                    RichText::new("pdbg")
-                        .strong()
-                        .size(15.0)
-                        .color(theme().top_bar_text),
-                );
+                let brand = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new("Scalpel")
+                                .strong()
+                                .size(15.0)
+                                .color(theme().top_bar_text),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("About Scalpel");
+                if brand.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if brand.clicked() {
+                    self.about_dialog_open = true;
+                }
                 top_bar_separator(ui);
                 if top_bar_button(ui, "Open PDF...", true).clicked() {
-                    self.open_pdf_dialog_open = true;
-                    self.open_pdf_error = None;
+                    self.open_pdf_with_file_dialog();
                 }
                 if !self.recent_pdf_paths.is_empty() {
                     let mut recent_to_open = None;
@@ -597,8 +848,7 @@ impl GuiShellApp {
         section_header(ui, "Open PDF", Some("No document"));
         section_frame().show(ui, |ui| {
             if ui.button("Open PDF...").clicked() {
-                self.open_pdf_dialog_open = true;
-                self.open_pdf_error = None;
+                self.open_pdf_with_file_dialog();
             }
             ui.add_space(8.0);
             section_header(ui, "Recent Files", None);
@@ -849,8 +1099,7 @@ impl GuiShellApp {
                 );
                 ui.add_space(8.0);
                 if ui.button("Open PDF...").clicked() {
-                    self.open_pdf_dialog_open = true;
-                    self.open_pdf_error = None;
+                    self.open_pdf_with_file_dialog();
                 }
                 ui.add_space(12.0);
                 ui.label(RichText::new("Drop PDF here").color(theme().muted));
@@ -1657,8 +1906,7 @@ impl GuiShellApp {
             ui.label(RichText::new("Waiting for a PDF").color(theme().muted));
             ui.add_space(8.0);
             if ui.button("Open PDF...").clicked() {
-                self.open_pdf_dialog_open = true;
-                self.open_pdf_error = None;
+                self.open_pdf_with_file_dialog();
             }
         });
     }
@@ -2530,4 +2778,131 @@ impl GuiShellApp {
             }
         }
     }
+}
+
+fn about_info_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(RichText::new(label).size(11.5).color(theme().muted));
+    ui.label(RichText::new(value).size(13.5).color(theme().text));
+    ui.end_row();
+}
+
+fn about_link_row(ui: &mut egui::Ui, label: &str, url: &str) {
+    ui.label(RichText::new(label).size(11.5).color(theme().muted));
+    ui.hyperlink_to(RichText::new(url).size(13.5), url);
+    ui.end_row();
+}
+
+#[cfg(feature = "real-mupdf")]
+fn backend_label(mupdf_version: &str) -> String {
+    if mupdf_version == "linked (version unavailable)" {
+        "MuPDF (version unavailable)".to_string()
+    } else {
+        format!("MuPDF {mupdf_version}")
+    }
+}
+
+#[cfg(not(feature = "real-mupdf"))]
+fn backend_label(_mupdf_version: &str) -> String {
+    "sample backend".to_string()
+}
+
+fn build_profile_label() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+fn build_commit_label() -> &'static str {
+    option_env!("PDBG_BUILD_COMMIT").unwrap_or("unknown")
+}
+
+fn release_date_label() -> &'static str {
+    option_env!("PDBG_RELEASE_DATE").unwrap_or("unknown")
+}
+
+fn about_info_text(backend: &str, platform: &str, render_limit: &str) -> String {
+    [
+        format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION")),
+        format!("Commit: {}", build_commit_label()),
+        format!("Release date: {}", release_date_label()),
+        format!("Backend: {backend}"),
+        format!("OS: {platform}"),
+        format!("Build: {}", build_profile_label()),
+        format!("Render limit: {render_limit}"),
+        format!("GitHub: {APP_GITHUB_URL}"),
+    ]
+    .join("\n")
+}
+
+fn platform_label() -> String {
+    format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[cfg(feature = "real-mupdf")]
+fn mupdf_version_label() -> String {
+    read_mupdf_version_from_env().unwrap_or_else(|| "linked (version unavailable)".to_string())
+}
+
+#[cfg(not(feature = "real-mupdf"))]
+fn mupdf_version_label() -> String {
+    "not linked".to_string()
+}
+
+#[cfg(feature = "real-mupdf")]
+fn read_mupdf_version_from_env() -> Option<String> {
+    for path in [
+        std::env::var_os("PDBG_MUPDF_SOURCE_DIR").map(PathBuf::from),
+        std::env::var_os("PDBG_MUPDF_INCLUDE_DIR").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let version_header = if path.ends_with("include") {
+            path.join("mupdf").join("fitz").join("version.h")
+        } else {
+            path.join("include")
+                .join("mupdf")
+                .join("fitz")
+                .join("version.h")
+        };
+        if let Ok(header) = fs::read_to_string(version_header) {
+            if let Some(version) = parse_mupdf_version_header(&header) {
+                return Some(version);
+            }
+        }
+        if let Some(version) = infer_mupdf_version_from_path(&path) {
+            return Some(version);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "real-mupdf")]
+fn parse_mupdf_version_header(header: &str) -> Option<String> {
+    header.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("#define FZ_VERSION ")?;
+        let version = rest.trim().strip_prefix('"')?.split('"').next()?;
+        (!version.trim().is_empty()).then(|| version.to_string())
+    })
+}
+
+#[cfg(feature = "real-mupdf")]
+fn infer_mupdf_version_from_path(path: &Path) -> Option<String> {
+    path.ancestors()
+        .filter_map(|ancestor| ancestor.file_name()?.to_str())
+        .find_map(extract_mupdf_version_from_component)
+}
+
+#[cfg(feature = "real-mupdf")]
+fn extract_mupdf_version_from_component(component: &str) -> Option<String> {
+    let rest = component.split_once("mupdf-")?.1;
+    let version = rest
+        .split_once("-source")
+        .map_or(rest, |(version, _)| version)
+        .trim();
+    let looks_like_version =
+        version.chars().all(|ch| ch.is_ascii_digit() || ch == '.') && version.contains('.');
+    looks_like_version.then(|| version.to_string())
 }

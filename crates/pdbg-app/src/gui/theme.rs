@@ -75,15 +75,15 @@ pub(crate) fn pdbg_style() -> egui::Style {
     let mono = FontFamily::Name("pdbg-mono".into());
 
     style.text_styles = BTreeMap::from([
-        (TextStyle::Heading, FontId::new(16.0, sans.clone())),
-        (TextStyle::Body, FontId::new(12.5, sans.clone())),
-        (TextStyle::Button, FontId::new(12.0, sans.clone())),
-        (TextStyle::Small, FontId::new(11.0, sans)),
+        (TextStyle::Heading, FontId::new(17.0, sans.clone())),
+        (TextStyle::Body, FontId::new(13.0, sans.clone())),
+        (TextStyle::Button, FontId::new(12.5, sans.clone())),
+        (TextStyle::Small, FontId::new(11.5, sans)),
         (TextStyle::Monospace, FontId::new(11.0, mono)),
     ]);
     style.text_styles.insert(
         TextStyle::Name("panel-title".into()),
-        FontId::new(13.0, FontFamily::Name("pdbg-sans".into())),
+        FontId::new(13.5, FontFamily::Name("pdbg-sans".into())),
     );
     style.spacing.item_spacing = egui::vec2(8.0, 5.0);
     style.spacing.button_padding = egui::vec2(10.0, 4.0);

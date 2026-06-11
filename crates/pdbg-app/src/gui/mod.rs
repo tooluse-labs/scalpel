@@ -100,7 +100,8 @@ const STREAM_EXPORT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const PATH_DISPLAY_MAX_BYTES: usize = 4096;
 const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
-const APP_TITLE: &str = "pdbg Preview";
+const APP_TITLE: &str = "Scalpel";
+const APP_GITHUB_URL: &str = "https://github.com/tooluse-labs/xreflab";
 const LEFT_PANEL_MIN_WIDTH: f32 = 220.0;
 const LEFT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
 const LEFT_PANEL_MAX_WIDTH: f32 = 520.0;
@@ -180,6 +181,7 @@ pub struct GuiShellApp {
     open_pdf_password_input: String,
     open_pdf_error: Option<String>,
     open_pdf_job: Option<OpenPdfJob>,
+    about_dialog_open: bool,
     left_panel_width: Option<f32>,
     right_panel_width: Option<f32>,
     tree: TreeModel,
@@ -310,6 +312,7 @@ impl eframe::App for GuiShellApp {
         self.draw_workspace(ui, &ctx);
 
         self.draw_open_pdf_dialog(&ctx);
+        self.draw_about_dialog(&ctx);
 
         if self
             .smoke_exit_after
