@@ -36,6 +36,19 @@ pub(crate) fn stream_export_worker(
         .map_err(|err| err.message)
 }
 
+pub(crate) fn dict_entry_summary<'a>(
+    detail: &'a ObjectDetail,
+    key: &str,
+) -> Option<&'a ObjectSummary> {
+    detail
+        .dictionary_entries
+        .as_ref()?
+        .items
+        .iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| &entry.value)
+}
+
 impl GuiShellApp {
     pub fn new() -> Self {
         Self::new_with_options(GuiRunOptions::default())
@@ -1141,6 +1154,14 @@ impl GuiShellApp {
         ))
     }
 
+    pub(crate) fn current_render_page_height(&self, page_index: usize) -> Option<f32> {
+        let render = self.real_render.as_ref()?;
+        if render.page_index != page_index || self.render_zoom <= 0.0 {
+            return None;
+        }
+        Some(render.height as f32 / self.render_zoom)
+    }
+
     pub(crate) fn set_render_page(&mut self, page_index: usize) {
         let page_count = self.page_count();
         if page_count == 0 {
@@ -1283,6 +1304,89 @@ impl GuiShellApp {
         }
     }
 
+    pub(crate) fn select_xobject_resource_from_current_page(&mut self, resource_name: &str) {
+        match self.resolve_page_xobject_resource(self.render_page_index, resource_name) {
+            Ok((object, is_image)) => {
+                let Some(page_id) =
+                    self.ensure_tree_page_row(self.render_page_index)
+                        .and_then(|row| match &self.tree {
+                            TreeModel::Real(tree) => {
+                                tree.summary(row).map(|summary| summary.id.clone())
+                            }
+                            TreeModel::Virtual(_) => None,
+                        })
+                else {
+                    self.status_log.push(format!(
+                        "resolved /{} but page {} tree row is unavailable",
+                        resource_name,
+                        self.render_page_index + 1
+                    ));
+                    return;
+                };
+                let row = self
+                    .tree
+                    .ensure_real_object_row(page_id.document_id(), object);
+                self.select_row_from_tree(row);
+                self.selected_tab = InspectorTab::Stream;
+                self.status_log.push(format!(
+                    "selected /{} XObject {}{}",
+                    resource_name,
+                    object_ref_text(object),
+                    if is_image { " image" } else { "" }
+                ));
+            }
+            Err(err) => {
+                self.status_log.push(format!(
+                    "cannot resolve /{} on page {}: {err}",
+                    resource_name,
+                    self.render_page_index + 1
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn resolve_page_xobject_resource(
+        &mut self,
+        page_index: usize,
+        resource_name: &str,
+    ) -> Result<(ObjectId, bool), String> {
+        let page_row = self
+            .ensure_tree_page_row(page_index)
+            .ok_or_else(|| format!("page {} tree row is unavailable", page_index + 1))?;
+        let page_id = match &self.tree {
+            TreeModel::Real(tree) => tree
+                .summary(page_row)
+                .map(|summary| summary.id.clone())
+                .ok_or_else(|| format!("page {} tree summary is unavailable", page_index + 1))?,
+            TreeModel::Virtual(_) => {
+                return Err("document tree is not backed by real PDF data".to_string());
+            }
+        };
+        let state = self
+            .state
+            .as_ref()
+            .map_err(|err| format!("document is not open: {err}"))?;
+        let page_detail = load_object_detail(state, &page_id)?;
+        let resources = dict_entry_summary(&page_detail, "Resources")
+            .ok_or_else(|| "page has no /Resources dictionary".to_string())?;
+        let resources_detail = load_object_detail(state, &resources.id)?;
+        let xobjects = dict_entry_summary(&resources_detail, "XObject")
+            .ok_or_else(|| "page resources have no /XObject dictionary".to_string())?;
+        let xobjects_detail = load_object_detail(state, &xobjects.id)?;
+        let resource = dict_entry_summary(&xobjects_detail, resource_name)
+            .ok_or_else(|| format!("no /{resource_name} entry in page /XObject resources"))?;
+        let object = resource
+            .object
+            .or_else(|| resource.id.object_id())
+            .ok_or_else(|| format!("/{resource_name} is not an indirect object"))?;
+        let detail = load_object_detail(state, &resource.id)?;
+        let is_image = detail
+            .stream
+            .as_ref()
+            .is_some_and(|stream| stream.image_preview_available);
+        Ok((object, is_image))
+    }
+
     pub(crate) fn select_text_hit_for_preview_click(&mut self, click: PagePreviewClick) {
         self.selected_text_hit = None;
         if self.render_rotation_degrees != 0 {
@@ -1363,11 +1467,16 @@ impl GuiShellApp {
         let needs_visual_highlight =
             !highlighted_text || nice_stream_selection_has_non_text_visual_ops(rows, selection_key);
         if needs_visual_highlight {
+            let page_height = self.current_render_page_height(page_index);
             match self.visual_page_for_preview(page_index) {
                 Ok(page) => {
-                    if let Some(hit) =
-                        nice_stream_visual_hit_for_selection(&page, rows, selection_key, object)
-                    {
+                    if let Some(hit) = nice_stream_visual_hit_for_selection(
+                        &page,
+                        rows,
+                        selection_key,
+                        object,
+                        page_height,
+                    ) {
                         self.status_log.push(format!(
                             "highlighted page {} visual bbox from nice stream",
                             page_index + 1
@@ -1455,8 +1564,9 @@ impl GuiShellApp {
                 let hit = visual_hit
                     .as_ref()
                     .filter(|hit| hit.page_index == page_index)?;
+                let page_height = self.current_render_page_height(hit.page_index);
                 let page = self.visual_page_for_preview(hit.page_index).ok()?;
-                nice_stream_selection_key_for_visual_hit(&page, &rows, hit)
+                nice_stream_selection_key_for_visual_hit(&page, &rows, hit, page_height)
             });
 
         let Some(selection_key) = selection_key else {

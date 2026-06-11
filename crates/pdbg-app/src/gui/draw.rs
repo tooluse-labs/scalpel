@@ -1316,6 +1316,36 @@ impl GuiShellApp {
         });
     }
 
+    pub(crate) fn draw_selected_xobject_resource_action(
+        &mut self,
+        ui: &mut egui::Ui,
+        stream_object: ObjectId,
+        chunks: &[StreamChunk],
+    ) {
+        let Some(selection_key) = self.real_stream_selected_block.clone() else {
+            return;
+        };
+        let rows = real_stream_nice_render_lines(stream_object, chunks);
+        let Some(resource_name) = nice_stream_do_resource_for_selection(&rows, &selection_key)
+        else {
+            return;
+        };
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("/{resource_name}"))
+                    .font(mono_font_id(DENSE_ROW_FONT_SIZE))
+                    .color(theme().accent),
+            );
+            ui.add_space(4.0);
+            if ui.button("Open XObject").clicked() {
+                self.select_xobject_resource_from_current_page(&resource_name);
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     pub(crate) fn draw_hex_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if !self.tree.is_real() {
             ui.label(RichText::new("Hex view requires a real PDF document").color(theme().muted));
@@ -2060,7 +2090,7 @@ impl GuiShellApp {
                     }
                     ui.label(RichText::new("exporting...").small().color(theme().muted));
                 } else {
-                    ui.menu_button("Export", |ui| {
+                    ui.menu_button("Export Stream", |ui| {
                         if ui
                             .add_enabled(stream.can_decode, egui::Button::new("Decoded bytes..."))
                             .clicked()
@@ -2244,6 +2274,11 @@ impl GuiShellApp {
                     );
                 },
             );
+            if self.real_stream_preset == RealStreamPreset::Nice
+                && self.real_stream_view_mode == StreamViewMode::Text
+            {
+                self.draw_selected_xobject_resource_action(ui, stream.object, &loaded_chunks);
+            }
             let view_height = (ui.available_height() - 32.0).max(STREAM_VIEW_MIN_HEIGHT);
             let scroll_output = ScrollArea::both()
                 .id_salt((

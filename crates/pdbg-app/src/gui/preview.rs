@@ -659,9 +659,24 @@ pub(crate) fn nice_stream_visual_hit_for_selection(
     rows: &[NiceStreamRenderLine],
     selection_key: &str,
     object: ObjectId,
+    page_height: Option<f32>,
 ) -> Option<PreviewVisualHit> {
     if let Some(hit) = visual_hit_for_object(page, object) {
         return Some(hit);
+    }
+
+    if let Some(content_bbox) = nice_stream_image_bbox_for_selection(rows, selection_key) {
+        let (bbox, element_index) =
+            best_page_bbox_for_content_bbox(page, &content_bbox, page_height);
+        return Some(PreviewVisualHit {
+            page_index: page.page_index,
+            element_index: element_index.unwrap_or(0),
+            kind: VisualElementKind::Image,
+            bbox,
+            object: Some(object),
+            untrusted: true,
+            contains_click: false,
+        });
     }
 
     let ops = nice_stream_visual_ops(rows);
@@ -770,8 +785,18 @@ pub(crate) fn nice_stream_selection_key_for_visual_hit(
     page: &VisualPage,
     rows: &[NiceStreamRenderLine],
     hit: &PreviewVisualHit,
+    page_height: Option<f32>,
 ) -> Option<String> {
     let element = page.elements.get(hit.element_index)?;
+    if matches!(
+        element.kind,
+        VisualElementKind::Image | VisualElementKind::Unknown
+    ) {
+        if let Some(key) = nice_stream_image_selection_key_for_bbox(rows, &hit.bbox, page_height) {
+            return Some(key);
+        }
+    }
+
     let ops = nice_stream_visual_ops(rows);
     for expected_kind in nice_stream_reverse_visual_kind_candidates(element.kind) {
         let ordinal = page
@@ -794,6 +819,212 @@ pub(crate) fn nice_stream_selection_key_for_visual_hit(
         }
     }
     None
+}
+
+pub(crate) fn nice_stream_image_selection_key_for_bbox(
+    rows: &[NiceStreamRenderLine],
+    bbox: &PageRect,
+    page_height: Option<f32>,
+) -> Option<String> {
+    nice_stream_image_bboxes(rows)
+        .into_iter()
+        .filter_map(|(row_index, content_bbox)| {
+            page_bbox_candidates_for_content_bbox(&content_bbox, page_height)
+                .into_iter()
+                .map(|image_bbox| {
+                    (
+                        rect_intersection_area(&image_bbox, bbox),
+                        rect_area(&image_bbox),
+                        row_index,
+                    )
+                })
+                .filter(|(area, _, _)| *area > 0.0)
+                .max_by(|left, right| {
+                    left.0
+                        .partial_cmp(&right.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            right
+                                .1
+                                .partial_cmp(&left.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                })
+        })
+        .max_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+        .and_then(|(_, _, row_index)| rows.get(row_index).map(|row| row.line_key.clone()))
+}
+
+pub(crate) fn nice_stream_image_bbox_for_selection(
+    rows: &[NiceStreamRenderLine],
+    selection_key: &str,
+) -> Option<PageRect> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| nice_stream_row_matches_selection(row, selection_key))
+        .find_map(|(row_index, row)| {
+            nice_stream_do_resource_name(&row.line.text)
+                .and_then(|_| nice_stream_image_bbox_before_row(rows, row_index))
+        })
+}
+
+pub(crate) fn nice_stream_image_bboxes(rows: &[NiceStreamRenderLine]) -> Vec<(usize, PageRect)> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(row_index, row)| {
+            nice_stream_do_resource_name(&row.line.text)
+                .and_then(|_| nice_stream_image_bbox_before_row(rows, row_index))
+                .map(|bbox| (row_index, bbox))
+        })
+        .collect()
+}
+
+pub(crate) fn nice_stream_image_bbox_before_row(
+    rows: &[NiceStreamRenderLine],
+    row_index: usize,
+) -> Option<PageRect> {
+    let current_indent = rows.get(row_index)?.line.indent;
+    rows[..row_index]
+        .iter()
+        .rev()
+        .take_while(|row| row.line.indent >= current_indent)
+        .find_map(|row| nice_stream_image_bbox_from_cm_line(&row.line.text))
+}
+
+pub(crate) fn nice_stream_image_bbox_from_cm_line(line: &str) -> Option<PageRect> {
+    let tokens = pdf_content_tokens(line);
+    if tokens.last().map(String::as_str) != Some("cm") || tokens.len() < 7 {
+        return None;
+    }
+    let values = tokens[tokens.len() - 7..tokens.len() - 1]
+        .iter()
+        .map(|token| token.parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let matrix: [f32; 6] = values.try_into().ok()?;
+    let points = [
+        transform_unit_point(matrix, 0.0, 0.0),
+        transform_unit_point(matrix, 1.0, 0.0),
+        transform_unit_point(matrix, 0.0, 1.0),
+        transform_unit_point(matrix, 1.0, 1.0),
+    ];
+    let min_x = points.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
+    let max_x = points
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = points.iter().map(|(_, y)| *y).fold(f32::INFINITY, f32::min);
+    let max_y = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    (width > 0.0 && height > 0.0).then_some(PageRect {
+        x: min_x,
+        y: min_y,
+        width,
+        height,
+    })
+}
+
+pub(crate) fn transform_unit_point(matrix: [f32; 6], x: f32, y: f32) -> (f32, f32) {
+    let [a, b, c, d, e, f] = matrix;
+    (a * x + c * y + e, b * x + d * y + f)
+}
+
+pub(crate) fn best_visual_element_overlap_for_bbox(
+    page: &VisualPage,
+    bbox: &PageRect,
+) -> Option<(usize, f32)> {
+    page.elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| {
+            let area = rect_intersection_area(&element.bbox, bbox);
+            (area > 0.0).then_some((index, area))
+        })
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+pub(crate) fn best_page_bbox_for_content_bbox(
+    page: &VisualPage,
+    content_bbox: &PageRect,
+    page_height: Option<f32>,
+) -> (PageRect, Option<usize>) {
+    let mut candidates = page_bbox_candidates_for_content_bbox(content_bbox, page_height);
+    if candidates.is_empty() {
+        candidates.push(content_bbox.clone());
+    }
+
+    let mut best: Option<(f32, PageRect, usize)> = None;
+    for candidate in &candidates {
+        let Some((element_index, area)) = best_visual_element_overlap_for_bbox(page, candidate)
+        else {
+            continue;
+        };
+        let should_replace = best
+            .as_ref()
+            .and_then(|(best_area, _, _)| area.partial_cmp(best_area))
+            .is_some_and(|ordering| ordering == std::cmp::Ordering::Greater);
+        if best.is_none() || should_replace {
+            best = Some((area, candidate.clone(), element_index));
+        }
+    }
+
+    if let Some((_, bbox, element_index)) = best {
+        (bbox, Some(element_index))
+    } else {
+        (candidates.remove(0), None)
+    }
+}
+
+pub(crate) fn page_bbox_candidates_for_content_bbox(
+    content_bbox: &PageRect,
+    page_height: Option<f32>,
+) -> Vec<PageRect> {
+    let mut candidates = Vec::new();
+    if let Some(height) = page_height.filter(|height| height.is_finite() && *height > 0.0) {
+        candidates.push(flip_page_rect_y(content_bbox, height));
+    }
+    if !candidates
+        .iter()
+        .any(|candidate| page_rects_approximately_equal(candidate, content_bbox))
+    {
+        candidates.push(content_bbox.clone());
+    }
+    candidates
+}
+
+pub(crate) fn flip_page_rect_y(rect: &PageRect, page_height: f32) -> PageRect {
+    PageRect {
+        x: rect.x,
+        y: page_height - rect.y - rect.height,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+pub(crate) fn page_rects_approximately_equal(a: &PageRect, b: &PageRect) -> bool {
+    const EPSILON: f32 = 0.01;
+    (a.x - b.x).abs() <= EPSILON
+        && (a.y - b.y).abs() <= EPSILON
+        && (a.width - b.width).abs() <= EPSILON
+        && (a.height - b.height).abs() <= EPSILON
 }
 
 pub(crate) fn nice_stream_reverse_visual_kind_candidates(
@@ -901,6 +1132,14 @@ pub(crate) fn rect_contains_point(rect: &PageRect, x: f32, y: f32) -> bool {
 
 pub(crate) fn rect_area(rect: &PageRect) -> f32 {
     (rect.width.max(0.0)) * (rect.height.max(0.0))
+}
+
+pub(crate) fn rect_intersection_area(a: &PageRect, b: &PageRect) -> f32 {
+    let left = a.x.max(b.x);
+    let top = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    ((right - left).max(0.0)) * ((bottom - top).max(0.0))
 }
 
 pub(crate) fn rect_distance_sq_to_point(rect: &PageRect, x: f32, y: f32) -> f32 {

@@ -1114,8 +1114,9 @@ fn nice_stream_visual_selection_matches_vector_and_image_order() {
         .unwrap();
 
     let vector_hit =
-        nice_stream_visual_hit_for_selection(&page, &rows, &vector_key, object).unwrap();
-    let image_hit = nice_stream_visual_hit_for_selection(&page, &rows, &image_key, object).unwrap();
+        nice_stream_visual_hit_for_selection(&page, &rows, &vector_key, object, None).unwrap();
+    let image_hit =
+        nice_stream_visual_hit_for_selection(&page, &rows, &image_key, object, None).unwrap();
 
     assert_eq!(vector_hit.element_index, 1);
     assert_eq!(vector_hit.kind, VisualElementKind::Vector);
@@ -1123,6 +1124,104 @@ fn nice_stream_visual_selection_matches_vector_and_image_order() {
     assert_eq!(image_hit.element_index, 2);
     assert_eq!(image_hit.kind, VisualElementKind::Image);
     assert_eq!(image_hit.bbox.x, 40.0);
+}
+
+#[test]
+fn nice_stream_image_selection_uses_cm_bbox_for_highlight() {
+    let object = ObjectId { num: 7, gen: 0 };
+    let chunks = vec![StreamChunk {
+        mode: StreamMode::Decoded,
+        offset: 0,
+        bytes: b"q 100 0 0 50 300 400 cm /Im0 Do Q".to_vec(),
+        total_size: Some(38),
+        truncated: false,
+        decode_diagnostics: Vec::new(),
+    }];
+    let rows = real_stream_nice_render_lines(object, &chunks);
+    let page = VisualPage {
+        page_index: 0,
+        elements: vec![
+            VisualElement {
+                kind: VisualElementKind::Image,
+                bbox: PageRect {
+                    x: 300.0,
+                    y: 400.0,
+                    width: 100.0,
+                    height: 50.0,
+                },
+                object: None,
+                untrusted: false,
+            },
+            VisualElement {
+                kind: VisualElementKind::Image,
+                bbox: PageRect {
+                    x: 300.0,
+                    y: 50.0,
+                    width: 100.0,
+                    height: 50.0,
+                },
+                object: None,
+                untrusted: false,
+            },
+        ],
+    };
+    let image_key = rows
+        .iter()
+        .find(|row| row.line.text == "/Im0 Do")
+        .map(|row| row.line_key.clone())
+        .unwrap();
+
+    let hit = nice_stream_visual_hit_for_selection(&page, &rows, &image_key, object, Some(500.0))
+        .unwrap();
+
+    assert_eq!(hit.kind, VisualElementKind::Image);
+    assert_eq!(hit.element_index, 1);
+    assert_eq!(hit.bbox.x, 300.0);
+    assert_eq!(hit.bbox.y, 50.0);
+    assert_eq!(hit.bbox.width, 100.0);
+    assert_eq!(hit.bbox.height, 50.0);
+}
+
+#[test]
+fn nice_stream_visual_hit_prefers_image_bbox_overlap_over_ordinal() {
+    let object = ObjectId { num: 7, gen: 0 };
+    let chunks = vec![StreamChunk {
+        mode: StreamMode::Decoded,
+        offset: 0,
+        bytes: b"q 100 0 0 50 0 0 cm /Im0 Do Q q 20 0 0 10 300 400 cm /Im1 Do Q".to_vec(),
+        total_size: Some(72),
+        truncated: false,
+        decode_diagnostics: Vec::new(),
+    }];
+    let rows = real_stream_nice_render_lines(object, &chunks);
+    let page = VisualPage {
+        page_index: 0,
+        elements: vec![VisualElement {
+            kind: VisualElementKind::Image,
+            bbox: PageRect {
+                x: 300.0,
+                y: 90.0,
+                width: 20.0,
+                height: 10.0,
+            },
+            object: None,
+            untrusted: false,
+        }],
+    };
+    let hit = PreviewVisualHit {
+        page_index: 0,
+        element_index: 0,
+        kind: VisualElementKind::Image,
+        bbox: page.elements[0].bbox.clone(),
+        object: None,
+        untrusted: false,
+        contains_click: true,
+    };
+
+    let key = nice_stream_selection_key_for_visual_hit(&page, &rows, &hit, Some(500.0)).unwrap();
+    let row = rows.iter().find(|row| row.line_key == key).unwrap();
+
+    assert_eq!(row.line.text, "/Im1 Do");
 }
 
 #[test]
@@ -1174,7 +1273,7 @@ fn nice_stream_visual_hit_selects_matching_draw_operation() {
         contains_click: true,
     };
 
-    let key = nice_stream_selection_key_for_visual_hit(&page, &rows, &hit).unwrap();
+    let key = nice_stream_selection_key_for_visual_hit(&page, &rows, &hit, None).unwrap();
     let row = rows.iter().find(|row| row.line_key == key).unwrap();
 
     assert_eq!(row.line.text, "/Im0 Do");
@@ -2628,6 +2727,20 @@ fn export_file_names_pick_native_extensions() {
     );
 }
 
+#[test]
+fn nice_stream_do_resource_name_extracts_xobject_name() {
+    assert_eq!(
+        nice_stream_do_resource_name("/Image6 Do"),
+        Some("Image6".to_string())
+    );
+    assert_eq!(
+        nice_stream_do_resource_name("  /Im0   Do  "),
+        Some("Im0".to_string())
+    );
+    assert_eq!(nice_stream_do_resource_name("(Text) Tj"), None);
+    assert_eq!(nice_stream_do_resource_name("Do"), None);
+}
+
 #[cfg(feature = "real-mupdf")]
 #[test]
 fn stream_export_writes_full_raw_bytes_to_file() {
@@ -2655,6 +2768,28 @@ fn stream_export_writes_full_raw_bytes_to_file() {
     assert_eq!(std::fs::read(&out_path).unwrap(), b"AAABBBCCCDDD");
 
     let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&pdf_path);
+}
+
+#[cfg(feature = "real-mupdf")]
+#[test]
+fn selected_do_resource_resolves_to_image_xobject() {
+    let pdf_path = write_temp_pdf("do-resource-resolve", &synthetic_image_pdf());
+    let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+        smoke_exit_after: None,
+        pdf_path: Some(pdf_path.to_string_lossy().to_string()),
+        recent_files_path: Some(temp_recent_file_path("gui-do-resource")),
+        start_empty_when_no_pdf: false,
+        render_max_dimension: None,
+    });
+
+    let (object, is_image) = app.resolve_page_xobject_resource(0, "Im0").unwrap();
+    assert_eq!(object, ObjectId { num: 4, gen: 0 });
+    assert!(is_image);
+
+    let err = app.resolve_page_xobject_resource(0, "Missing").unwrap_err();
+    assert!(err.contains("no /Missing entry"), "got: {err}");
+
     let _ = std::fs::remove_file(&pdf_path);
 }
 

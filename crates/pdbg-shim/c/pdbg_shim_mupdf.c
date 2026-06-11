@@ -2970,6 +2970,8 @@ pdbg_status pdbg_image_object_load(
     pdf_obj *obj = NULL;
     fz_image *fz_img = NULL;
     fz_pixmap *pixmap = NULL;
+    fz_pixmap *mask_pixmap = NULL;
+    fz_pixmap *masked_pixmap = NULL;
     fz_pixmap *converted = NULL;
     pdbg_image *image = NULL;
     pdbg_status status = PDBG_OK;
@@ -2980,6 +2982,8 @@ pdbg_status pdbg_image_object_load(
     fz_var(obj);
     fz_var(fz_img);
     fz_var(pixmap);
+    fz_var(mask_pixmap);
+    fz_var(masked_pixmap);
     fz_var(converted);
     fz_var(image);
     fz_var(status);
@@ -3004,6 +3008,29 @@ pdbg_status pdbg_image_object_load(
             int want_w = (int)max_dimension;
             int want_h = (int)max_dimension;
             pixmap = fz_get_pixmap_from_image(ctx, fz_img, NULL, NULL, &want_w, &want_h);
+
+            if (fz_img->mask && !fz_pixmap_alpha(ctx, pixmap)) {
+                int mask_w = fz_pixmap_width(ctx, pixmap);
+                int mask_h = fz_pixmap_height(ctx, pixmap);
+                mask_pixmap =
+                    fz_get_pixmap_from_image(ctx, fz_img->mask, NULL, NULL, &mask_w, &mask_h);
+                if (fz_pixmap_width(ctx, mask_pixmap) == fz_pixmap_width(ctx, pixmap) &&
+                    fz_pixmap_height(ctx, mask_pixmap) == fz_pixmap_height(ctx, pixmap)) {
+                    masked_pixmap = fz_new_pixmap_from_color_and_mask(ctx, pixmap, mask_pixmap);
+                    fz_drop_pixmap(ctx, pixmap);
+                    pixmap = masked_pixmap;
+                    masked_pixmap = NULL;
+                } else {
+                    warning_capture.seen = 1;
+                    snprintf(
+                        warning_capture.message,
+                        sizeof(warning_capture.message),
+                        "%s",
+                        "cannot combine image soft mask with different dimensions");
+                }
+                fz_drop_pixmap(ctx, mask_pixmap);
+                mask_pixmap = NULL;
+            }
 
             if (fz_pixmap_colorspace(ctx, pixmap) != fz_device_rgb(ctx)) {
                 converted = fz_convert_pixmap(
@@ -3053,10 +3080,27 @@ pdbg_status pdbg_image_object_load(
                             uint8_t *dst = image->pixels + (size_t)y * image->stride;
                             for (int x = 0; x < width; x++) {
                                 const unsigned char *px = src + (size_t)x * (size_t)components;
-                                dst[0] = px[0];
-                                dst[1] = px[1];
-                                dst[2] = px[2];
-                                dst[3] = alpha && components == 4 ? px[3] : 0xFF;
+                                if (alpha && components == 4) {
+                                    unsigned int a = px[3];
+                                    dst[3] = (uint8_t)a;
+                                    if (a == 0) {
+                                        dst[0] = 0;
+                                        dst[1] = 0;
+                                        dst[2] = 0;
+                                    } else {
+                                        unsigned int r = ((unsigned int)px[0] * 255U + a / 2U) / a;
+                                        unsigned int g = ((unsigned int)px[1] * 255U + a / 2U) / a;
+                                        unsigned int b = ((unsigned int)px[2] * 255U + a / 2U) / a;
+                                        dst[0] = (uint8_t)(r > 255U ? 255U : r);
+                                        dst[1] = (uint8_t)(g > 255U ? 255U : g);
+                                        dst[2] = (uint8_t)(b > 255U ? 255U : b);
+                                    }
+                                } else {
+                                    dst[0] = px[0];
+                                    dst[1] = px[1];
+                                    dst[2] = px[2];
+                                    dst[3] = 0xFF;
+                                }
                                 dst += 4;
                             }
                         }
@@ -3073,6 +3117,10 @@ pdbg_status pdbg_image_object_load(
         }
         if (converted)
             fz_drop_pixmap(ctx, converted);
+        if (masked_pixmap)
+            fz_drop_pixmap(ctx, masked_pixmap);
+        if (mask_pixmap)
+            fz_drop_pixmap(ctx, mask_pixmap);
         if (pixmap)
             fz_drop_pixmap(ctx, pixmap);
         if (fz_img)

@@ -305,6 +305,27 @@ pub(crate) fn nice_stream_line_text_fragments(line: &str) -> Vec<String> {
     }
 }
 
+pub(crate) fn nice_stream_do_resource_for_selection(
+    rows: &[NiceStreamRenderLine],
+    selection_key: &str,
+) -> Option<String> {
+    rows.iter()
+        .filter(|row| nice_stream_row_matches_selection(row, selection_key))
+        .find_map(|row| nice_stream_do_resource_name(&row.line.text))
+}
+
+pub(crate) fn nice_stream_do_resource_name(line: &str) -> Option<String> {
+    let tokens = pdf_content_tokens(line);
+    let operator = tokens.last()?;
+    if operator != "Do" {
+        return None;
+    }
+    let name = tokens.get(tokens.len().checked_sub(2)?)?;
+    name.strip_prefix('/')
+        .filter(|resource| !resource.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 pub(crate) fn push_pdf_text_fragments_from_token(token: &str, out: &mut Vec<String>) {
     if token.starts_with('(') {
         let text = decode_pdf_literal_string_token(token);

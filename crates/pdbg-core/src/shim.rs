@@ -3405,6 +3405,57 @@ mod tests {
     }
 
     #[cfg(feature = "real-mupdf")]
+    fn synthetic_smask_image_pdf() -> Vec<u8> {
+        fn push_obj(pdf: &mut String, offsets: &mut Vec<usize>, body: &str) {
+            offsets.push(pdf.len());
+            pdf.push_str(body);
+        }
+
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = Vec::new();
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] \
+             /Resources << /XObject << /Im0 4 0 R >> >> >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "4 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 5 0 R /Length 6 >>\n\
+             stream\nAAABBB\nendstream\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 2 >>\n\
+             stream\n z\nendstream\nendobj\n",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
     #[test]
     fn real_mupdf_image_preview_converts_gray_colorspace() {
         let pdf_path = write_temp_real_pdf("gray-image", &synthetic_gray_image_pdf());
@@ -3424,6 +3475,32 @@ mod tests {
         }
         // Dark pixels (0x20) and light pixels (0x7A) stay distinguishable.
         assert_ne!(preview.pixels_rgba[0], preview.pixels_rgba[8]);
+
+        drop(doc);
+        let _ = std::fs::remove_file(&pdf_path);
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_image_preview_combines_soft_mask_alpha() {
+        let pdf_path = write_temp_real_pdf("smask-image", &synthetic_smask_image_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim
+            .open_document(pdf_path.to_string_lossy().as_ref())
+            .unwrap();
+
+        let preview = doc.image_preview(ObjectId { num: 4, gen: 0 }, 64).unwrap();
+        assert_eq!((preview.width, preview.height), (2, 1));
+        assert_eq!(preview.pixels_rgba.len(), 8);
+        assert!(preview.pixels_rgba[0..3]
+            .iter()
+            .all(|channel| channel.abs_diff(b'A') <= 1));
+        assert!(preview.pixels_rgba[4..7]
+            .iter()
+            .all(|channel| channel.abs_diff(b'B') <= 1));
+        assert_ne!(preview.pixels_rgba[3], 0xFF);
+        assert_ne!(preview.pixels_rgba[7], 0xFF);
+        assert_ne!(preview.pixels_rgba[3], preview.pixels_rgba[7]);
 
         drop(doc);
         let _ = std::fs::remove_file(&pdf_path);
