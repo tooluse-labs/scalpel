@@ -285,7 +285,8 @@ pub(crate) fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
         } else {
             theme().top_bar_muted
         }))
-        .fill(theme().top_bar_button),
+        .fill(theme().top_bar_button)
+        .min_size(egui::vec2(0.0, TOP_BAR_BUTTON_HEIGHT)),
     )
 }
 
@@ -303,7 +304,7 @@ pub(crate) fn top_bar_icon_button(
             theme().top_bar_muted
         }))
         .fill(theme().top_bar_button)
-        .min_size(egui::vec2(30.0, 24.0)),
+        .min_size(egui::vec2(30.0, TOP_BAR_BUTTON_HEIGHT)),
     )
     .on_hover_text(hover_text.into())
 }

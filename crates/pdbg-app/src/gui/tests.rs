@@ -2476,6 +2476,30 @@ fn reference_navigation_uses_back_forward_history() {
 }
 
 #[test]
+fn tree_selection_uses_back_forward_history() {
+    let mut app = GuiShellApp::new();
+    assert_eq!(app.selected_row, 0);
+
+    app.select_row_from_tree(2);
+    assert_eq!(app.selected_row, 2);
+    assert_eq!(app.back_stack, vec![0]);
+    assert!(app.forward_stack.is_empty());
+
+    app.go_back();
+    assert_eq!(app.selected_row, 0);
+    assert_eq!(app.forward_stack, vec![2]);
+
+    app.go_forward();
+    assert_eq!(app.selected_row, 2);
+    assert_eq!(app.back_stack, vec![0]);
+
+    app.go_back();
+    app.select_row_from_tree(3);
+    assert_eq!(app.selected_row, 3);
+    assert!(app.forward_stack.is_empty());
+}
+
+#[test]
 fn smoke_exit_option_is_stored_for_native_launch_tests() {
     let app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: Some(Duration::from_millis(250)),
@@ -2878,7 +2902,10 @@ fn selected_do_resource_resolves_to_image_xobject() {
 #[cfg(feature = "real-mupdf")]
 #[test]
 fn selected_do_resource_resolves_against_stream_resources_first() {
-    let pdf_path = write_temp_pdf("do-resource-form-xobject", &synthetic_form_xobject_image_pdf());
+    let pdf_path = write_temp_pdf(
+        "do-resource-form-xobject",
+        &synthetic_form_xobject_image_pdf(),
+    );
     let mut app = GuiShellApp::new_with_options(GuiRunOptions {
         smoke_exit_after: None,
         pdf_path: Some(pdf_path.to_string_lossy().to_string()),

@@ -39,9 +39,9 @@ mod tree;
 
 // app.rs mostly holds GuiShellApp impl blocks; selected free helpers are shared
 // with drawing code and tests.
-use app::{xobject_subtype, ResolvedXObject};
 #[cfg(test)]
 use app::*;
+use app::{xobject_subtype, ResolvedXObject};
 use files::*;
 use jobs::*;
 use labels::*;
@@ -67,6 +67,8 @@ const PREVIEW_CONTROL_GROUP_HEIGHT: f32 = 42.0;
 const PREVIEW_ZOOM_CONTROL_WIDTH: f32 = 228.0;
 const PREVIEW_PAGER_CONTROL_WIDTH: f32 = 174.0;
 const PREVIEW_CONTROL_GAP: f32 = 14.0;
+const TOP_BAR_HEIGHT: f32 = 38.0;
+const TOP_BAR_BUTTON_HEIGHT: f32 = 28.0;
 const OBJECT_SEARCH_CHILD_PAGE_SIZE: usize = 64;
 const OBJECT_SEARCH_MAX_CHILD_PAGES: usize = 2;
 const OBJECT_SEARCH_MAX_DEPTH: usize = 4;
@@ -290,9 +292,12 @@ impl eframe::App for GuiShellApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme().top_bar)
-                    .inner_margin(egui::Margin::symmetric(12, 6)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
-            .show_inside(ui, |ui| self.draw_top_bar(ui));
+            .show_inside(ui, |ui| {
+                ui.set_min_height(TOP_BAR_HEIGHT);
+                self.draw_top_bar(ui);
+            });
 
         egui::Panel::bottom("status_bar")
             .frame(

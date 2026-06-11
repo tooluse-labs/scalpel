@@ -300,6 +300,7 @@ impl GuiShellApp {
             self.select_visual_bbox_for_tree_row(self.selected_row);
             return;
         }
+        self.back_stack.push(self.selected_row);
         self.selected_row = row;
         self.clear_preview_selection();
         self.forward_stack.clear();
@@ -1388,8 +1389,9 @@ impl GuiShellApp {
                     .and_then(|state| state.panels.summary.as_ref())
                     .map(|summary| summary.doc.clone())
                 else {
-                    self.status_log
-                        .push(format!("resolved /{resource_name} but document is unavailable"));
+                    self.status_log.push(format!(
+                        "resolved /{resource_name} but document is unavailable"
+                    ));
                     return;
                 };
                 let row = self.tree.ensure_real_object_row(doc, resolved.object);
@@ -1728,6 +1730,7 @@ impl GuiShellApp {
 
     pub(crate) fn select_stream_row_from_preview(&mut self, row: usize) {
         if self.selected_row != row {
+            self.back_stack.push(self.selected_row);
             self.selected_row = row;
             self.forward_stack.clear();
         }

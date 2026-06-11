@@ -371,81 +371,88 @@ impl GuiShellApp {
     }
 
     pub(crate) fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(
-                RichText::new("pdbg")
-                    .strong()
-                    .size(15.0)
-                    .color(theme().top_bar_text),
-            );
-            top_bar_separator(ui);
-            if top_bar_button(ui, "Open PDF...", true).clicked() {
-                self.open_pdf_dialog_open = true;
-                self.open_pdf_error = None;
-            }
-            if !self.recent_pdf_paths.is_empty() {
-                let mut recent_to_open = None;
-                ui.scope(|ui| {
-                    // Match the top-bar buttons; the default widget fill is
-                    // tuned for panels, not the bar.
-                    let button = theme().top_bar_button;
-                    let button_hover = theme().top_bar_button_hover;
-                    let stroke = egui::Stroke::new(1.0, theme().border);
-                    let widgets = &mut ui.visuals_mut().widgets;
-                    widgets.inactive.weak_bg_fill = button;
-                    widgets.inactive.bg_stroke = stroke;
-                    widgets.hovered.weak_bg_fill = button_hover;
-                    widgets.hovered.bg_stroke = stroke;
-                    widgets.active.weak_bg_fill = button_hover;
-                    widgets.active.bg_stroke = stroke;
-                    widgets.open.weak_bg_fill = button_hover;
-                    widgets.open.bg_stroke = stroke;
-                    ui.menu_button(
-                        RichText::new("Recent")
-                            .size(12.0)
-                            .color(theme().top_bar_text),
-                        |ui| {
-                            // Restore the app style so the dropdown stays light.
-                            ui.set_style(pdbg_style());
-                            for path in self.recent_pdf_paths.clone() {
-                                if ui
-                                    .button(display_file_chip_label(&path))
-                                    .on_hover_text(display_path_hover(&path))
-                                    .clicked()
-                                {
-                                    recent_to_open = Some(path);
-                                    ui.close();
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), TOP_BAR_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+                ui.spacing_mut().interact_size.y = TOP_BAR_BUTTON_HEIGHT;
+                ui.label(
+                    RichText::new("pdbg")
+                        .strong()
+                        .size(15.0)
+                        .color(theme().top_bar_text),
+                );
+                top_bar_separator(ui);
+                if top_bar_button(ui, "Open PDF...", true).clicked() {
+                    self.open_pdf_dialog_open = true;
+                    self.open_pdf_error = None;
+                }
+                if !self.recent_pdf_paths.is_empty() {
+                    let mut recent_to_open = None;
+                    ui.scope(|ui| {
+                        // Match the top-bar buttons; the default widget fill is
+                        // tuned for panels, not the bar.
+                        let button = theme().top_bar_button;
+                        let button_hover = theme().top_bar_button_hover;
+                        let stroke = egui::Stroke::new(1.0, theme().border);
+                        let widgets = &mut ui.visuals_mut().widgets;
+                        widgets.inactive.weak_bg_fill = button;
+                        widgets.inactive.bg_stroke = stroke;
+                        widgets.hovered.weak_bg_fill = button_hover;
+                        widgets.hovered.bg_stroke = stroke;
+                        widgets.active.weak_bg_fill = button_hover;
+                        widgets.active.bg_stroke = stroke;
+                        widgets.open.weak_bg_fill = button_hover;
+                        widgets.open.bg_stroke = stroke;
+                        ui.menu_button(
+                            RichText::new("Recent")
+                                .size(12.0)
+                                .color(theme().top_bar_text),
+                            |ui| {
+                                // Restore the app style so the dropdown stays light.
+                                ui.set_style(pdbg_style());
+                                for path in self.recent_pdf_paths.clone() {
+                                    if ui
+                                        .button(display_file_chip_label(&path))
+                                        .on_hover_text(display_path_hover(&path))
+                                        .clicked()
+                                    {
+                                        recent_to_open = Some(path);
+                                        ui.close();
+                                    }
                                 }
-                            }
-                        },
-                    );
-                });
-                if let Some(path) = recent_to_open {
-                    self.open_pdf_from_path(path);
+                            },
+                        );
+                    });
+                    if let Some(path) = recent_to_open {
+                        self.open_pdf_from_path(path);
+                    }
                 }
-            }
-            top_bar_separator(ui);
-            if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked() {
-                self.go_back();
-            }
-            if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward").clicked() {
-                self.go_forward();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (label, hover) = if dark_mode_enabled() {
-                    ("Light", "Switch to the light theme")
-                } else {
-                    ("Dark", "Switch to the dark theme")
-                };
-                if top_bar_button(ui, label, true)
-                    .on_hover_text(hover)
-                    .clicked()
+                top_bar_separator(ui);
+                if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked() {
+                    self.go_back();
+                }
+                if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward").clicked()
                 {
-                    self.set_theme(ui.ctx(), !dark_mode_enabled());
+                    self.go_forward();
                 }
-            });
-        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, hover) = if dark_mode_enabled() {
+                        ("Light", "Switch to the light theme")
+                    } else {
+                        ("Dark", "Switch to the dark theme")
+                    };
+                    if top_bar_button(ui, label, true)
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        self.set_theme(ui.ctx(), !dark_mode_enabled());
+                    }
+                });
+            },
+        );
     }
 
     pub(crate) fn set_theme(&mut self, ctx: &egui::Context, dark: bool) {
@@ -1320,7 +1327,11 @@ impl GuiShellApp {
             .inner_margin(egui::Margin::symmetric(8, 5))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("XObject resource").small().color(theme().muted));
+                    ui.label(
+                        RichText::new("XObject resource")
+                            .small()
+                            .color(theme().muted),
+                    );
                     ui.label(
                         RichText::new(format!("/{resource_name}"))
                             .font(mono_font_id(DENSE_ROW_FONT_SIZE))
