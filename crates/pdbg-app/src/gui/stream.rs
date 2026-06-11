@@ -4,6 +4,7 @@ pub(crate) fn draw_stream_summary_grid(
     ui: &mut egui::Ui,
     stream: &StreamSummary,
     decoded_size_fallback: Option<u64>,
+    xobject_type_label: Option<&str>,
 ) {
     egui::Grid::new("real_stream_summary_grid")
         .num_columns(2)
@@ -44,6 +45,11 @@ pub(crate) fn draw_stream_summary_grid(
             dense_label(ui, "can decode");
             summary_flag(ui, stream.can_decode);
             ui.end_row();
+            if let Some(label) = xobject_type_label {
+                dense_label(ui, "xobject type");
+                ui.label(dense_monospace_text(label));
+                ui.end_row();
+            }
             dense_label(ui, "image preview");
             summary_flag(ui, stream.image_preview_available);
             ui.end_row();

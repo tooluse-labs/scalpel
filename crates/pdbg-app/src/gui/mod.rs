@@ -37,8 +37,9 @@ mod tests;
 mod theme;
 mod tree;
 
-// app.rs mostly holds GuiShellApp impl blocks; its free helpers are only
-// referenced by name from tests.
+// app.rs mostly holds GuiShellApp impl blocks; selected free helpers are shared
+// with drawing code and tests.
+use app::{xobject_subtype, ResolvedXObject};
 #[cfg(test)]
 use app::*;
 use files::*;

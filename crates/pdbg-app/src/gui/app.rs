@@ -36,6 +36,25 @@ pub(crate) fn stream_export_worker(
         .map_err(|err| err.message)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedXObject {
+    pub(crate) object: ObjectId,
+    pub(crate) subtype: Option<String>,
+    pub(crate) is_image: bool,
+}
+
+impl ResolvedXObject {
+    pub(crate) fn type_label(&self) -> String {
+        match self.subtype.as_deref() {
+            Some("Image") => "Image XObject".to_string(),
+            Some("Form") => "Form XObject".to_string(),
+            Some("PS") => "PostScript XObject".to_string(),
+            Some(subtype) => format!("{subtype} XObject"),
+            None => "XObject".to_string(),
+        }
+    }
+}
+
 pub(crate) fn dict_entry_summary<'a>(
     detail: &'a ObjectDetail,
     key: &str,
@@ -49,11 +68,28 @@ pub(crate) fn dict_entry_summary<'a>(
         .map(|entry| &entry.value)
 }
 
+pub(crate) fn dict_entry_name_value(
+    state: &AppState,
+    detail: &ObjectDetail,
+    key: &str,
+) -> Option<String> {
+    let summary = dict_entry_summary(detail, key)?;
+    let detail = load_object_detail(state, &summary.id).ok()?;
+    match detail.value {
+        ObjectValue::Name(name) => Some(name),
+        _ => None,
+    }
+}
+
+pub(crate) fn xobject_subtype(detail_state: &AppState, detail: &ObjectDetail) -> Option<String> {
+    dict_entry_name_value(detail_state, detail, "Subtype")
+}
+
 pub(crate) fn resolve_xobject_resource_from_detail(
     state: &AppState,
     detail: &ObjectDetail,
     resource_name: &str,
-) -> Result<(ObjectId, bool), String> {
+) -> Result<ResolvedXObject, String> {
     let resources = dict_entry_summary(detail, "Resources")
         .ok_or_else(|| "has no /Resources dictionary".to_string())?;
     let resources_detail = load_object_detail(state, &resources.id)?;
@@ -67,11 +103,16 @@ pub(crate) fn resolve_xobject_resource_from_detail(
         .or_else(|| resource.id.object_id())
         .ok_or_else(|| format!("/{resource_name} is not an indirect object"))?;
     let detail = load_object_detail(state, &resource.id)?;
+    let subtype = xobject_subtype(state, &detail);
     let is_image = detail
         .stream
         .as_ref()
         .is_some_and(|stream| stream.image_preview_available);
-    Ok((object, is_image))
+    Ok(ResolvedXObject {
+        object,
+        subtype,
+        is_image,
+    })
 }
 
 impl GuiShellApp {
@@ -1339,7 +1380,7 @@ impl GuiShellApp {
             .real_row_page_index(self.selected_row)
             .unwrap_or(self.render_page_index);
         match self.resolve_stream_xobject_resource(stream_object, Some(page_index), resource_name) {
-            Ok((object, is_image, source)) => {
+            Ok((resolved, source)) => {
                 let Some(doc) = self
                     .state
                     .as_ref()
@@ -1351,15 +1392,15 @@ impl GuiShellApp {
                         .push(format!("resolved /{resource_name} but document is unavailable"));
                     return;
                 };
-                let row = self.tree.ensure_real_object_row(doc, object);
+                let row = self.tree.ensure_real_object_row(doc, resolved.object);
                 self.select_row_from_tree(row);
                 self.scroll_selected_tree_row = true;
                 self.selected_tab = InspectorTab::Stream;
                 self.status_log.push(format!(
-                    "selected /{} XObject {}{} from {}",
+                    "selected /{} {} {} from {}",
                     resource_name,
-                    object_ref_text(object),
-                    if is_image { " image" } else { "" },
+                    resolved.type_label(),
+                    object_ref_text(resolved.object),
                     source,
                 ));
             }
@@ -1378,7 +1419,7 @@ impl GuiShellApp {
         stream_object: ObjectId,
         fallback_page_index: Option<usize>,
         resource_name: &str,
-    ) -> Result<(ObjectId, bool, String), String> {
+    ) -> Result<(ResolvedXObject, String), String> {
         let state = self
             .state
             .as_ref()
@@ -1397,18 +1438,17 @@ impl GuiShellApp {
         let stream_result = load_object_detail(state, &stream_id)
             .map_err(|err| err.to_string())
             .and_then(|detail| resolve_xobject_resource_from_detail(state, &detail, resource_name));
-        if let Ok((object, is_image)) = stream_result {
+        if let Ok(resolved) = stream_result {
             return Ok((
-                object,
-                is_image,
+                resolved,
                 format!("stream {}", object_ref_text(stream_object)),
             ));
         }
 
         if let Some(page_index) = fallback_page_index {
             match self.resolve_page_xobject_resource(page_index, resource_name) {
-                Ok((object, is_image)) => {
-                    return Ok((object, is_image, format!("page {}", page_index + 1)));
+                Ok(resolved) => {
+                    return Ok((resolved, format!("page {}", page_index + 1)));
                 }
                 Err(page_err) => {
                     return Err(format!(
@@ -1428,7 +1468,7 @@ impl GuiShellApp {
         &mut self,
         page_index: usize,
         resource_name: &str,
-    ) -> Result<(ObjectId, bool), String> {
+    ) -> Result<ResolvedXObject, String> {
         let page_row = self
             .ensure_tree_page_row(page_index)
             .ok_or_else(|| format!("page {} tree row is unavailable", page_index + 1))?;
@@ -1979,29 +2019,6 @@ impl GuiShellApp {
                 }
             }
         }
-    }
-
-    pub(crate) fn document_file_label(&self) -> String {
-        if self.empty_workspace {
-            return "No PDF".to_string();
-        }
-        if let Ok(state) = &self.state {
-            if let Some(summary) = &state.panels.summary {
-                return display_file_chip_label(&summary.file_path);
-            }
-        }
-        "fake.pdf".to_string()
-    }
-
-    pub(crate) fn document_path_hover(&self) -> Option<String> {
-        if self.empty_workspace {
-            return None;
-        }
-        self.state
-            .as_ref()
-            .ok()
-            .and_then(|state| state.panels.summary.as_ref())
-            .map(|summary| display_path_hover(&summary.file_path))
     }
 
     pub(crate) fn safe_mode_active(&self) -> bool {

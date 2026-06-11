@@ -1881,7 +1881,6 @@ fn gui_empty_workspace_starts_without_fake_document() {
     assert!(app.state.is_err());
     assert_eq!(app.page_count(), 0);
     assert!(app.real_render_job.is_none());
-    assert_eq!(app.document_file_label(), "No PDF");
     assert_eq!(app.window_title(), APP_TITLE);
     assert_eq!(app.breadcrumb_label(), "No document");
     assert!(app.status_log.iter().any(|line| line == "No PDF open"));
@@ -2865,9 +2864,10 @@ fn selected_do_resource_resolves_to_image_xobject() {
         render_max_dimension: None,
     });
 
-    let (object, is_image) = app.resolve_page_xobject_resource(0, "Im0").unwrap();
-    assert_eq!(object, ObjectId { num: 4, gen: 0 });
-    assert!(is_image);
+    let resolved = app.resolve_page_xobject_resource(0, "Im0").unwrap();
+    assert_eq!(resolved.object, ObjectId { num: 4, gen: 0 });
+    assert!(resolved.is_image);
+    assert_eq!(resolved.subtype.as_deref(), Some("Image"));
 
     let err = app.resolve_page_xobject_resource(0, "Missing").unwrap_err();
     assert!(err.contains("no /Missing entry"), "got: {err}");
@@ -2887,12 +2887,19 @@ fn selected_do_resource_resolves_against_stream_resources_first() {
         render_max_dimension: None,
     });
 
-    let (object, is_image, source) = app
+    let (resolved, source) = app
         .resolve_stream_xobject_resource(ObjectId { num: 5, gen: 0 }, Some(0), "Im0")
         .unwrap();
-    assert_eq!(object, ObjectId { num: 4, gen: 0 });
-    assert!(is_image);
+    assert_eq!(resolved.object, ObjectId { num: 4, gen: 0 });
+    assert!(resolved.is_image);
+    assert_eq!(resolved.subtype.as_deref(), Some("Image"));
     assert_eq!(source, "stream 5 0 R");
+
+    let form = app.resolve_page_xobject_resource(0, "Fm0").unwrap();
+    assert_eq!(form.object, ObjectId { num: 5, gen: 0 });
+    assert!(!form.is_image);
+    assert_eq!(form.subtype.as_deref(), Some("Form"));
+    assert_eq!(form.type_label(), "Form XObject");
 
     let _ = std::fs::remove_file(&pdf_path);
 }

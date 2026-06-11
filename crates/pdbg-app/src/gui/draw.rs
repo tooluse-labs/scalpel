@@ -372,7 +372,7 @@ impl GuiShellApp {
 
     pub(crate) fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.spacing_mut().item_spacing.x = 8.0;
             ui.label(
                 RichText::new("pdbg")
                     .strong()
@@ -444,25 +444,6 @@ impl GuiShellApp {
                 {
                     self.set_theme(ui.ctx(), !dark_mode_enabled());
                 }
-                // Document title centered in the space left between the
-                // action cluster and the theme toggle.
-                ui.with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        let title = ui.add(
-                            egui::Label::new(
-                                RichText::new(self.document_file_label())
-                                    .strong()
-                                    .size(12.0)
-                                    .color(theme().top_bar_text),
-                            )
-                            .truncate(),
-                        );
-                        if let Some(hover) = self.document_path_hover() {
-                            title.on_hover_text(hover);
-                        }
-                    },
-                );
             });
         });
     }
@@ -1339,14 +1320,14 @@ impl GuiShellApp {
             .inner_margin(egui::Margin::symmetric(8, 5))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("XObject").small().color(theme().muted));
+                    ui.label(RichText::new("XObject resource").small().color(theme().muted));
                     ui.label(
                         RichText::new(format!("/{resource_name}"))
                             .font(mono_font_id(DENSE_ROW_FONT_SIZE))
                             .color(theme().accent),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Open XObject").clicked() {
+                        if ui.button("Open referenced object").clicked() {
                             self.select_xobject_resource_from_stream_context(
                                 stream_object,
                                 &resource_name,
@@ -2093,6 +2074,19 @@ impl GuiShellApp {
             ui.label(RichText::new("Selected object has no stream").color(theme().muted));
             return;
         };
+        let xobject_type_label = self
+            .state
+            .as_ref()
+            .ok()
+            .and_then(|state| xobject_subtype(state, detail))
+            .map(|subtype| {
+                ResolvedXObject {
+                    object: stream.object,
+                    is_image: stream.image_preview_available,
+                    subtype: Some(subtype),
+                }
+                .type_label()
+            });
 
         section_frame().show(ui, |ui| {
             section_header_with_controls(ui, "Stream Summary", |ui| {
@@ -2122,7 +2116,7 @@ impl GuiShellApp {
                 .as_ref()
                 .filter(|chunk| chunk.mode == StreamMode::Decoded)
                 .and_then(|chunk| chunk.total_size);
-            draw_stream_summary_grid(ui, &stream, decoded_size);
+            draw_stream_summary_grid(ui, &stream, decoded_size, xobject_type_label.as_deref());
         });
 
         if stream.image_preview_available {
