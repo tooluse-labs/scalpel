@@ -20,8 +20,8 @@ Scalpel is an early desktop preview. The app is already useful for inspecting
 local PDFs, but APIs, package names, and UI details may still change before a
 stable release.
 
-Current release workflow builds packaged `pdbg-app` binaries for macOS and
-Linux. Windows packaging is not enabled yet.
+Current release workflow builds packaged Scalpel desktop archives for macOS,
+Linux, and Windows.
 
 ## Features
 
@@ -68,10 +68,12 @@ locked.
 ### From A Release Package
 
 Download the archive for your platform from GitHub Releases, unpack it, and run
-`pdbg-app`.
+Scalpel.
 
 ```sh
-./pdbg-app --gui --pdf /path/to/file.pdf
+# macOS: open Scalpel.app
+# Linux: ./scalpel
+# Windows: Scalpel.exe
 ```
 
 If no PDF is provided, Scalpel starts empty and you can use **Open PDF...** from
@@ -253,12 +255,14 @@ when `.github/workflows/release.yml` is run manually with a tag.
 
 Current packaged platforms:
 
-- macOS
-- Linux
+- macOS: `Scalpel-<tag>-macos-<arch>.app.zip`
+- Linux: `Scalpel-<tag>-linux-<arch>.tar.gz`
+- Windows: `Scalpel-<tag>-windows-x64.zip`
 
 Each archive includes:
 
-- `pdbg-app`
+- Scalpel desktop app or executable
+- `README.md`
 - `LICENSE`
 - `NOTICES`
 - SHA-256 checksum file next to the archive

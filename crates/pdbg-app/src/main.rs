@@ -48,24 +48,17 @@ impl CliOptions {
                 }
             }
         }
-        if !options.gui && launched_from_macos_app_bundle() {
+        if !options.gui && launched_as_desktop_app() {
             options.gui = true;
         }
         options
     }
 }
 
-fn launched_from_macos_app_bundle() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::current_exe()
-            .ok()
-            .is_some_and(|path| is_macos_app_bundle_executable_path(&path))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+fn launched_as_desktop_app() -> bool {
+    std::env::current_exe().ok().is_some_and(|path| {
+        is_macos_app_bundle_executable_path(&path) || is_scalpel_desktop_executable_path(&path)
+    })
 }
 
 fn is_macos_app_bundle_executable_path(path: &Path) -> bool {
@@ -90,6 +83,13 @@ fn is_macos_app_bundle_executable_path(path: &Path) -> bool {
             .to_string_lossy()
             .to_ascii_lowercase()
             .ends_with(".app")
+}
+
+fn is_scalpel_desktop_executable_path(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    stem.eq_ignore_ascii_case("scalpel")
 }
 
 fn parse_render_max_dimension(value: &str) -> Option<u32> {
@@ -156,7 +156,10 @@ fn run_gui(_options: CliOptions) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_macos_app_bundle_executable_path, parse_render_max_dimension};
+    use super::{
+        is_macos_app_bundle_executable_path, is_scalpel_desktop_executable_path,
+        parse_render_max_dimension,
+    };
     use std::path::Path;
 
     #[test]
@@ -179,6 +182,22 @@ mod tests {
         )));
         assert!(!is_macos_app_bundle_executable_path(Path::new(
             "/Users/zero/Dev/xreflab/target/release/pdbg-app"
+        )));
+    }
+
+    #[test]
+    fn scalpel_executable_name_opens_desktop_app() {
+        assert!(is_scalpel_desktop_executable_path(Path::new(
+            "/tmp/Scalpel"
+        )));
+        assert!(is_scalpel_desktop_executable_path(Path::new(
+            "C:/tools/Scalpel.exe"
+        )));
+        assert!(is_scalpel_desktop_executable_path(Path::new(
+            "/usr/local/bin/scalpel"
+        )));
+        assert!(!is_scalpel_desktop_executable_path(Path::new(
+            "/tmp/pdbg-app"
         )));
     }
 }
