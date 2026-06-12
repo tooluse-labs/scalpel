@@ -229,7 +229,7 @@ jobs:
           $env:PDBG_MUPDF_INCLUDE_DIR = Join-Path $sourceDir "include"
           $env:PDBG_MUPDF_LIB_DIR = $libDir
 
-          cmd.exe /c "`"$vcvars`" && msbuild `"$sourceDir\platform\win32\libmupdf.vcxproj`" /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 && cargo build --release -p pdbg-app"
+          cmd.exe /c "`"$vcvars`" && msbuild `"$sourceDir\platform\win32\mupdf.sln`" /m /t:libmupdf /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 && cargo build --release -p pdbg-app"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows release build failed"
           }
