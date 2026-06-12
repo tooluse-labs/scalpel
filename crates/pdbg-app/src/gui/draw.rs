@@ -318,6 +318,17 @@ impl GuiShellApp {
             return;
         }
 
+        if self.about_logo_texture.is_none() {
+            if let Some(icon) = app_icon() {
+                let image = egui::ColorImage::from(icon.as_ref());
+                self.about_logo_texture = Some(ctx.load_texture(
+                    "scalpel-about-logo",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+
         let mut close_requested = false;
         let mupdf_version = mupdf_version_label();
         let backend = backend_label(&mupdf_version);
@@ -346,6 +357,13 @@ impl GuiShellApp {
                     .inner_margin(egui::Margin::symmetric(22, 16))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            if let Some(texture) = &self.about_logo_texture {
+                                ui.add(
+                                    egui::Image::new((texture.id(), egui::vec2(56.0, 56.0)))
+                                        .corner_radius(10),
+                                );
+                                ui.add_space(12.0);
+                            }
                             ui.vertical(|ui| {
                                 ui.label(
                                     RichText::new("Scalpel")

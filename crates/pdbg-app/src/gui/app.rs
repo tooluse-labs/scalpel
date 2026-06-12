@@ -198,6 +198,7 @@ impl GuiShellApp {
             open_pdf_error: None,
             open_pdf_job: None,
             about_dialog_open: false,
+            about_logo_texture: None,
             left_panel_width: ui_settings.left_panel_width,
             right_panel_width: ui_settings.right_panel_width,
             tree,

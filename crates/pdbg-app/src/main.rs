@@ -1,3 +1,5 @@
+use std::path::Path;
+
 fn main() {
     let options = CliOptions::parse();
     if options.gui {
@@ -46,8 +48,48 @@ impl CliOptions {
                 }
             }
         }
+        if !options.gui && launched_from_macos_app_bundle() {
+            options.gui = true;
+        }
         options
     }
+}
+
+fn launched_from_macos_app_bundle() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::current_exe()
+            .ok()
+            .is_some_and(|path| is_macos_app_bundle_executable_path(&path))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+fn is_macos_app_bundle_executable_path(path: &Path) -> bool {
+    let mut components = path.components().rev();
+    let Some(_executable) = components.next() else {
+        return false;
+    };
+    let Some(macos_dir) = components.next() else {
+        return false;
+    };
+    let Some(contents_dir) = components.next() else {
+        return false;
+    };
+    let Some(app_dir) = components.next() else {
+        return false;
+    };
+
+    macos_dir.as_os_str() == "MacOS"
+        && contents_dir.as_os_str() == "Contents"
+        && app_dir
+            .as_os_str()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".app")
 }
 
 fn parse_render_max_dimension(value: &str) -> Option<u32> {
@@ -114,12 +156,29 @@ fn run_gui(_options: CliOptions) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_render_max_dimension;
+    use super::{is_macos_app_bundle_executable_path, parse_render_max_dimension};
+    use std::path::Path;
 
     #[test]
     fn parse_render_max_dimension_accepts_positive_pixels() {
         assert_eq!(parse_render_max_dimension("8192"), Some(8192));
         assert_eq!(parse_render_max_dimension("0"), None);
         assert_eq!(parse_render_max_dimension("bad"), None);
+    }
+
+    #[test]
+    fn macos_app_bundle_detection_matches_bundle_executable_layout() {
+        assert!(is_macos_app_bundle_executable_path(Path::new(
+            "/Applications/Scalpel.app/Contents/MacOS/Scalpel"
+        )));
+        assert!(is_macos_app_bundle_executable_path(Path::new(
+            "/tmp/Scalpel.APP/Contents/MacOS/Scalpel"
+        )));
+        assert!(!is_macos_app_bundle_executable_path(Path::new(
+            "/Applications/Scalpel.app/Contents/Resources/Scalpel"
+        )));
+        assert!(!is_macos_app_bundle_executable_path(Path::new(
+            "/Users/zero/Dev/xreflab/target/release/pdbg-app"
+        )));
     }
 }

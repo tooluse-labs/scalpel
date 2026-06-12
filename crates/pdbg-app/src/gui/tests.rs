@@ -139,6 +139,19 @@ fn font_families_include_cjk_fallback_for_pdf_names() {
 }
 
 #[test]
+fn app_icon_decodes_to_square_rgba_with_transparent_corners() {
+    let icon = app_icon().expect("app icon");
+
+    assert_eq!(icon.width, icon.height);
+    assert!(icon.width >= 512);
+    assert_eq!(
+        icon.rgba.len(),
+        icon.width as usize * icon.height as usize * 4
+    );
+    assert!(icon.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0));
+}
+
+#[test]
 fn page_preview_display_size_reserves_footer_space() {
     let texture_size = egui::vec2(900.0, 1400.0);
     let available = egui::vec2(900.0, 1000.0);

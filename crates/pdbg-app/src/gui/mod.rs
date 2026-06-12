@@ -147,11 +147,24 @@ pub struct GuiRunOptions {
     pub render_max_dimension: Option<u32>,
 }
 
+fn app_icon() -> Option<Arc<egui::IconData>> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../assets/icons/scalpel-mark.png"
+    ))
+    .ok()?;
+    Some(Arc::new(icon))
+}
+
 pub fn run_gui_with_options(options: GuiRunOptions) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(APP_TITLE)
+        .with_inner_size([1440.0, 900.0]);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(APP_TITLE)
-            .with_inner_size([1440.0, 900.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -182,6 +195,7 @@ pub struct GuiShellApp {
     open_pdf_error: Option<String>,
     open_pdf_job: Option<OpenPdfJob>,
     about_dialog_open: bool,
+    about_logo_texture: Option<egui::TextureHandle>,
     left_panel_width: Option<f32>,
     right_panel_width: Option<f32>,
     tree: TreeModel,
