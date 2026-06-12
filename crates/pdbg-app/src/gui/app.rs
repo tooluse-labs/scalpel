@@ -230,6 +230,7 @@ impl GuiShellApp {
             real_pages,
             real_pages_error,
             render_page_index,
+            preview_page_scroll_accumulator: egui::Vec2::ZERO,
             render_zoom,
             render_rotation_degrees,
             render_max_dimension,
@@ -1269,6 +1270,14 @@ impl GuiShellApp {
                 Some(PageKeyboardShortcut::First)
             } else if input.key_pressed(egui::Key::ArrowDown) {
                 Some(PageKeyboardShortcut::Last)
+            } else if input.key_pressed(egui::Key::PageUp) {
+                Some(PageKeyboardShortcut::Previous)
+            } else if input.key_pressed(egui::Key::PageDown) {
+                Some(PageKeyboardShortcut::Next)
+            } else if input.key_pressed(egui::Key::Home) {
+                Some(PageKeyboardShortcut::First)
+            } else if input.key_pressed(egui::Key::End) {
+                Some(PageKeyboardShortcut::Last)
             } else {
                 None
             }
@@ -1286,6 +1295,30 @@ impl GuiShellApp {
                 self.render_page_index + 1
             ));
         }
+    }
+
+    pub(crate) fn handle_preview_page_scroll_delta(&mut self, delta: egui::Vec2) {
+        let page_count = self.page_count();
+        if page_count == 0 {
+            self.preview_page_scroll_accumulator = egui::Vec2::ZERO;
+            return;
+        }
+
+        let Some(page_index) = preview_scroll_target_page(
+            self.render_page_index,
+            page_count,
+            &mut self.preview_page_scroll_accumulator,
+            delta,
+        )
+        .filter(|page_index| *page_index != self.render_page_index) else {
+            return;
+        };
+
+        self.set_render_page_from_pager(page_index);
+        self.status_log.push(format!(
+            "scroll gesture switched preview to page {}",
+            self.render_page_index + 1
+        ));
     }
 
     pub(crate) fn sync_tree_to_render_page(&mut self, page_index: usize) -> Option<usize> {

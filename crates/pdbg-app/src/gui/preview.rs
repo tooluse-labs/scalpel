@@ -135,6 +135,65 @@ pub(crate) fn page_keyboard_target_page(
     })
 }
 
+pub(crate) fn preview_scroll_target_page(
+    current_page: usize,
+    page_count: usize,
+    accumulator: &mut egui::Vec2,
+    delta: egui::Vec2,
+) -> Option<usize> {
+    if page_count == 0 {
+        *accumulator = egui::Vec2::ZERO;
+        return None;
+    }
+    if !delta.x.is_finite() || !delta.y.is_finite() {
+        *accumulator = egui::Vec2::ZERO;
+        return None;
+    }
+    if delta.x.abs() < f32::EPSILON && delta.y.abs() < f32::EPSILON {
+        return None;
+    }
+
+    let page_delta = if delta.x.abs() > delta.y.abs() {
+        accumulator.x += delta.x;
+        accumulator.y = 0.0;
+        page_delta_from_scroll_accumulator(&mut accumulator.x)
+    } else {
+        accumulator.y += delta.y;
+        accumulator.x = 0.0;
+        page_delta_from_scroll_accumulator(&mut accumulator.y)
+    };
+    if page_delta == 0 {
+        return None;
+    }
+
+    let last_page = page_count - 1;
+    Some(if page_delta > 0 {
+        current_page
+            .saturating_add(page_delta as usize)
+            .min(last_page)
+    } else {
+        current_page.saturating_sub(page_delta.unsigned_abs() as usize)
+    })
+}
+
+fn page_delta_from_scroll_accumulator(accumulator: &mut f32) -> i32 {
+    let steps = (*accumulator / PREVIEW_PAGE_SCROLL_THRESHOLD)
+        .abs()
+        .floor()
+        .min(PREVIEW_PAGE_SCROLL_MAX_STEPS as f32) as i32;
+    if steps == 0 {
+        return 0;
+    }
+
+    let sign = accumulator.signum();
+    *accumulator -= sign * PREVIEW_PAGE_SCROLL_THRESHOLD * steps as f32;
+    if sign < 0.0 {
+        steps
+    } else {
+        -steps
+    }
+}
+
 pub(crate) fn preview_icon_button(
     ui: &mut egui::Ui,
     icon: PreviewControlIcon,

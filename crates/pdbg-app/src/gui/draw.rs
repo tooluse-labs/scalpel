@@ -1202,7 +1202,7 @@ impl GuiShellApp {
         // can use the full remaining height; nothing is rendered below it.
         let display_size = page_preview_display_size(texture_size, available, 0.0, render_zoom);
         let image_area_height = available.y.max(1.0);
-        ScrollArea::both()
+        let scroll_output = ScrollArea::both()
             .id_salt("real_page_preview_scroll")
             .max_height(image_area_height)
             .auto_shrink([false, false])
@@ -1303,6 +1303,18 @@ impl GuiShellApp {
                     }
                 });
             });
+        let preview_hovered = ui.input(|input| {
+            input
+                .pointer
+                .hover_pos()
+                .is_some_and(|pos| scroll_output.inner_rect.contains(pos))
+        });
+        if preview_hovered {
+            let delta = ui.input(|input| input.smooth_scroll_delta);
+            self.handle_preview_page_scroll_delta(delta);
+        } else {
+            self.preview_page_scroll_accumulator = egui::Vec2::ZERO;
+        }
         self.draw_floating_preview_controls(ui, content_rect);
         true
     }

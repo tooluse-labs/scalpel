@@ -67,6 +67,8 @@ const PREVIEW_CONTROL_GROUP_HEIGHT: f32 = 42.0;
 const PREVIEW_ZOOM_CONTROL_WIDTH: f32 = 228.0;
 const PREVIEW_PAGER_CONTROL_WIDTH: f32 = 174.0;
 const PREVIEW_CONTROL_GAP: f32 = 14.0;
+const PREVIEW_PAGE_SCROLL_THRESHOLD: f32 = 120.0;
+const PREVIEW_PAGE_SCROLL_MAX_STEPS: i32 = 5;
 const TOP_BAR_HEIGHT: f32 = 38.0;
 const TOP_BAR_BUTTON_HEIGHT: f32 = 28.0;
 const OBJECT_SEARCH_CHILD_PAGE_SIZE: usize = 64;
@@ -148,10 +150,9 @@ pub struct GuiRunOptions {
 }
 
 fn app_icon() -> Option<Arc<egui::IconData>> {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-        "../../assets/icons/scalpel-mark.png"
-    ))
-    .ok()?;
+    let icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icons/scalpel-mark.png"))
+            .ok()?;
     Some(Arc::new(icon))
 }
 
@@ -224,6 +225,7 @@ pub struct GuiShellApp {
     real_pages: Option<ChildPage<ObjectSummary>>,
     real_pages_error: Option<String>,
     render_page_index: usize,
+    preview_page_scroll_accumulator: egui::Vec2,
     render_zoom: f32,
     render_rotation_degrees: i32,
     render_max_dimension: u32,

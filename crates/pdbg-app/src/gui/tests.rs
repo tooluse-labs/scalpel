@@ -268,6 +268,87 @@ fn page_keyboard_shortcuts_choose_expected_pages() {
 }
 
 #[test]
+fn preview_scroll_targets_pages_from_wheel_and_trackpad_delta() {
+    let mut accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            2,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, -PREVIEW_PAGE_SCROLL_THRESHOLD)
+        ),
+        Some(3)
+    );
+
+    accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            2,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, PREVIEW_PAGE_SCROLL_THRESHOLD)
+        ),
+        Some(1)
+    );
+
+    accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            2,
+            5,
+            &mut accumulator,
+            egui::vec2(-PREVIEW_PAGE_SCROLL_THRESHOLD, 0.0)
+        ),
+        Some(3)
+    );
+}
+
+#[test]
+fn preview_scroll_accumulates_small_deltas_and_clamps_boundaries() {
+    let mut accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            2,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, -PREVIEW_PAGE_SCROLL_THRESHOLD * 0.5)
+        ),
+        None
+    );
+    assert_eq!(
+        preview_scroll_target_page(
+            2,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, -PREVIEW_PAGE_SCROLL_THRESHOLD * 0.5)
+        ),
+        Some(3)
+    );
+
+    accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            3,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, -PREVIEW_PAGE_SCROLL_THRESHOLD * 3.2)
+        ),
+        Some(4)
+    );
+
+    accumulator = egui::Vec2::ZERO;
+    assert_eq!(
+        preview_scroll_target_page(
+            0,
+            5,
+            &mut accumulator,
+            egui::vec2(0.0, PREVIEW_PAGE_SCROLL_THRESHOLD)
+        ),
+        Some(0)
+    );
+}
+
+#[test]
 fn render_key_request_applies_configured_dimension_limit() {
     let key = RealRenderKey::new(0, 1.5, 90, 8192);
     let request = key.request();
