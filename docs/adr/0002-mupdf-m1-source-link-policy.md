@@ -15,7 +15,7 @@ developer builds is:
 https://casper.mupdf.com/downloads/archive/mupdf-1.27.2-source.tar.gz
 ```
 
-As of the product-preview GUI path, `pdbg-app` enables `gui` plus `real-mupdf`
+As of the product-preview GUI path, `scalpel-app` enables `gui` plus `real-mupdf`
 by default. MuPDF source and build outputs remain outside git; the repository
 tracks only `third_party/mupdf.version` and `scripts/setup-mupdf.sh` so local
 developer builds use the same pinned upstream archive. The fake shim remains
@@ -23,12 +23,12 @@ available for lower-level contract tests and no-MuPDF builds.
 
 For M1 developer builds, the preferred source layout is an extracted pinned
 MuPDF source tree under ignored `third_party/` paths or another local directory,
-referenced by `PDBG_MUPDF_SOURCE_DIR`. A checked-in `third_party/mupdf-1.27.2`
+referenced by `SCALPEL_MUPDF_SOURCE_DIR`. A checked-in `third_party/mupdf-1.27.2`
 tree may be introduced later only together with regenerated notices and
 corresponding-source publication steps.
 
-The M1 link mode is static by default. `pdbg-shim/build.rs` accepts
-`PDBG_MUPDF_LINK_MODE` and `PDBG_MUPDF_LIBS` for local experiments, but the
+The M1 link mode is static by default. `scalpel-shim/build.rs` accepts
+`SCALPEL_MUPDF_LINK_MODE` and `SCALPEL_MUPDF_LIBS` for local experiments, but the
 documented product path is a pinned source release plus MuPDF's static
 `libmupdf.a` and `libmupdf-third.a` libraries.
 
@@ -54,18 +54,18 @@ sh scripts/setup-mupdf.sh
 Then the app default build uses real MuPDF:
 
 ```sh
-cargo run -p pdbg-app -- --gui
-cargo test -p pdbg-app
+cargo run -p scalpel-app -- --gui
+cargo test -p scalpel-app
 ```
 
 If MuPDF was built into a non-default location, set:
 
 ```sh
-PDBG_MUPDF_INCLUDE_DIR=/path/to/mupdf/include
-PDBG_MUPDF_LIB_DIR=/path/to/mupdf/build/release
+SCALPEL_MUPDF_INCLUDE_DIR=/path/to/mupdf/include
+SCALPEL_MUPDF_LIB_DIR=/path/to/mupdf/build/release
 ```
 
-`PDBG_MUPDF_LIBS` defaults to `mupdf,mupdf-third`. Additional platform or
+`SCALPEL_MUPDF_LIBS` defaults to `mupdf,mupdf-third`. Additional platform or
 third-party libraries may be added locally while M1.1/M1.2 settles the final
 static link line.
 
@@ -90,7 +90,7 @@ This gate also requires `mutool` for runtime generation of the encrypted-PDF
 fixture. By default it expects:
 
 ```text
-$PDBG_MUPDF_SOURCE_DIR/build/release/mutool
+$SCALPEL_MUPDF_SOURCE_DIR/build/release/mutool
 ```
 
 Build it from the pinned MuPDF source tree with:
@@ -99,7 +99,7 @@ Build it from the pinned MuPDF source tree with:
 make build=release build/release/mutool
 ```
 
-or set `PDBG_MUTOOL_PATH=/path/to/mutool`.
+or set `SCALPEL_MUTOOL_PATH=/path/to/mutool`.
 
 ## Rationale
 

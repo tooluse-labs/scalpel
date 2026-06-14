@@ -55,12 +55,12 @@ M1.1 source/link/platform/binding decisions are recorded in
 - Pick the MuPDF release and source strategy.
 - Update `NOTICES` with the exact MuPDF source URL, version, bundled dependency
   notice path, and corresponding-source expectations for `real-mupdf` builds.
-- Extend `pdbg-shim/build.rs` with a `real-mupdf` branch while preserving the
+- Extend `scalpel-shim/build.rs` with a `real-mupdf` branch while preserving the
   current fake branch as the default.
 - Add a local non-required command for real builds, for example:
 
 ```sh
-cargo test -p pdbg-shim --no-default-features --features real-mupdf
+cargo test -p scalpel-shim --no-default-features --features real-mupdf
 ```
 
 ### M1.2 Minimal Real Shim
@@ -93,7 +93,7 @@ garbage, or silently route to fake data.
 
 - Add a real `Shim` implementation behind `real-mupdf`.
 - Keep `FakeShim` as the default test backend.
-- Ensure `pdbg-app` and `pdbg-core` reach the backend only through the existing
+- Ensure `scalpel-app` and `scalpel-core` reach the backend only through the existing
   `Shim` / `ShimDocument` seam.
 - Keep DTO conversion behavior identical where MuPDF and FakeShim overlap.
 
@@ -166,7 +166,7 @@ Local validation was run on macOS with MuPDF 1.27.2 built from the pinned source
 tree recorded in ADR 0002:
 
 ```sh
-PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
+SCALPEL_MUPDF_SOURCE_DIR=/private/tmp/scalpel-mupdf/mupdf-1.27.2-source \
 sh scripts/run_real_gate.sh
 ```
 
@@ -175,7 +175,7 @@ That gate covers:
 - real shim open/summary/fd/malformed/repair/encrypted tests;
 - real core open/summary/tree/detail/stream-summary/concurrency tests;
 - real app GUI-model tests, including bounded large-PDF responsiveness smoke;
-- real clippy for `pdbg-shim`, `pdbg-core`, and `pdbg-app`;
+- real clippy for `scalpel-shim`, `scalpel-core`, and `scalpel-app`;
 - real headless `--pdf` smoke;
 - the full default M0 local gate to prove the MuPDF-free floor still holds.
 

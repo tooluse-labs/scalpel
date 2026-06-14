@@ -9,14 +9,14 @@ integration remains Milestone 1.
 
 ## Implemented
 
-- UI design reference: `docs/ui/pdbg-ui-design-v1.svg`.
-- `pdbg-app` has an optional `gui` feature. Default builds remain headless and
+- UI design reference: `docs/ui/scalpel-ui-design-v1.svg`.
+- `scalpel-app` has an optional `gui` feature. Default builds remain headless and
   keep M0 CI free of native GUI requirements.
-- `cargo run -p pdbg-app --features gui -- --gui` launches a real `eframe`
+- `cargo run -p scalpel-app --features gui -- --gui` launches a real `eframe`
   window over the existing `AppState` and `FakeShim`.
 - The window renders the Section 10 shell shape:
   document tree, page preview, inspector/stream/diagnostics, and log.
-- The shell applies a pdbg-specific egui theme: vendored Inter and JetBrains
+- The shell applies a Scalpel-specific egui theme: vendored Inter and JetBrains
   Mono OFL font assets, named sans/mono font stacks, light debugger visuals,
   and stable diagnostic severity colors.
 - A second visual polish pass adds a dark command bar, dark log console,
@@ -36,7 +36,7 @@ integration remains Milestone 1.
 
 ## Design Reference Scope
 
-`docs/ui/pdbg-ui-design-v1.svg` is a composite visual target for a themed pdbg
+`docs/ui/scalpel-ui-design-v1.svg` is a composite visual target for a themed Scalpel
 workbench. It proves the dense debugger UI can look intentional in egui, but it
 is not a full Milestone 1.0 requirement set and should not be read as complete
 product IA.
@@ -68,12 +68,12 @@ items remain outside the M1.0 gate:
 Run these when validating the spike locally:
 
 ```sh
-cargo run -p pdbg-app
-cargo run -p pdbg-app -- --gui
-cargo check -p pdbg-app --features gui
-cargo test -p pdbg-app --features gui
-cargo run -p pdbg-app --features gui -- --gui
-cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 5000
+cargo run -p scalpel-app
+cargo run -p scalpel-app -- --gui
+cargo check -p scalpel-app --features gui
+cargo test -p scalpel-app --features gui
+cargo run -p scalpel-app --features gui -- --gui
+cargo run -p scalpel-app --features gui -- --gui --gui-smoke-ms 5000
 ```
 
 The second command should fail fast with a message explaining that the GUI is
@@ -81,17 +81,17 @@ behind the optional `gui` feature.
 
 Current automated/local smoke result:
 
-- `cargo check -p pdbg-app --features gui` passes.
-- `cargo test -p pdbg-app --features gui` passes.
-- `cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 5000`
+- `cargo check -p scalpel-app --features gui` passes.
+- `cargo test -p scalpel-app --features gui` passes.
+- `cargo run -p scalpel-app --features gui -- --gui --gui-smoke-ms 5000`
   compiles, opens the native window, remains running for a 5-second launch
   smoke, and exits without stderr errors.
-- `cargo run -p pdbg-app --features gui -- --gui` was manually launched twice
+- `cargo run -p scalpel-app --features gui -- --gui` was manually launched twice
   on 2026-06-05 and exited cleanly after interactive sessions of roughly 60s
   and 44s.
-- After the final visual/font polish, `cargo run -p pdbg-app --features gui
+- After the final visual/font polish, `cargo run -p scalpel-app --features gui
   -- --gui` was manually launched for roughly 77s and 373s and exited cleanly.
-- `cargo run -p pdbg-app --features gui -- --gui --gui-smoke-ms 3000` opens the
+- `cargo run -p scalpel-app --features gui -- --gui --gui-smoke-ms 3000` opens the
   native window and exits cleanly. On macOS the close command may be processed
   later than the requested timeout; this is a smoke-runner quirk, not a shell
   feasibility blocker.
@@ -116,7 +116,7 @@ object graphs, damaged files, and large streams.
 
 ## Manual Go/No-Go Checklist
 
-Run `cargo run -p pdbg-app --features gui -- --gui` and record the result
+Run `cargo run -p scalpel-app --features gui -- --gui` and record the result
 against this checklist before closing M1.0:
 
 - Virtual tree: scroll the 1,000,000-row document tree quickly and continuously;

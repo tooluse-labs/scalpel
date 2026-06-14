@@ -1974,43 +1974,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pdbg-app"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "pdbg-core",
- "rfd",
-]
-
-[[package]]
-name = "pdbg-contract-tests"
-version = "0.1.0"
-dependencies = [
- "pdbg-app",
- "pdbg-core",
- "pdbg-mcp",
- "pdbg-shim",
-]
-
-[[package]]
-name = "pdbg-core"
-version = "0.1.0"
-dependencies = [
- "pdbg-shim",
-]
-
-[[package]]
-name = "pdbg-mcp"
-version = "0.1.0"
-dependencies = [
- "pdbg-core",
-]
-
-[[package]]
-name = "pdbg-shim"
-version = "0.1.0"
-
-[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2376,6 +2339,43 @@ checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "scalpel-app"
+version = "0.2.0"
+dependencies = [
+ "eframe",
+ "rfd",
+ "scalpel-core",
+]
+
+[[package]]
+name = "scalpel-contract-tests"
+version = "0.2.0"
+dependencies = [
+ "scalpel-app",
+ "scalpel-core",
+ "scalpel-mcp",
+ "scalpel-shim",
+]
+
+[[package]]
+name = "scalpel-core"
+version = "0.2.0"
+dependencies = [
+ "scalpel-shim",
+]
+
+[[package]]
+name = "scalpel-mcp"
+version = "0.2.0"
+dependencies = [
+ "scalpel-core",
+]
+
+[[package]]
+name = "scalpel-shim"
+version = "0.2.0"
 
 [[package]]
 name = "scoped-tls"

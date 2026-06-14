@@ -1,20 +1,22 @@
 # Notices
 
-Project: xreflab / pdbg
+Project: Scalpel
 License: AGPL-3.0-only
+
+The low-level C ABI retains `pdbg_*` symbols for compatibility.
 
 ## Workspace Packages
 
-- pdbg-app: AGPL-3.0-only
-- pdbg-contract-tests: AGPL-3.0-only
-- pdbg-core: AGPL-3.0-only
-- pdbg-mcp: AGPL-3.0-only
-- pdbg-shim: AGPL-3.0-only
+- scalpel-app: AGPL-3.0-only
+- scalpel-contract-tests: AGPL-3.0-only
+- scalpel-core: AGPL-3.0-only
+- scalpel-mcp: AGPL-3.0-only
+- scalpel-shim: AGPL-3.0-only
 
 ## MuPDF
 
 MuPDF source and build outputs are not committed to this repository. The
-`pdbg-app` default GUI build uses the `real-mupdf` backend and expects an
+`scalpel-app` default GUI build uses the `real-mupdf` backend and expects an
 external pinned MuPDF source tree plus static libraries. The fake shim remains
 available for low-level contract tests and no-MuPDF builds.
 
@@ -50,15 +52,15 @@ dependency notices.
 
 ## GUI Font Assets
 
-The optional `pdbg-app/gui` feature bundles the following Open Font License
+The optional `scalpel-app/gui` feature bundles the following Open Font License
 fonts for a reproducible debugger UI:
 
 - Inter v4.1, from <https://github.com/rsms/inter/releases/tag/v4.1>,
   licensed under the SIL Open Font License 1.1. The bundled font file is
-  `crates/pdbg-app/assets/fonts/InterVariable.ttf`; the copied license text is
-  `crates/pdbg-app/assets/licenses/Inter-OFL.txt`.
+  `crates/scalpel-app/assets/fonts/InterVariable.ttf`; the copied license text is
+  `crates/scalpel-app/assets/licenses/Inter-OFL.txt`.
 - JetBrains Mono v2.304, from
   <https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304>, licensed
   under the SIL Open Font License 1.1. The bundled font file is
-  `crates/pdbg-app/assets/fonts/JetBrainsMono-Regular.ttf`; the copied license
-  text is `crates/pdbg-app/assets/licenses/JetBrainsMono-OFL.txt`.
+  `crates/scalpel-app/assets/fonts/JetBrainsMono-Regular.ttf`; the copied license
+  text is `crates/scalpel-app/assets/licenses/JetBrainsMono-OFL.txt`.

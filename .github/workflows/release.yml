@@ -41,7 +41,7 @@ jobs:
         run: |
           set -eu
           . third_party/mupdf.env
-          cargo build --release -p pdbg-app
+          cargo build --release -p scalpel-app
 
       - name: Package Scalpel.app
         run: |
@@ -49,7 +49,7 @@ jobs:
           arch="$(uname -m)"
           version="${RELEASE_TAG#v}"
           app="dist/Scalpel.app"
-          icon_source="crates/pdbg-app/assets/icons/scalpel-mark.png"
+          icon_source="crates/scalpel-app/assets/icons/scalpel-mark.png"
           iconset="dist/Scalpel.iconset"
           artifact="Scalpel-${RELEASE_TAG}-macos-${arch}.app.zip"
 
@@ -152,7 +152,7 @@ jobs:
         run: |
           set -eu
           . third_party/mupdf.env
-          cargo build --release -p pdbg-app
+          cargo build --release -p scalpel-app
 
       - name: Package Linux tarball
         run: |
@@ -225,11 +225,11 @@ jobs:
           }
           $vcvars = Join-Path $vsPath "VC/Auxiliary/Build/vcvars64.bat"
 
-          $env:PDBG_MUPDF_SOURCE_DIR = $sourceDir
-          $env:PDBG_MUPDF_INCLUDE_DIR = Join-Path $sourceDir "include"
-          $env:PDBG_MUPDF_LIB_DIR = $libDir
+          $env:SCALPEL_MUPDF_SOURCE_DIR = $sourceDir
+          $env:SCALPEL_MUPDF_INCLUDE_DIR = Join-Path $sourceDir "include"
+          $env:SCALPEL_MUPDF_LIB_DIR = $libDir
 
-          cmd.exe /c "`"$vcvars`" && msbuild `"$sourceDir\platform\win32\mupdf.sln`" /m /t:libmupdf /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 && cargo build --release -p pdbg-app"
+          cmd.exe /c "`"$vcvars`" && msbuild `"$sourceDir\platform\win32\mupdf.sln`" /m /t:libmupdf /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 && cargo build --release -p scalpel-app"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows release build failed"
           }

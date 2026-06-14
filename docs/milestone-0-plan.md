@@ -17,7 +17,7 @@ Last verified locally with:
 - `cargo fmt --check`;
 - `cargo test --workspace`;
 - `cargo clippy --workspace -- -D warnings`;
-- `cargo run -p pdbg-app --quiet`;
+- `cargo run -p scalpel-app --quiet`;
 - `python3 scripts/check_pdbg_shim_abi_snapshot.py`;
 - `python3 scripts/check_notices.py`;
 - `sh scripts/test_fz_try_gate.sh`;
@@ -36,7 +36,7 @@ Completed:
   C ASAN/UBSan, TSan, and fuzz-smoke jobs; `scripts/run_m0_local_gate.sh` runs
   the stable local gate without linking MuPDF.
 - **T0.6** panic-into-C policy: workspace profiles explicitly use
-  `panic = "unwind"` and `pdbg-core` exposes a single `catch_ffi_callback`
+  `panic = "unwind"` and `scalpel-core` exposes a single `catch_ffi_callback`
   boundary helper that catches Rust panics from future `extern "C"` callbacks,
   maps them to `PDBG_ERROR_GENERIC`, and fills `pdbg_error`.
 - **T1.1–T1.6** pure-Rust DTO/config contract surface: core identifiers,
@@ -50,8 +50,8 @@ Completed:
   coverage; diagnostic, `StringBytes`, and stream-summary conversion; FFI
   string/byte copying with interior-NUL text; and node-token registry tests
   including unknown-token fallback.
-- **T2.5** capability gating consumers: `pdbg-app` records app feature gates and
-  `pdbg-mcp` exposes tool visibility / `UNSUPPORTED` gating for structure,
+- **T2.5** capability gating consumers: `scalpel-app` records app feature gates and
+  `scalpel-mcp` exposes tool visibility / `UNSUPPORTED` gating for structure,
   stream, render, text, and artifact tools.
 - **T2.6** text-coordinate golden: fake text extraction fixes top-left page-space
   coordinates and contract tests pin page index, bbox, and untrusted span
@@ -90,7 +90,7 @@ Completed:
   random ids, are scoped by session/client, preserve media type and image
   dimensions, honor per-read byte-limit truncation, expire by TTL, and evict by
   LRU under the configured byte cap.
-- **T4.6** headless app-state smoke: `pdbg-app` constructs the summary/tree/detail
+- **T4.6** headless app-state smoke: `scalpel-app` constructs the summary/tree/detail
   /output panel state over `FakeShim` + `DocumentSession`, wires safe-mode
   defaults, capability gates, Markdown egress escaping, and runs a command-loop
   smoke without opening a real window/GPU surface.
@@ -108,7 +108,7 @@ Completed:
   `fuzz-smoke` name) covering traversal, decode limits, DTO/egress contracts,
   wire conversions, callback panic mapping, and concurrency smoke.
 - **T6.1** M0 exit gate: local `scripts/run_m0_local_gate.sh` exercises the full
-  fake-shim contract baseline without libmupdf, `pdbg-app` launches headlessly,
+  fake-shim contract baseline without libmupdf, `scalpel-app` launches headlessly,
   CI jobs are checked in, and `docs/ci/required-jobs.md` lists the jobs to mark
   required on `main`.
 
@@ -146,38 +146,38 @@ Deferred to Milestone 1:
 ## Crate layout (revised per review)
 
 ```
-xreflab/  (cargo virtual workspace)
-├─ crates/pdbg-shim            RAW ABI ONLY: frozen pdbg_shim.h, fake C impl,
+scalpel/  (cargo virtual workspace)
+├─ crates/scalpel-shim            RAW ABI ONLY: frozen pdbg_shim.h, fake C impl,
 │                             build.rs (cc), checked-in raw bindings +
 │                             structural drift check. No Rust safe types, no
 │                             DTO logic.
-├─ crates/pdbg-core           Safe newtypes over raw handles (Drop), Shim trait
+├─ crates/scalpel-core           Safe newtypes over raw handles (Drop), Shim trait
 │                             + FakeShim, wire↔DTO conversions, node-token
 │                             registry, decode-time limits, egress escaping,
 │                             DocumentSession/scheduler/lock wiring, capability
 │                             gating, safe-mode config, all DTOs/identifiers.
-├─ crates/pdbg-contract-tests  Cross-crate golden / contract / concurrency / fuzz
+├─ crates/scalpel-contract-tests  Cross-crate golden / contract / concurrency / fuzz
 │                             tests + the synthetic fixture corpus. (A real test
 │                             crate — a root tests/ dir would NOT run under a
 │                             virtual workspace.)
-├─ crates/pdbg-app            headless app-state crate (NO egui dep at M0):
+├─ crates/scalpel-app            headless app-state crate (NO egui dep at M0):
 │                             panel construction + FakeShim command loop. The
 │                             real egui window is the M1.0 UI Shell Spike.
-└─ crates/pdbg-mcp            MCP tool-contract core: allowlist, artifact store,
+└─ crates/scalpel-mcp            MCP tool-contract core: allowlist, artifact store,
                              tool input/output schema. No transport / server
                              lifecycle at M0.
 ```
 
-Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
-`pdbg-contract-tests` depends on all of them.
+Dependency direction: `scalpel-shim` → `scalpel-core` → {`scalpel-app`, `scalpel-mcp`};
+`scalpel-contract-tests` depends on all of them.
 
 ## Calibrations applied (from review)
 
-1. **`pdbg-contract-tests` crate, not root `tests/`** — a top-level `tests/` dir
+1. **`scalpel-contract-tests` crate, not root `tests/`** — a top-level `tests/` dir
    is not auto-run by `cargo test --workspace` under a virtual workspace (no root
    package). Cross-crate tests live in a real test crate.
-2. **`pdbg-shim` = raw sys/ABI only; safe newtypes + conversions live in
-   `pdbg-core`** — keeps the `*-sys`/safe split clean so the M1 real-MuPDF swap
+2. **`scalpel-shim` = raw sys/ABI only; safe newtypes + conversions live in
+   `scalpel-core`** — keeps the `*-sys`/safe split clean so the M1 real-MuPDF swap
    stays a drop-in and the sys boundary doesn't get muddied by conversion logic.
 3. **raw ABI declarations are checked-in + structurally drift-checked** — CI
    compares `pdbg_shim.h` against committed `raw.rs` for enum values, struct
@@ -191,7 +191,7 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
    construction + FakeShim-driven command loop only; the real egui window (and
    its validation) is the **M1.0 UI Shell Spike** in architecture §13, so CI
    doesn't go brittle on platform graphics at M0.
-6. **`pdbg-mcp` is a tool-contract core, not a server** — allowlist + artifact
+6. **`scalpel-mcp` is a tool-contract core, not a server** — allowlist + artifact
    store + tool I/O schema only; no full MCP server lifecycle at M0.
 7. **C7b node-token registry is a shared prerequisite, not a golden-test
    appendage** — it backs `ObjectSummary`, `DiagnosticSummary.node`, and shim
@@ -201,7 +201,7 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
 
 | Phase | Goal | Starts after |
 |---|---|---|
-| **P0** Trunk | Workspace → **freeze `pdbg_shim.h`** → fake C shim → build.rs (cc) + raw ABI drift check → safe newtypes (in `pdbg-core`) → **panic-into-C policy decision** → **`fz_try` static gate (scaffold)** → green CI floor | start |
+| **P0** Trunk | Workspace → **freeze `pdbg_shim.h`** → fake C shim → build.rs (cc) + raw ABI drift check → safe newtypes (in `scalpel-core`) → **panic-into-C policy decision** → **`fz_try` static gate (scaffold)** → green CI floor | start |
 | **P1** Pure-Rust DTO/serialization ✅ | DTOs, schema versions, SerializedNodeId golden, diagnostic-code strings, egress escaping, capability/safe-mode types. **Zero FFI — needs only the empty workspace.** | `T0.1` |
 | **P5** Governance docs + heavy CI ✅ | MuPDF build/vendoring ADR (decision only), AGPL compliance + NOTICES + §13 stub, fixture policy, fuzz/ASAN/UBSan/**TSan** jobs | `T0.1` (docs) |
 | **P2** wire↔DTO conversions | Shim/FakeShim seam → enum conversion → **node-token registry** → diagnostic/stream/string/text-coord conversions | `T0.5` + `T1.1` |
@@ -213,13 +213,13 @@ Dependency direction: `pdbg-shim` → `pdbg-core` → {`pdbg-app`, `pdbg-mcp`};
 
 All tasks are `needs_real_mupdf: false`.
 
-### P0 — Trunk (`pdbg-shim`, + `pdbg-core` newtypes, + CI)
+### P0 — Trunk (`scalpel-shim`, + `scalpel-core` newtypes, + CI)
 
 - **T0.1** Cargo virtual workspace: 5 crates, each builds an empty lib/bin with a
   trivial passing test; toolchain pin, rustfmt/clippy config, `.gitignore`;
   `cargo build && cargo test` green. *(§13: workspace + baseline substrate)*
   — deps: —
-- **T0.2** **Freeze `pdbg-shim/include/pdbg_shim.h`**: transcribe every
+- **T0.2** **Freeze `scalpel-shim/include/pdbg_shim.h`**: transcribe every
   type/enum/struct/function from arch §7.2–§7.4 verbatim; enum discriminants
   explicit and marked **append-only ABI**. Single source of truth for C and Rust
   raw declarations. *(defines the wire surface P2 pins)* — deps: T0.1
@@ -235,7 +235,7 @@ All tasks are `needs_real_mupdf: false`.
   `raw.rs` disagree on enum values, struct field order/types, callback typedefs,
   or extern function signatures. *(raw ABI drift check)*
   — deps: T0.3
-- **T0.5** **Safe newtypes over raw handles** *(in `pdbg-core`)*:
+- **T0.5** **Safe newtypes over raw handles** *(in `scalpel-core`)*:
   `PdbgDoc/PdbgContext/PdbgBuffer/PdbgImage/PdbgNodeList/PdbgTextPage` over the
   raw opaque pointers, `Drop` calling the matching `pdbg_*_drop`, accessor
   wrappers that copy bytes/strings into owned Rust before returning; documented
@@ -245,7 +245,7 @@ All tasks are `needs_real_mupdf: false`.
   `panic="abort"` *or* a documented `catch_unwind` wrapper shape at every
   `extern "C"` callback entry. Workspace-wide profile — fix it **before** the
   callback tests (T3.4) and the fuzz/ASAN/TSan profile (T5.3). — deps: T0.1
-- **T0.7** **`fz_try` static gate (scaffold-level)**: script scanning `pdbg-shim`
+- **T0.7** **`fz_try` static gate (scaffold-level)**: script scanning `scalpel-shim`
   C sources, fails on `return`/`goto`/`longjmp` inside `fz_try`/`fz_always`
   (documented `break` allowed); good + bad fixtures prove it fires. **M0 is
   conservative scaffolding** (fake shim has no real `fz_try`); M1 activates it on
@@ -254,7 +254,7 @@ All tasks are `needs_real_mupdf: false`.
   `cargo test` (workspace), C build/compile smoke, raw ABI drift check (T0.4),
   `fz_try` gate (T0.7); green on the wired-but-mostly-empty tree. — deps: T0.4, T0.7
 
-### P1 — Pure-Rust DTO + serialization (✅ parallel, zero FFI; `pdbg-core`)
+### P1 — Pure-Rust DTO + serialization (✅ parallel, zero FFI; `scalpel-core`)
 
 - **T1.1** Core identifiers + DTO structs + schema-version consts (all of §5/§11:
   `NodeId`/`SerializedNodeId`/`ObjectId`, `ObjectSummary`/`Detail`/`Value`,
@@ -275,7 +275,7 @@ All tasks are `needs_real_mupdf: false`.
 - **T1.6** Safe-mode default config + unit tests (JS off, OCR opt-in, no URL,
   bounded resource defaults §6.4; maps to `pdbg_open_options`). — deps: T1.1
 
-### P2 — wire↔DTO conversions + node-token registry (`pdbg-core`)
+### P2 — wire↔DTO conversions + node-token registry (`scalpel-core`)
 
 - **T2.0** **Shim/Backend trait + `FakeShim`** — the single M1 swap seam. All
   later contract tasks reach MuPDF only through this trait. — deps: T0.5, T1.1
@@ -300,14 +300,14 @@ All tasks are `needs_real_mupdf: false`.
 - **T2.3** Stream-summary wire conversion (`pdbg_stream_summary` from
   `pdbg_object_detail_out`: filters, raw/decoded size hints, `can_decode`,
   `image_preview_available`). — deps: T2.1
-- **T2.5** Capability gating wired into `pdbg-app` panels / MCP tools (real
+- **T2.5** Capability gating wired into `scalpel-app` panels / MCP tools (real
   consumer; returns `PDBG_ERROR_UNSUPPORTED`) — completes the product half of the
   capability item. — deps: T1.5, T2.1
 - **T2.6** Text-coordinate normalization + golden tests (top-left page space,
   CropBox-else-MediaBox, page rotation applied, viewer zoom / render rotation
   excluded, no out-of-page clamping; §7.3). — deps: T2.4
 
-### P3 — FFI boundary safety contracts (`pdbg-core` + `pdbg-shim` fake bodies; ∥ P2)
+### P3 — FFI boundary safety contracts (`scalpel-core` + `scalpel-shim` fake bodies; ∥ P2)
 
 - **T3.1** Opaque-handle accessor lifetime tests (valid borrowed access before
   cleanup; copy-before-drop into owned Rust DTOs; use-after-cleanup/leak checks
@@ -323,7 +323,7 @@ All tasks are `needs_real_mupdf: false`.
   & mapped under `catch_unwind`, or process-level abort test under `panic=abort`).
   — deps: T0.6, T0.5
 
-### P4 — Threading / MCP cores / egui (`pdbg-core`, `pdbg-mcp`, `pdbg-app`; ∥ P2/P3)
+### P4 — Threading / MCP cores / egui (`scalpel-core`, `scalpel-mcp`, `scalpel-app`; ∥ P2/P3)
 
 - **T4.1** `DocumentSession` + per-doc task queue + **`fz_locks`-equivalent
   lock-callback wiring** installed at `context_new` (root lock context exists
@@ -338,13 +338,13 @@ All tasks are `needs_real_mupdf: false`.
   M1. — deps: T4.1, T3.4
 - **T4.3** MCP allowlist (Blocker B3): canonicalize roots at load + request path,
   **path-component-descendant (not `starts_with`)**, reject canonicalization
-  failures, reject `..` + symlink escape, no-URL. *(`pdbg-mcp`)* — deps: T1.1
+  failures, reject `..` + symlink escape, no-URL. *(`scalpel-mcp`)* — deps: T1.1
 - **T4.4** MCP input validation unit tests (ids, bounds, max output bytes).
   — deps: T4.3
 - **T4.5** MCP artifact store contract (unguessable ids, session/client scoping,
   byte-limit truncation, TTL + LRU, media type + dimensions; `pdf_render_page`
   ref + `pdf_get_artifact` retrieval goldens over a fake image). — deps: T1.1, T4.3
-- **T4.6** **Headless egui app-state smoke** (`pdbg-app`): four-panel layout
+- **T4.6** **Headless egui app-state smoke** (`scalpel-app`): four-panel layout
   constructed over FakeShim, fake summary/tree displayed, safe-mode config (T1.6)
   + capability gating (T2.5) + egress (T1.4) wired; CI runs **app-state/command
   loop only — no real window/GPU**. — deps: T4.1, T2.5

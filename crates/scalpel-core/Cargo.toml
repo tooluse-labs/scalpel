@@ -1,0 +1,16 @@
+[package]
+name = "scalpel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scalpel-shim = { path = "../scalpel-shim", default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["fake"]
+fake = ["scalpel-shim/fake"]
+real-mupdf = ["scalpel-shim/real-mupdf"]

@@ -11,8 +11,8 @@ connect what you see on the rendered page with the low-level PDF objects behind
 it: object trees, streams, xref entries, resources, page content, images, and
 diagnostics.
 
-> Internal crate and binary names still use `pdbg-*` while the user-facing
-> product name is being migrated to Scalpel.
+> Rust crate and release artifact names now use `scalpel-*` / `scalpel`.
+> The low-level C ABI intentionally keeps its `pdbg_*` symbols for compatibility.
 
 ## Status
 
@@ -96,7 +96,7 @@ Install Rust, prepare MuPDF, then run the GUI:
 ```sh
 sh scripts/setup-mupdf.sh
 . third_party/mupdf.env
-cargo run -p pdbg-app -- --gui --pdf /path/to/file.pdf
+cargo run -p scalpel-app -- --gui --pdf /path/to/file.pdf
 ```
 
 Build a release binary:
@@ -104,7 +104,7 @@ Build a release binary:
 ```sh
 sh scripts/setup-mupdf.sh
 . third_party/mupdf.env
-cargo build --release -p pdbg-app
+cargo build --release -p scalpel-app
 ./target/release/scalpel --gui --pdf /path/to/file.pdf
 ```
 
@@ -134,10 +134,10 @@ MuPDF 1.27.2
 
 Useful environment overrides:
 
-- `PDBG_MUPDF_CACHE_DIR`: where the MuPDF source archive is cached.
-- `PDBG_MUPDF_SOURCE_DIR`: where the MuPDF source tree is extracted.
-- `PDBG_MUPDF_ENV_FILE`: where the generated environment file is written.
-- `PDBG_MUPDF_SKIP_BUILD=1`: skip building MuPDF when libraries already exist.
+- `SCALPEL_MUPDF_CACHE_DIR`: where the MuPDF source archive is cached.
+- `SCALPEL_MUPDF_SOURCE_DIR`: where the MuPDF source tree is extracted.
+- `SCALPEL_MUPDF_ENV_FILE`: where the generated environment file is written.
+- `SCALPEL_MUPDF_SKIP_BUILD=1`: skip building MuPDF when libraries already exist.
 
 If setup fails with missing headers or libraries, remove the extracted source
 tree and rerun:
@@ -208,15 +208,15 @@ Run real MuPDF tests after preparing MuPDF:
 ```sh
 sh scripts/setup-mupdf.sh
 . third_party/mupdf.env
-cargo test -p pdbg-core --no-default-features --features real-mupdf
-cargo test -p pdbg-app
+cargo test -p scalpel-core --no-default-features --features real-mupdf
+cargo test -p scalpel-app
 ```
 
 Run the GUI smoke path:
 
 ```sh
 . third_party/mupdf.env
-cargo run -p pdbg-app -- --gui --gui-smoke-ms 1000 --pdf /path/to/file.pdf
+cargo run -p scalpel-app -- --gui --gui-smoke-ms 1000 --pdf /path/to/file.pdf
 ```
 
 Notes:
@@ -230,11 +230,11 @@ Notes:
 ## Repository Layout
 
 ```text
-crates/pdbg-app             desktop GUI and binary entry point
-crates/pdbg-core            safe Rust document/session model
-crates/pdbg-shim            C FFI boundary and MuPDF adapter
-crates/pdbg-contract-tests  backend contract tests
-crates/pdbg-mcp             read-only MCP-facing library work
+crates/scalpel-app             desktop GUI and binary entry point
+crates/scalpel-core            safe Rust document/session model
+crates/scalpel-shim            C FFI boundary and MuPDF adapter
+crates/scalpel-contract-tests  backend contract tests
+crates/scalpel-mcp             read-only MCP-facing library work
 docs/                       architecture, plans, compliance, branding
 fixtures/                   test PDFs and fixture notes
 scripts/                    setup, CI, fuzz, notice, and ABI helper scripts

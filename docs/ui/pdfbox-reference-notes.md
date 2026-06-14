@@ -6,9 +6,9 @@ parity` non-goal in `pdf-debugger-architecture.md` §3.2).
 
 **Scope of this document:** it is a *functional / interaction* reference, **not a
 visual one**. PDFBox is an old Java Swing app — its menu bar, grey split
-borders, default fonts, and tree-icon styling are not worth copying; pdbg's
+borders, default fonts, and tree-icon styling are not worth copying; Scalpel's
 themed egui shell already looks more modern. Borrow the *workflows and
-information density*, render them in pdbg's modern, dense, low-noise style.
+information density*, render them in Scalpel's modern, dense, low-noise style.
 
 This is reference material only. It does **not** widen the M1.0 UI shell spike
 scope (see `milestone-1-ui-shell-spike.md`); each item below is tagged with the
@@ -32,7 +32,7 @@ i.e. **type glyph + key + inline scalar value + child count + indirect ref
 `[N 0 R]` + resolved `/T:Type`**, with COS-type icons (dict / array / string /
 name / int / stream).
 
-pdbg's DTOs already carry all of this, so the real tree is a *rendering*
+Scalpel's DTOs already carry all of this, so the real tree is a *rendering*
 decision, not new data:
 
 - `ObjectKind` → type glyph/badge
@@ -52,7 +52,7 @@ PDFBox separates two **orthogonal** axes:
 - a decode-layer **dropdown** (`Decoded (Plain Text)`) — which bytes;
 - render-mode **tabs** (`Nice` / `Raw` / `Hex`) — how to display.
 
-Do **not** flatten these into one tab strip. The correct model matches pdbg's
+Do **not** flatten these into one tab strip. The correct model matches Scalpel's
 own DTOs:
 
 - `StreamMode` (decode layer): raw decrypted-compressed / decoded;
@@ -67,7 +67,7 @@ expressible.
 ### 3. Breadcrumb / object path bar — *M1*
 
 PDFBox shows the selected node's path (`Root/Pages/Kids/[0]/Contents`) in a top
-bar. pdbg should surface its `NodeId` / `SerializedNodeId` path the same way:
+bar. Scalpel should surface its `NodeId` / `SerializedNodeId` path the same way:
 copyable, and clickable to jump back up the path (ties into the cross-reference
 navigation + back/forward history in §10.2).
 
@@ -81,13 +81,13 @@ of the inspector / stream / page-preview panels.
 
 PDFBox's `Nice view` renders content-stream operators with syntax highlighting
 (operators colored, `/Name`s in magenta, operands plain). This is the UX target
-for pdbg's post-MVP operator viewer (architecture §4.1 Rendering Diagnostics).
+for Scalpel's post-MVP operator viewer (architecture §4.1 Rendering Diagnostics).
 
 ### 6. Page overlays + render timing — *M5*
 
 - The `View` menu toggles page-render overlays: `Show TextStripper
   TextPositions`, `Show TextStripper Beads`, `Show Approximate Text Bounds`,
-  `Show Glyph Bounds`. These are pdbg's post-MVP text-extraction overlays
+  `Show Glyph Bounds`. These are Scalpel's post-MVP text-extraction overlays
   (architecture §4.1).
 - A status-bar render-timing readout (`Rendered in 81 ms`) maps to
   `RenderResult.duration_ms` / the render-profiler goal.
@@ -96,15 +96,15 @@ for pdbg's post-MVP operator viewer (architecture §4.1 Rendering Diagnostics).
 
 - The Swing menu bar and grey/white split borders.
 - The tree's icon *look* (do borrow the *concept* of per-type glyphs/badges —
-  just render them in pdbg's modern style).
-- Large blank panels with no empty-state or context (pdbg panels should always
+  just render them in Scalpel's modern style).
+- Large blank panels with no empty-state or context (Scalpel panels should always
   show an empty/loading state).
 - Hiding features in deep nested menus (`Zoom ▸` / `Rotation ▸` / `Image type ▸`)
-  — pdbg prefers right-side inspector tabs + a command palette + local toolbars.
+  — Scalpel prefers right-side inspector tabs + a command palette + local toolbars.
 
-## Mapping to pdbg's existing design
+## Mapping to Scalpel's existing design
 
-- "Show Pages" vs "Show Internal Structure" in PDFBox = pdbg's **Render mode**
+- "Show Pages" vs "Show Internal Structure" in PDFBox = Scalpel's **Render mode**
   vs **Inspect mode** (product-shape §3 mode IA). No new focus-switch system is
   needed.
 - Tree node fields ↔ `ObjectSummary` / `ObjectKind` / `child_count` / `ObjectId`

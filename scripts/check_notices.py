@@ -56,10 +56,10 @@ def workspace_package_names() -> list[str]:
 
 def gui_font_assets() -> list[str]:
     return [
-        "crates/pdbg-app/assets/fonts/InterVariable.ttf",
-        "crates/pdbg-app/assets/fonts/JetBrainsMono-Regular.ttf",
-        "crates/pdbg-app/assets/licenses/Inter-OFL.txt",
-        "crates/pdbg-app/assets/licenses/JetBrainsMono-OFL.txt",
+        "crates/scalpel-app/assets/fonts/InterVariable.ttf",
+        "crates/scalpel-app/assets/fonts/JetBrainsMono-Regular.ttf",
+        "crates/scalpel-app/assets/licenses/Inter-OFL.txt",
+        "crates/scalpel-app/assets/licenses/JetBrainsMono-OFL.txt",
     ]
 
 

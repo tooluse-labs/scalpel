@@ -1612,7 +1612,7 @@ executable templates.
 > UI reference (functional, not visual): `docs/ui/pdfbox-reference-notes.md`
 > distills borrowable PDFBox PDFDebugger workflows (tree node anatomy, two-axis
 > stream view, breadcrumb, operator highlighting, overlays), each tagged with
-> the milestone where it applies. `docs/ui/pdbg-ui-design-v1.svg` is the visual
+> the milestone where it applies. `docs/ui/scalpel-ui-design-v1.svg` is the visual
 > target.
 
 ### 10.1 egui Layout
@@ -1902,7 +1902,7 @@ Acceptance checklist:
 ### Milestone 1.0: UI Shell Spike
 
 The UI engine (egui) is named throughout this document but is not yet validated:
-M0 ships `pdbg-app` as a headless app-state crate with no `egui`/`eframe`
+M0 ships `scalpel-app` as a headless app-state crate with no `egui`/`eframe`
 dependency and no window. Before Milestones 1-5 build feature panels on top of
 egui, this spike stands up the real shell over the existing `FakeShim` and
 proves egui can carry the dense-debugger UX — while the cost is a fake-shim

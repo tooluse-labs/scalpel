@@ -24,9 +24,9 @@ decisions that M0 is not meant to settle.
 
 Keeping MuPDF outside M0 makes the boundary explicit:
 
-- `pdbg-shim` owns the C ABI shape and the checked-in raw Rust declarations that
+- `scalpel-shim` owns the C ABI shape and the checked-in raw Rust declarations that
   are structurally drift-checked against it.
-- `pdbg-core` owns safe Rust DTO conversion and scheduler contracts.
+- `scalpel-core` owns safe Rust DTO conversion and scheduler contracts.
 - The fake shim proves the ABI and lifecycle contracts without libmupdf.
 
 ## Milestone 1 Entry Criteria

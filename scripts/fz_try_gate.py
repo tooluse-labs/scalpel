@@ -53,7 +53,7 @@ def scan_file(path: pathlib.Path) -> list[str]:
 
 
 def main() -> int:
-    args = sys.argv[1:] or ["crates/pdbg-shim/c"]
+    args = sys.argv[1:] or ["crates/scalpel-shim/c"]
     violations: list[str] = []
     for path in iter_c_files(args):
         violations.extend(scan_file(path))

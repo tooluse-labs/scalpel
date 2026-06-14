@@ -13,8 +13,8 @@ import re
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-HEADER = ROOT / "crates/pdbg-shim/include/pdbg_shim.h"
-RAW = ROOT / "crates/pdbg-shim/src/raw.rs"
+HEADER = ROOT / "crates/scalpel-shim/include/pdbg_shim.h"
+RAW = ROOT / "crates/scalpel-shim/src/raw.rs"
 
 HEADER_ENUM = re.compile(r"typedef\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}\s*\1\s*;", re.S)
 RUST_ENUM = re.compile(r"pub\s+enum\s+(\w+)\s*\{(?P<body>.*?)\}", re.S)
@@ -150,6 +150,8 @@ def rust_callbacks(text: str) -> dict[str, tuple[str, list[str]]]:
 
 
 def statements(body: str) -> list[str]:
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"//.*", "", body)
     return [line.strip() for line in body.split(";") if line.strip()]
 
 

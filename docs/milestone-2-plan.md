@@ -68,7 +68,7 @@ and cancellation boundaries. The default workspace gate must remain MuPDF-free.
 Latest local validation after completing the required M2 exit gate:
 
 ```sh
-PDBG_MUPDF_SOURCE_DIR=/private/tmp/xreflab-mupdf/mupdf-1.27.2-source \
+SCALPEL_MUPDF_SOURCE_DIR=/private/tmp/scalpel-mupdf/mupdf-1.27.2-source \
 sh scripts/run_real_gate.sh
 ```
 

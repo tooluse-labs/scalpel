@@ -25,7 +25,7 @@ diagnostics surface, it must include the source offer there too.
 The source offer must provide, or link directly to, an archive or repository
 snapshot containing:
 
-- the exact xreflab/pdbg source revision used for the deployed artifact;
+- the exact Scalpel source revision used for the deployed artifact;
 - generated files needed to rebuild the deployed artifact;
 - build scripts, lockfiles, dependency manifests, and CI configuration;
 - the exact MuPDF source archive/version used by `real-mupdf`;

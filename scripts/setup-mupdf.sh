@@ -16,12 +16,12 @@ fi
 : "${MUPDF_SOURCE_URL:?missing MUPDF_SOURCE_URL in $VERSION_FILE}"
 MUPDF_SHA256="${MUPDF_SHA256:-}"
 
-THIRD_PARTY_DIR="${PDBG_MUPDF_THIRD_PARTY_DIR:-$ROOT/third_party}"
-CACHE_DIR="${PDBG_MUPDF_CACHE_DIR:-$THIRD_PARTY_DIR/cache}"
+THIRD_PARTY_DIR="${SCALPEL_MUPDF_THIRD_PARTY_DIR:-$ROOT/third_party}"
+CACHE_DIR="${SCALPEL_MUPDF_CACHE_DIR:-$THIRD_PARTY_DIR/cache}"
 ARCHIVE="$CACHE_DIR/mupdf-$MUPDF_VERSION-source.tar.gz"
 ARCHIVE_PART="$ARCHIVE.part"
-SOURCE_DIR="${PDBG_MUPDF_SOURCE_DIR:-$THIRD_PARTY_DIR/mupdf-$MUPDF_VERSION-source}"
-ENV_FILE="${PDBG_MUPDF_ENV_FILE:-$THIRD_PARTY_DIR/mupdf.env}"
+SOURCE_DIR="${SCALPEL_MUPDF_SOURCE_DIR:-$THIRD_PARTY_DIR/mupdf-$MUPDF_VERSION-source}"
+ENV_FILE="${SCALPEL_MUPDF_ENV_FILE:-$THIRD_PARTY_DIR/mupdf.env}"
 
 mkdir -p "$CACHE_DIR"
 
@@ -109,9 +109,9 @@ do
   fi
 done
 
-if [ "${PDBG_MUPDF_SKIP_BUILD:-0}" != "1" ]; then
+if [ "${SCALPEL_MUPDF_SKIP_BUILD:-0}" != "1" ]; then
   if ! command -v make >/dev/null 2>&1; then
-    echo "make is required to build MuPDF; install make or set PDBG_MUPDF_SKIP_BUILD=1" >&2
+    echo "make is required to build MuPDF; install make or set SCALPEL_MUPDF_SKIP_BUILD=1" >&2
     exit 1
   fi
   echo "building MuPDF release libraries and mutool"
@@ -131,10 +131,10 @@ if [ ! -x "$MUTOOL" ]; then
 fi
 
 cat > "$ENV_FILE" <<EOF
-export PDBG_MUPDF_SOURCE_DIR="$SOURCE_DIR"
-export PDBG_MUPDF_INCLUDE_DIR="$SOURCE_DIR/include"
-export PDBG_MUPDF_LIB_DIR="$LIB_DIR"
-export PDBG_MUTOOL_PATH="$MUTOOL"
+export SCALPEL_MUPDF_SOURCE_DIR="$SOURCE_DIR"
+export SCALPEL_MUPDF_INCLUDE_DIR="$SOURCE_DIR/include"
+export SCALPEL_MUPDF_LIB_DIR="$LIB_DIR"
+export SCALPEL_MUTOOL_PATH="$MUTOOL"
 EOF
 
 echo "MuPDF is ready."
