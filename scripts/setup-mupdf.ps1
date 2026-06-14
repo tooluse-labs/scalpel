@@ -236,6 +236,10 @@ if ($env:SCALPEL_MUPDF_SKIP_BUILD -ne "1") {
     <TargetDir>`$(OutDir)</TargetDir>
     <TargetPath>`$(OutDir)`$(TargetName)`$(TargetExt)</TargetPath>
   </PropertyGroup>
+  <Target Name="ScalpelCopyBin2CoffForMuPdfCustomBuild" AfterTargets="Build" Condition="'`$(MSBuildProjectName)' == 'bin2coff'">
+    <MakeDir Directories="`$(MSBuildThisFileDirectory)`$(Configuration)\" />
+    <Copy SourceFiles="`$(TargetPath)" DestinationFiles="`$(MSBuildThisFileDirectory)`$(Configuration)\`$(TargetFileName)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>
 "@
     Write-GeneratedFile $targetsFile $targetsContent
