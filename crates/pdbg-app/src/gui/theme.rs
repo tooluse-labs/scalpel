@@ -219,6 +219,18 @@ pub(crate) fn set_dark_mode(enabled: bool) {
     DARK_MODE.store(enabled, Ordering::Relaxed);
 }
 
+pub(crate) fn page_preview_image_tint() -> Color32 {
+    if dark_mode_enabled() {
+        Color32::from_rgb(226, 226, 226)
+    } else {
+        Color32::WHITE
+    }
+}
+
+pub(crate) fn inspector_image_preview_tint() -> Color32 {
+    page_preview_image_tint()
+}
+
 impl Palette {
     pub(crate) fn severity_fg(&self, severity: &DiagnosticSeverity) -> Color32 {
         match severity {

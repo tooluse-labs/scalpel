@@ -19,7 +19,7 @@ pub(crate) fn file_chip_label(path: &str) -> String {
 
 pub(crate) fn display_file_chip_label(path: &str) -> String {
     escape_pdf_text(
-        &file_chip_label(path),
+        &decode_common_display_entities(&file_chip_label(path)),
         EgressFormat::PlainText,
         PATH_DISPLAY_MAX_BYTES,
     )
@@ -27,7 +27,26 @@ pub(crate) fn display_file_chip_label(path: &str) -> String {
 }
 
 pub(crate) fn display_path_hover(path: &str) -> String {
-    escape_pdf_text(path, EgressFormat::PlainText, PATH_DISPLAY_MAX_BYTES).text
+    escape_pdf_text(
+        &decode_common_display_entities(path),
+        EgressFormat::PlainText,
+        PATH_DISPLAY_MAX_BYTES,
+    )
+    .text
+}
+
+pub(crate) fn decode_common_display_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+
+    text.replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 pub(crate) fn kind_badge_text(kind: &ObjectKind) -> &'static str {

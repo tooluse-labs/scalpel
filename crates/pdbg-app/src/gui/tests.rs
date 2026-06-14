@@ -1965,6 +1965,39 @@ fn displayed_file_paths_neutralize_controls() {
 }
 
 #[test]
+fn displayed_file_paths_decode_common_html_entities() {
+    let label = display_file_chip_label(r#"C:\tmp\123&quot;asdasdas.pdf"#);
+
+    assert_eq!(label, "123\"asdasdas.pdf");
+    assert!(!label.contains("&quot;"));
+}
+
+#[test]
+fn page_preview_tint_dims_only_in_dark_mode() {
+    set_dark_mode(false);
+    assert_eq!(page_preview_image_tint(), Color32::WHITE);
+
+    set_dark_mode(true);
+    let dark_tint = page_preview_image_tint();
+    assert!(dark_tint.r() < Color32::WHITE.r());
+    assert_eq!(dark_tint.r(), dark_tint.g());
+    assert_eq!(dark_tint.g(), dark_tint.b());
+
+    set_dark_mode(false);
+}
+
+#[test]
+fn inspector_image_preview_tint_matches_page_preview_tint() {
+    set_dark_mode(false);
+    assert_eq!(inspector_image_preview_tint(), page_preview_image_tint());
+
+    set_dark_mode(true);
+    assert_eq!(inspector_image_preview_tint(), page_preview_image_tint());
+
+    set_dark_mode(false);
+}
+
+#[test]
 fn gui_empty_workspace_starts_without_fake_document() {
     let app = GuiShellApp::new_with_options(GuiRunOptions {
         start_empty_when_no_pdf: true,

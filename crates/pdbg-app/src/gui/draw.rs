@@ -2,8 +2,12 @@ use super::*;
 
 impl GuiShellApp {
     pub(crate) fn draw_workspace(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let available_rect = ui.available_rect_before_wrap();
+        let available_rect = visible_available_rect(ui);
         if available_rect.width() <= 0.0 || available_rect.height() <= 0.0 {
+            return;
+        }
+        if self.empty_workspace {
+            self.draw_empty_workspace(ui, available_rect);
             return;
         }
 
@@ -60,6 +64,95 @@ impl GuiShellApp {
         draw_workspace_splitter(ui, rects.left_splitter, &left_splitter_response);
         draw_workspace_splitter(ui, rects.right_splitter, &right_splitter_response);
         ui.advance_cursor_after_rect(available_rect);
+    }
+
+    pub(crate) fn draw_empty_workspace(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        ui.painter_at(rect).rect_filled(rect, 0.0, theme().canvas);
+
+        let launch_band_width = rect.width().min(1400.0);
+        let horizontal_margin = 24.0_f32.min(launch_band_width * 0.08);
+        let card_width = (launch_band_width - horizontal_margin * 2.0)
+            .max(280.0)
+            .min(560.0)
+            .min(launch_band_width.max(1.0));
+        let recent_rows = self.recent_pdf_paths.len().min(6) as f32;
+        let preferred_height = if self.recent_pdf_paths.is_empty() {
+            190.0
+        } else {
+            230.0 + recent_rows * 32.0
+        };
+        let card_height = preferred_height.min((rect.height() - 48.0).max(160.0));
+        let preferred_top = rect.top() + (rect.height() * 0.22).min(150.0);
+        let top = preferred_top
+            .min(rect.bottom() - card_height - 24.0)
+            .max(rect.top() + 24.0);
+        let content_rect = ui.ctx().content_rect();
+        let workspace_left = rect.left().max(content_rect.left());
+        let workspace_right = rect.right().min(content_rect.right());
+        let workspace_width = (workspace_right - workspace_left).max(1.0);
+        let card_x = workspace_left + (workspace_width - card_width) * 0.5;
+        let card_content_size =
+            egui::vec2((card_width - 56.0).max(1.0), (card_height - 48.0).max(1.0));
+
+        egui::Area::new(egui::Id::new("empty_workspace_launch_card"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::pos2(card_x, top))
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(card_width);
+                ui.set_max_width(card_width);
+                egui::Frame::new()
+                    .fill(theme().surface)
+                    .stroke(egui::Stroke::new(1.0, theme().border))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(28, 24))
+                    .show(ui, |ui| {
+                        ui.set_min_size(card_content_size);
+                        ui.set_max_width(card_content_size.x);
+                        self.draw_launch_card(ui);
+                    });
+            });
+        ui.advance_cursor_after_rect(rect);
+    }
+
+    pub(crate) fn draw_launch_card(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("No PDF open")
+                    .strong()
+                    .size(22.0)
+                    .color(theme().text),
+            );
+            ui.add_space(10.0);
+            if ui
+                .add_sized(
+                    egui::vec2(140.0, 34.0),
+                    egui::Button::new(
+                        RichText::new("Open PDF...")
+                            .strong()
+                            .size(13.0)
+                            .color(Color32::WHITE),
+                    )
+                    .fill(theme().accent),
+                )
+                .clicked()
+            {
+                self.open_pdf_with_file_dialog();
+            }
+            ui.add_space(7.0);
+            ui.label(RichText::new("Drop PDF here").color(theme().muted));
+        });
+
+        if !self.recent_pdf_paths.is_empty() {
+            ui.add_space(22.0);
+            ui.separator();
+            ui.add_space(12.0);
+            section_header(ui, "Recent Files", None);
+            let recent_height = (ui.available_height() - 4.0).clamp(96.0, 190.0);
+            if let Some(path) = self.draw_recent_file_list(ui, "launch_recent_paths", recent_height)
+            {
+                self.open_pdf_from_path(path);
+            }
+        }
     }
 
     pub(crate) fn draw_recent_file_list(
@@ -699,13 +792,20 @@ impl GuiShellApp {
                         self.open_pdf_from_path(path);
                     }
                 }
-                top_bar_separator(ui);
-                if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked() {
-                    self.go_back();
-                }
-                if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward").clicked()
+                if !self.empty_workspace
+                    || !self.back_stack.is_empty()
+                    || !self.forward_stack.is_empty()
                 {
-                    self.go_forward();
+                    top_bar_separator(ui);
+                    if top_bar_icon_button(ui, "‹", !self.back_stack.is_empty(), "Back").clicked()
+                    {
+                        self.go_back();
+                    }
+                    if top_bar_icon_button(ui, "›", !self.forward_stack.is_empty(), "Forward")
+                        .clicked()
+                    {
+                        self.go_forward();
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (label, hover) = if dark_mode_enabled() {
@@ -1215,6 +1315,7 @@ impl GuiShellApp {
                     let response = ui.add(
                         egui::Image::new((texture_id, display_size))
                             .bg_fill(theme().page)
+                            .tint(page_preview_image_tint())
                             .corner_radius(3)
                             .sense(egui::Sense::click()),
                     );
@@ -1562,6 +1663,7 @@ impl GuiShellApp {
             ui.add(
                 egui::Image::new((texture.id(), texture_size * scale))
                     .bg_fill(theme().page)
+                    .tint(inspector_image_preview_tint())
                     .corner_radius(3),
             );
             ui.label(
@@ -2820,6 +2922,20 @@ fn about_link_row(ui: &mut egui::Ui, label: &str, url: &str) {
     ui.label(RichText::new(label).size(11.5).color(theme().muted));
     ui.hyperlink_to(RichText::new(url).size(13.5), url);
     ui.end_row();
+}
+
+fn visible_available_rect(ui: &egui::Ui) -> egui::Rect {
+    let available = ui.available_rect_before_wrap();
+    let clip = ui.clip_rect();
+    let visible = egui::Rect::from_min_max(
+        egui::pos2(clip.left(), available.top().max(clip.top())),
+        egui::pos2(clip.right(), available.bottom().min(clip.bottom())),
+    );
+    if visible.is_positive() {
+        visible
+    } else {
+        available
+    }
 }
 
 #[cfg(feature = "real-mupdf")]
