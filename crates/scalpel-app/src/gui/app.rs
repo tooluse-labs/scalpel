@@ -234,6 +234,9 @@ impl GuiShellApp {
             render_zoom,
             render_rotation_degrees,
             render_max_dimension,
+            render_limit_dialog_open: false,
+            render_limit_gib_input: String::new(),
+            render_limit_dialog_error: None,
             real_render_key: None,
             real_render_job: None,
             real_render: None,
@@ -1950,6 +1953,57 @@ impl GuiShellApp {
         Ok(page)
     }
 
+    pub(crate) fn handle_render_limit_error(&mut self, key: RealRenderKey, err: String) {
+        self.real_render = None;
+        self.real_render_texture = None;
+        self.real_render_error = Some(err.clone());
+        self.real_render_key = Some(key);
+        self.render_limit_dialog_open = true;
+        self.render_limit_gib_input = next_render_limit_gib_input(self.render_max_dimension);
+        self.render_limit_dialog_error = None;
+        self.status_log.push(format!(
+            "page {} render exceeded {}: {err}",
+            key.page_index + 1,
+            render_limit_label(self.render_max_dimension)
+        ));
+    }
+
+    pub(crate) fn apply_render_limit_upgrade(&mut self) {
+        let input = self.render_limit_gib_input.trim();
+        let Ok(gib) = input.parse::<u64>() else {
+            self.render_limit_dialog_error = Some("Enter a whole number of GiB.".to_string());
+            return;
+        };
+        let Some(max_dimension) = render_max_dimension_for_gib(gib) else {
+            self.render_limit_dialog_error =
+                Some("Enter a positive GiB value within the renderer range.".to_string());
+            return;
+        };
+        let current_limit = render_max_output_bytes(self.render_max_dimension);
+        let new_limit = render_max_output_bytes(max_dimension);
+        if new_limit <= current_limit {
+            self.render_limit_dialog_error = Some(format!(
+                "Enter a value above {}.",
+                render_limit_label(self.render_max_dimension)
+            ));
+            return;
+        }
+
+        self.render_max_dimension = max_dimension;
+        self.render_limit_dialog_open = false;
+        self.render_limit_dialog_error = None;
+        self.real_render_job = None;
+        self.real_render_key = None;
+        self.real_render_texture = None;
+        self.real_render = None;
+        self.real_render_error = None;
+        self.status_log.push(format!(
+            "raised render limit to {}",
+            render_limit_label(max_dimension)
+        ));
+        self.refresh_real_render();
+    }
+
     pub(crate) fn refresh_real_render(&mut self) {
         let Some(key) = self.current_render_key() else {
             return;
@@ -2024,20 +2078,8 @@ impl GuiShellApp {
                         self.real_render = Some(render);
                     }
                     Err(err) => {
-                        if err.contains(RENDER_DIMENSION_LIMIT_ERROR)
-                            && output.key.zoom() > DEFAULT_RENDER_ZOOM
-                        {
-                            self.render_zoom = DEFAULT_RENDER_ZOOM;
-                            self.real_render = None;
-                            self.real_render_texture = None;
-                            self.real_render_error = None;
-                            self.real_render_key = None;
-                            self.status_log.push(format!(
-                                "page {} render exceeded bounds at {:.0}%; retrying at 100%",
-                                output.key.page_index + 1,
-                                output.key.zoom() * 100.0
-                            ));
-                            self.refresh_real_render();
+                        if is_render_limit_error(&err) {
+                            self.handle_render_limit_error(output.key, err);
                             return;
                         }
                         self.real_render = None;

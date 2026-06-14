@@ -393,6 +393,71 @@ fn render_key_request_applies_configured_dimension_limit() {
 }
 
 #[test]
+fn default_render_limit_allows_four_gib_output() {
+    assert_eq!(DEFAULT_RENDER_MAX_DIMENSION, 32_768);
+    assert_eq!(
+        render_max_output_bytes(DEFAULT_RENDER_MAX_DIMENSION),
+        4 * 1024 * 1024 * 1024
+    );
+    assert_eq!(
+        render_limit_label(DEFAULT_RENDER_MAX_DIMENSION),
+        "4 GiB output / 32768 px max dimension"
+    );
+}
+
+#[test]
+fn render_limit_gib_input_updates_dimension_limit() {
+    let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+        start_empty_when_no_pdf: true,
+        ..GuiRunOptions::default()
+    });
+
+    app.render_limit_dialog_open = true;
+    app.render_limit_gib_input = "8".to_string();
+    app.apply_render_limit_upgrade();
+
+    assert_eq!(app.render_max_dimension, 46_340);
+    assert!(!app.render_limit_dialog_open);
+    assert!(app.render_limit_dialog_error.is_none());
+}
+
+#[test]
+fn render_limit_error_opens_upgrade_dialog() {
+    let mut app = GuiShellApp::new_with_options(GuiRunOptions {
+        start_empty_when_no_pdf: true,
+        ..GuiRunOptions::default()
+    });
+    let key = RealRenderKey::new(0, 1.0, 0, DEFAULT_RENDER_MAX_DIMENSION);
+
+    app.handle_render_limit_error(
+        key,
+        "render output exceeds configured byte limit".to_string(),
+    );
+
+    assert!(app.render_limit_dialog_open);
+    assert_eq!(app.render_limit_gib_input, "8");
+    assert_eq!(
+        app.real_render_error.as_deref(),
+        Some("render output exceeds configured byte limit")
+    );
+}
+
+#[test]
+fn render_limit_error_detection_covers_all_guardrails() {
+    assert!(is_render_limit_error(
+        "render output exceeds configured dimensions"
+    ));
+    assert!(is_render_limit_error(
+        "render output exceeds configured pixel count"
+    ));
+    assert!(is_render_limit_error(
+        "render output exceeds configured byte limit"
+    ));
+    assert!(is_render_limit_error("render output byte size overflow"));
+    assert!(!is_render_limit_error("document is not open"));
+}
+
+#[test]
 fn gui_options_default_render_dimension_limit_when_unset_or_zero() {
     assert_eq!(
         render_max_dimension_or_default(None),
@@ -1642,6 +1707,54 @@ fn real_tree_row_anatomy_uses_kind_count_ref_preview_and_diagnostics() {
 }
 
 #[test]
+fn selected_real_tree_rows_use_selected_text_for_all_non_warning_segments() {
+    set_dark_mode(true);
+    let summary = ObjectSummary {
+        id: NodeId::XrefObject {
+            doc: scalpel_core::DocumentId(7),
+            object: ObjectId { num: 10, gen: 0 },
+        },
+        kind: ObjectKind::Stream,
+        label: "Contents".to_string(),
+        preview: String::new(),
+        object: Some(ObjectId { num: 10, gen: 0 }),
+        has_children: true,
+        has_stream: true,
+        child_count: Some(2),
+        byte_size_hint: None,
+        diagnostics: Vec::new(),
+    };
+    let tree = RealObjectTree::from_child_page(&scalpel_core::ChildPage {
+        total: Some(1),
+        items: vec![summary],
+    });
+
+    let job = tree.row_layout_job(1, true);
+
+    assert!(job
+        .sections
+        .iter()
+        .filter(|section| !section.byte_range.is_empty())
+        .all(|section| section.format.color == theme().selected_text));
+    set_dark_mode(false);
+}
+
+#[test]
+fn selected_virtual_tree_rows_use_selected_text_for_both_segments() {
+    set_dark_mode(true);
+    let tree = VirtualObjectTree::new(8);
+
+    let job = tree.row_layout_job(1, true);
+
+    assert!(job
+        .sections
+        .iter()
+        .filter(|section| !section.byte_range.is_empty())
+        .all(|section| section.format.color == theme().selected_text));
+    set_dark_mode(false);
+}
+
+#[test]
 fn real_tree_detail_refresh_keeps_structural_label_stable() {
     let id = NodeId::DocumentRoot {
         doc: scalpel_core::DocumentId(7),
@@ -2709,6 +2822,45 @@ fn theme_defines_named_font_stacks_and_severity_colors() {
         theme().severity_fg(&DiagnosticSeverity::Error),
         theme().error_fg
     );
+}
+
+#[test]
+fn dark_theme_selection_colors_keep_stream_text_readable() {
+    set_dark_mode(true);
+
+    assert_contrast_at_least(theme().selected_text, theme().selected_bg, 4.5);
+    assert_contrast_at_least(theme().text, theme().text_selection_bg, 4.5);
+    assert_contrast_at_least(theme().accent, theme().text_selection_bg, 4.5);
+    assert_contrast_at_least(theme().operator, theme().text_selection_bg, 4.5);
+
+    set_dark_mode(false);
+}
+
+fn assert_contrast_at_least(foreground: Color32, background: Color32, minimum: f32) {
+    let contrast = contrast_ratio(foreground, background);
+    assert!(
+        contrast >= minimum,
+        "expected contrast {contrast:.2} to be at least {minimum:.2} for foreground {foreground:?} on background {background:?}"
+    );
+}
+
+fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let light = relative_luminance(a).max(relative_luminance(b));
+    let dark = relative_luminance(a).min(relative_luminance(b));
+    (light + 0.05) / (dark + 0.05)
+}
+
+fn relative_luminance(color: Color32) -> f32 {
+    fn channel(value: u8) -> f32 {
+        let normalized = f32::from(value) / 255.0;
+        if normalized <= 0.03928 {
+            normalized / 12.92
+        } else {
+            ((normalized + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
 }
 
 fn temp_recent_file_path(prefix: &str) -> PathBuf {

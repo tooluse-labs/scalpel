@@ -405,6 +405,142 @@ impl GuiShellApp {
         }
     }
 
+    pub(crate) fn draw_render_limit_dialog(&mut self, ctx: &egui::Context) {
+        if !self.render_limit_dialog_open {
+            return;
+        }
+
+        let mut apply_requested = false;
+        let mut close_requested = false;
+        let current_limit = render_limit_label(self.render_max_dimension);
+
+        let modal_response = egui::Modal::new(egui::Id::new("render_limit_dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(72))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme().surface)
+                    .stroke(egui::Stroke::new(1.0, theme().strong_border))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(0))
+                    .shadow(egui::Shadow {
+                        offset: [0, 16],
+                        blur: 32,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(46),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                egui::Frame::new()
+                    .fill(theme().panel)
+                    .inner_margin(egui::Margin::symmetric(18, 14))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Render Limit")
+                                    .strong()
+                                    .size(17.0)
+                                    .color(theme().text),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(28.0, 28.0),
+                                            egui::Button::new(
+                                                RichText::new("×").size(18.0).color(theme().muted),
+                                            )
+                                            .fill(theme().chip_bg),
+                                        )
+                                        .on_hover_text("Close")
+                                        .clicked()
+                                    {
+                                        close_requested = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("This page exceeds the current render output limit.")
+                                .size(13.5)
+                                .color(theme().text),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(format!("Current limit: {current_limit}"))
+                                .size(12.5)
+                                .color(theme().muted),
+                        );
+                        ui.add_space(14.0);
+                        ui.label(
+                            RichText::new("New limit (GiB)")
+                                .small()
+                                .color(theme().muted),
+                        );
+                        ui.add_space(4.0);
+                        let response = ui.add(
+                            TextEdit::singleline(&mut self.render_limit_gib_input)
+                                .desired_width(ui.available_width())
+                                .hint_text("8"),
+                        );
+                        if response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                        {
+                            apply_requested = true;
+                        }
+                        if !ctx.memory(|memory| memory.has_focus(response.id)) {
+                            response.request_focus();
+                        }
+
+                        if let Some(err) = &self.render_limit_dialog_error {
+                            ui.add_space(10.0);
+                            egui::Frame::new()
+                                .fill(theme().error_bg)
+                                .stroke(egui::Stroke::new(1.0, theme().error_fg))
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.colored_label(theme().error_fg, err);
+                                });
+                        }
+
+                        ui.add_space(18.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Apply and retry").color(theme().surface),
+                                    )
+                                    .fill(theme().accent)
+                                    .min_size(egui::vec2(126.0, 30.0)),
+                                )
+                                .clicked()
+                            {
+                                apply_requested = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_requested = true;
+                            }
+                        });
+                    });
+            });
+
+        if modal_response.should_close() {
+            close_requested = true;
+        }
+        if apply_requested {
+            self.apply_render_limit_upgrade();
+        } else if close_requested {
+            self.render_limit_dialog_open = false;
+        }
+    }
+
     pub(crate) fn draw_about_dialog(&mut self, ctx: &egui::Context) {
         if !self.about_dialog_open {
             return;
@@ -423,10 +559,10 @@ impl GuiShellApp {
 
         let mut close_requested = false;
         let mupdf_version = mupdf_version_label();
-        let backend = backend_label(&mupdf_version);
+        let backend = backend_label();
         let platform = platform_label();
-        let render_limit = format!("{} px max dimension", self.render_max_dimension);
-        let about_text = about_info_text(&backend, &platform, &render_limit);
+        let render_limit = render_limit_label(self.render_max_dimension);
+        let about_text = about_info_text(backend, &mupdf_version, &platform, &render_limit);
         let modal_response = egui::Modal::new(egui::Id::new("about_dialog"))
             .backdrop_color(egui::Color32::from_black_alpha(72))
             .frame(
@@ -516,7 +652,8 @@ impl GuiShellApp {
                                         about_info_row(ui, "Version", env!("CARGO_PKG_VERSION"));
                                         about_info_row(ui, "Commit", build_commit_label());
                                         about_info_row(ui, "Release date", release_date_label());
-                                        about_info_row(ui, "Backend", &backend);
+                                        about_info_row(ui, "Backend", backend);
+                                        about_info_row(ui, "MuPDF Version", &mupdf_version);
                                         about_info_row(ui, "OS", &platform);
                                         about_info_row(ui, "Build", build_profile_label());
                                         about_info_row(ui, "Render limit", &render_limit);
@@ -2801,7 +2938,9 @@ impl GuiShellApp {
                     ui.add_space(22.0);
                 }
 
-                let color = if line.block_open {
+                let color = if selected {
+                    theme().selected_text
+                } else if line.block_open {
                     theme().accent
                 } else if line.block_close {
                     theme().muted
@@ -2937,18 +3076,12 @@ fn visible_available_rect(ui: &egui::Ui) -> egui::Rect {
     }
 }
 
-#[cfg(feature = "real-mupdf")]
-fn backend_label(mupdf_version: &str) -> String {
-    if mupdf_version == "linked (version unavailable)" {
-        "MuPDF (version unavailable)".to_string()
+fn backend_label() -> &'static str {
+    if cfg!(feature = "real-mupdf") {
+        "MuPDF"
     } else {
-        format!("MuPDF {mupdf_version}")
+        "sample backend"
     }
-}
-
-#[cfg(not(feature = "real-mupdf"))]
-fn backend_label(_mupdf_version: &str) -> String {
-    "sample backend".to_string()
 }
 
 fn build_profile_label() -> &'static str {
@@ -2967,12 +3100,18 @@ fn release_date_label() -> &'static str {
     option_env!("SCALPEL_RELEASE_DATE").unwrap_or("unknown")
 }
 
-fn about_info_text(backend: &str, platform: &str, render_limit: &str) -> String {
+fn about_info_text(
+    backend: &str,
+    mupdf_version: &str,
+    platform: &str,
+    render_limit: &str,
+) -> String {
     [
         format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION")),
         format!("Commit: {}", build_commit_label()),
         format!("Release date: {}", release_date_label()),
         format!("Backend: {backend}"),
+        format!("MuPDF Version: {mupdf_version}"),
         format!("OS: {platform}"),
         format!("Build: {}", build_profile_label()),
         format!("Render limit: {render_limit}"),
@@ -2987,12 +3126,29 @@ fn platform_label() -> String {
 
 #[cfg(feature = "real-mupdf")]
 fn mupdf_version_label() -> String {
-    read_mupdf_version_from_env().unwrap_or_else(|| "linked (version unavailable)".to_string())
+    linked_mupdf_version_label(
+        option_env!("SCALPEL_BUILD_MUPDF_VERSION"),
+        read_mupdf_version_from_env(),
+    )
 }
 
 #[cfg(not(feature = "real-mupdf"))]
 fn mupdf_version_label() -> String {
     "not linked".to_string()
+}
+
+#[cfg(any(feature = "real-mupdf", test))]
+fn linked_mupdf_version_label(build_time: Option<&str>, runtime: Option<String>) -> String {
+    build_time
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            runtime
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 #[cfg(feature = "real-mupdf")]
@@ -3054,4 +3210,30 @@ fn extract_mupdf_version_from_component(component: &str) -> Option<String> {
     let looks_like_version =
         version.chars().all(|ch| ch.is_ascii_digit() || ch == '.') && version.contains('.');
     looks_like_version.then(|| version.to_string())
+}
+
+#[cfg(test)]
+mod about_tests {
+    use super::*;
+
+    #[test]
+    fn about_info_text_lists_mupdf_version_explicitly() {
+        let text = about_info_text(
+            "MuPDF",
+            "1.27.2",
+            "windows / x86_64",
+            "4 GiB output / 32768 px max dimension",
+        );
+
+        assert!(text.contains("Backend: MuPDF"));
+        assert!(text.contains("MuPDF Version: 1.27.2"));
+    }
+
+    #[test]
+    fn linked_mupdf_version_prefers_build_time_value() {
+        assert_eq!(
+            linked_mupdf_version_label(Some("1.27.2"), Some("1.26.10".to_string())),
+            "1.27.2"
+        );
+    }
 }

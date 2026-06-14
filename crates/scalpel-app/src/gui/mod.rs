@@ -58,9 +58,14 @@ const REAL_STREAM_MAX_LOADED_WINDOWS: usize = 5;
 const COPY_LIMIT_BYTES: usize = 4096;
 const DEFAULT_RENDER_ZOOM: f32 = 1.0;
 const RENDER_ZOOM_LEVELS: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
-const DEFAULT_RENDER_MAX_DIMENSION: u32 = 4096;
+const DEFAULT_RENDER_MAX_DIMENSION: u32 = 32_768;
 const DEFAULT_RENDER_MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+const RENDER_BYTES_PER_PIXEL: u64 = 4;
+const RENDER_LIMIT_GIB_BYTES: u64 = 1024 * 1024 * 1024;
 const RENDER_DIMENSION_LIMIT_ERROR: &str = "render output exceeds configured dimensions";
+const RENDER_PIXEL_LIMIT_ERROR: &str = "render output exceeds configured pixel count";
+const RENDER_BYTE_LIMIT_ERROR: &str = "render output exceeds configured byte limit";
+const RENDER_BYTE_OVERFLOW_ERROR: &str = "render output byte size overflow";
 const PREVIEW_CONTROL_GROUP_HEIGHT: f32 = 42.0;
 const PREVIEW_ZOOM_CONTROL_WIDTH: f32 = 228.0;
 const PREVIEW_PAGER_CONTROL_WIDTH: f32 = 174.0;
@@ -227,6 +232,9 @@ pub struct GuiShellApp {
     render_zoom: f32,
     render_rotation_degrees: i32,
     render_max_dimension: u32,
+    render_limit_dialog_open: bool,
+    render_limit_gib_input: String,
+    render_limit_dialog_error: Option<String>,
     real_render_key: Option<RealRenderKey>,
     real_render_job: Option<RealRenderJob>,
     real_render: Option<RenderResult>,
@@ -326,6 +334,7 @@ impl eframe::App for GuiShellApp {
         self.draw_workspace(ui, &ctx);
 
         self.draw_open_pdf_dialog(&ctx);
+        self.draw_render_limit_dialog(&ctx);
         self.draw_about_dialog(&ctx);
 
         if self

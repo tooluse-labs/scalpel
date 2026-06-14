@@ -97,8 +97,72 @@ pub(crate) fn render_max_pixels(max_dimension: u32) -> u64 {
 
 pub(crate) fn render_max_output_bytes(max_dimension: u32) -> u64 {
     render_max_pixels(max_dimension)
-        .saturating_mul(4)
+        .saturating_mul(RENDER_BYTES_PER_PIXEL)
         .max(DEFAULT_RENDER_MAX_OUTPUT_BYTES)
+}
+
+pub(crate) fn render_max_dimension_for_gib(gib: u64) -> Option<u32> {
+    let bytes = gib.checked_mul(RENDER_LIMIT_GIB_BYTES)?;
+    let pixels = bytes / RENDER_BYTES_PER_PIXEL;
+    let dimension = integer_sqrt(pixels);
+    if dimension == 0 || dimension > u64::from(u32::MAX) {
+        return None;
+    }
+    Some(dimension as u32)
+}
+
+pub(crate) fn render_limit_label(max_dimension: u32) -> String {
+    let bytes = render_max_output_bytes(max_dimension);
+    format!(
+        "{} output / {} px max dimension",
+        format_render_limit_bytes(bytes),
+        max_dimension
+    )
+}
+
+pub(crate) fn next_render_limit_gib_input(max_dimension: u32) -> String {
+    let current_gib = render_max_output_bytes(max_dimension)
+        .saturating_add(RENDER_LIMIT_GIB_BYTES - 1)
+        / RENDER_LIMIT_GIB_BYTES;
+    current_gib.max(1).saturating_mul(2).to_string()
+}
+
+pub(crate) fn is_render_limit_error(err: &str) -> bool {
+    err.contains(RENDER_DIMENSION_LIMIT_ERROR)
+        || err.contains(RENDER_PIXEL_LIMIT_ERROR)
+        || err.contains(RENDER_BYTE_LIMIT_ERROR)
+        || err.contains(RENDER_BYTE_OVERFLOW_ERROR)
+}
+
+fn format_render_limit_bytes(bytes: u64) -> String {
+    if bytes >= RENDER_LIMIT_GIB_BYTES && bytes.is_multiple_of(RENDER_LIMIT_GIB_BYTES) {
+        return format!("{} GiB", bytes / RENDER_LIMIT_GIB_BYTES);
+    }
+    let mib = 1024 * 1024;
+    if bytes < RENDER_LIMIT_GIB_BYTES && bytes.is_multiple_of(mib) {
+        return format!("{} MiB", bytes / mib);
+    }
+    format!("{:.1} GiB", bytes as f64 / RENDER_LIMIT_GIB_BYTES as f64)
+}
+
+fn integer_sqrt(value: u64) -> u64 {
+    if value < 2 {
+        return value;
+    }
+
+    let mut low = 1;
+    let mut high = value.min(u64::from(u32::MAX) + 1);
+    let mut result = 1;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        if mid <= value / mid {
+            result = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    result
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -343,12 +343,12 @@ impl RealObjectTree {
         };
         let mut job = egui::text::LayoutJob::default();
         let primary = if selected {
-            theme().accent
+            theme().selected_text
         } else {
             theme().text
         };
         let muted = if selected {
-            theme().accent
+            theme().selected_text
         } else {
             theme().muted
         };
@@ -368,14 +368,24 @@ impl RealObjectTree {
             job.append(&format!(" ({count})"), 0.0, tree_text_format(muted));
         }
         if let Some(object) = row.summary.object {
+            let object_color = if selected {
+                theme().selected_text
+            } else {
+                theme().accent
+            };
             job.append(
                 &format!(" [{} {} R]", object.num, object.gen),
                 0.0,
-                tree_text_format(theme().accent),
+                tree_text_format(object_color),
             );
         }
         if row.summary.has_stream {
-            job.append("  stream", 0.0, tree_text_format(theme().operator));
+            let stream_color = if selected {
+                theme().selected_text
+            } else {
+                theme().operator
+            };
+            job.append("  stream", 0.0, tree_text_format(stream_color));
         }
         job
     }
@@ -661,15 +671,15 @@ impl VirtualObjectTree {
     pub(crate) fn row_layout_job(&self, row: usize, selected: bool) -> egui::text::LayoutJob {
         let label = self.row_label(row);
         // Two-tone row: object id in primary text, the /Name in muted
-        // (both accent when selected) so the tree reads as structure,
+        // (both selected foreground when selected) so the tree reads as structure,
         // not a flat dump.
         let id_color = if selected {
-            theme().accent
+            theme().selected_text
         } else {
             theme().text
         };
         let name_color = if selected {
-            theme().accent
+            theme().selected_text
         } else {
             theme().muted
         };

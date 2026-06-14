@@ -104,7 +104,7 @@ pub(crate) fn scalpel_style() -> egui::Style {
     visuals.hyperlink_color = theme().accent;
     visuals.warn_fg_color = theme().warn_fg;
     visuals.error_fg_color = theme().error_fg;
-    visuals.selection.bg_fill = theme().selected_bg;
+    visuals.selection.bg_fill = theme().text_selection_bg;
     visuals.selection.stroke = egui::Stroke::new(1.0, theme().accent);
     visuals.widgets.noninteractive.fg_stroke.color = theme().text;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme().border);
@@ -114,7 +114,9 @@ pub(crate) fn scalpel_style() -> egui::Style {
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme().accent);
     visuals.widgets.active.weak_bg_fill = theme().selected_bg;
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, theme().accent);
+    visuals.widgets.active.fg_stroke.color = theme().selected_text;
     visuals.widgets.open.weak_bg_fill = theme().selected_bg;
+    visuals.widgets.open.fg_stroke.color = theme().selected_text;
     visuals.button_frame = true;
     visuals.striped = true;
     style.visuals = visuals;
@@ -129,6 +131,8 @@ pub(crate) struct Palette {
     pub(crate) code_bg: Color32,
     pub(crate) chip_bg: Color32,
     pub(crate) selected_bg: Color32,
+    pub(crate) selected_text: Color32,
+    pub(crate) text_selection_bg: Color32,
     pub(crate) top_bar: Color32,
     pub(crate) top_bar_text: Color32,
     pub(crate) top_bar_muted: Color32,
@@ -155,6 +159,8 @@ const LIGHT_PALETTE: Palette = Palette {
     code_bg: Color32::from_rgb(245, 247, 250),
     chip_bg: Color32::from_rgb(238, 243, 247),
     selected_bg: Color32::from_rgb(232, 245, 246),
+    selected_text: Color32::from_rgb(31, 41, 51),
+    text_selection_bg: Color32::from_rgb(210, 238, 242),
     top_bar: Color32::from_rgb(240, 243, 247),
     top_bar_text: Color32::from_rgb(31, 41, 51),
     top_bar_muted: Color32::from_rgb(122, 134, 148),
@@ -183,6 +189,8 @@ const DARK_PALETTE: Palette = Palette {
     code_bg: Color32::from_rgb(22, 27, 33),
     chip_bg: Color32::from_rgb(44, 52, 62),
     selected_bg: Color32::from_rgb(31, 58, 62),
+    selected_text: Color32::from_rgb(246, 250, 252),
+    text_selection_bg: Color32::from_rgb(14, 50, 60),
     top_bar: Color32::from_rgb(17, 22, 29),
     top_bar_text: Color32::from_rgb(236, 241, 246),
     top_bar_muted: Color32::from_rgb(170, 183, 196),
