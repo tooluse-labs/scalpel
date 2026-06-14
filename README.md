@@ -52,6 +52,16 @@ Linux, and Windows.
 
 Logo and brand notes live in [`docs/brand-logo.md`](docs/brand-logo.md).
 
+Desktop workspace:
+
+| Light | Dark |
+| --- | --- |
+| ![Scalpel workspace in light mode](docs/ui/scalpel-workspace-light.png) | ![Scalpel workspace in dark mode](docs/ui/scalpel-workspace-dark.png) |
+
+These screenshots show the same PDF debugger workspace in light and dark modes,
+including the object tree, page preview, stream inspector, image preview, and
+theme contrast.
+
 Primary assets:
 
 - [`docs/ui/scalpel-logo.png`](docs/ui/scalpel-logo.png): current full logo
