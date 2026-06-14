@@ -99,6 +99,14 @@ sh scripts/setup-mupdf.sh
 cargo run -p scalpel-app -- --gui --pdf /path/to/file.pdf
 ```
 
+On Windows, run Cargo from a VS x64 Developer shell:
+
+```powershell
+.\scripts\setup-mupdf.ps1
+. .\third_party\mupdf.env.ps1
+cargo run -p scalpel-app -- --gui --pdf C:\path\to\file.pdf
+```
+
 Build a release binary:
 
 ```sh
@@ -126,6 +134,14 @@ local build outputs.
 extracts it under `third_party/`, builds the release static libraries, and
 writes `third_party/mupdf.env`.
 
+On Windows, `scripts/setup-mupdf.ps1` performs the same source preparation and
+builds MuPDF with Visual Studio 2022's MSVC toolchain. It forces node reuse off,
+uses `v143` by default, and writes MSVC outputs under
+`%LOCALAPPDATA%\Temp\Scalpel\` so corrupt or old upstream `x64/Release`
+products do not poison local builds. It writes `third_party/mupdf.env.ps1` and
+`third_party/mupdf.env.cmd`; run Cargo from a VS x64 Developer shell so Rust uses
+MSVC's `link.exe`.
+
 Pinned version:
 
 ```text
@@ -138,6 +154,9 @@ Useful environment overrides:
 - `SCALPEL_MUPDF_SOURCE_DIR`: where the MuPDF source tree is extracted.
 - `SCALPEL_MUPDF_ENV_FILE`: where the generated environment file is written.
 - `SCALPEL_MUPDF_SKIP_BUILD=1`: skip building MuPDF when libraries already exist.
+- `SCALPEL_MUPDF_PLATFORM_TOOLSET`: Windows MSVC toolset, default `v143`.
+- `SCALPEL_MUPDF_MSVC_BUILD_DIR`: Windows MSVC output root.
+- `SCALPEL_MUPDF_LIB_DIR`: override the MuPDF library directory.
 
 If setup fails with missing headers or libraries, remove the extracted source
 tree and rerun:

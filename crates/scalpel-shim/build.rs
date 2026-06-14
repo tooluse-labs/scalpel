@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MUPDF_SETUP_HELP: &str = "\
-Run `sh scripts/setup-mupdf.sh` from the repository root and then \
-`. third_party/mupdf.env`, or set SCALPEL_MUPDF_SOURCE_DIR, \
-SCALPEL_MUPDF_INCLUDE_DIR, and SCALPEL_MUPDF_LIB_DIR manually.";
+Run `scripts/setup-mupdf.ps1` on Windows or `sh scripts/setup-mupdf.sh` \
+on Unix from the repository root, then load the generated environment file; \
+or set SCALPEL_MUPDF_SOURCE_DIR, SCALPEL_MUPDF_INCLUDE_DIR, and \
+SCALPEL_MUPDF_LIB_DIR manually.";
 
 fn main() {
     println!("cargo:rerun-if-changed=include/pdbg_shim.h");

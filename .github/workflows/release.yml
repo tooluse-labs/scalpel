@@ -217,7 +217,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $sourceDir = (Resolve-Path "third_party/mupdf-$env:MUPDF_VERSION-source").Path
-          $libDir = Join-Path $sourceDir "platform/win32/x64/Release"
+          $env:SCALPEL_MUPDF_SOURCE_DIR = $sourceDir
+          .\scripts\setup-mupdf.ps1
+          . .\third_party\mupdf.env.ps1
+          $libDir = $env:SCALPEL_MUPDF_LIB_DIR
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
           $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vsPath) {
@@ -225,11 +228,7 @@ jobs:
           }
           $vcvars = Join-Path $vsPath "VC/Auxiliary/Build/vcvars64.bat"
 
-          $env:SCALPEL_MUPDF_SOURCE_DIR = $sourceDir
-          $env:SCALPEL_MUPDF_INCLUDE_DIR = Join-Path $sourceDir "include"
-          $env:SCALPEL_MUPDF_LIB_DIR = $libDir
-
-          cmd.exe /c "`"$vcvars`" && msbuild `"$sourceDir\platform\win32\mupdf.sln`" /m /t:libmupdf /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 && cargo build --release -p scalpel-app"
+          cmd.exe /c "`"$vcvars`" && call `"third_party\mupdf.env.cmd`" && cargo build --release -p scalpel-app"
           if ($LASTEXITCODE -ne 0) {
             throw "Windows release build failed"
           }

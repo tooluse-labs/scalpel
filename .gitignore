@@ -6,5 +6,6 @@
 .DS_Store
 /third_party/cache/
 /third_party/mupdf.env
+/third_party/mupdf.env.*
 /third_party/mupdf/
 /third_party/mupdf-*-source/
