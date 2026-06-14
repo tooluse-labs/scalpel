@@ -39,8 +39,6 @@ mod tree;
 
 // app.rs mostly holds GuiShellApp impl blocks; selected free helpers are shared
 // with drawing code and tests.
-#[cfg(test)]
-use app::*;
 use app::{xobject_subtype, ResolvedXObject};
 use files::*;
 use jobs::*;

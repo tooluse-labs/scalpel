@@ -22,7 +22,9 @@ impl CliOptions {
     fn parse() -> Self {
         let mut options = Self::default();
         let mut args = std::env::args().skip(1);
+        let mut saw_cli_args = false;
         while let Some(arg) = args.next() {
+            saw_cli_args = true;
             match arg.as_str() {
                 "--gui" => options.gui = true,
                 "--gui-smoke-ms" => {
@@ -48,17 +50,22 @@ impl CliOptions {
                 }
             }
         }
-        if !options.gui && launched_as_desktop_app() {
+        if !options.gui && launched_as_desktop_app(saw_cli_args) {
             options.gui = true;
         }
         options
     }
 }
 
-fn launched_as_desktop_app() -> bool {
-    std::env::current_exe().ok().is_some_and(|path| {
-        is_macos_app_bundle_executable_path(&path) || is_scalpel_desktop_executable_path(&path)
-    })
+fn launched_as_desktop_app(saw_cli_args: bool) -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|path| should_auto_launch_desktop_app(saw_cli_args, &path))
+}
+
+fn should_auto_launch_desktop_app(saw_cli_args: bool, path: &Path) -> bool {
+    !saw_cli_args
+        && (is_macos_app_bundle_executable_path(path) || is_scalpel_desktop_executable_path(path))
 }
 
 fn is_macos_app_bundle_executable_path(path: &Path) -> bool {
@@ -158,9 +165,14 @@ fn run_gui(_options: CliOptions) {
 mod tests {
     use super::{
         is_macos_app_bundle_executable_path, is_scalpel_desktop_executable_path,
-        parse_render_max_dimension,
+        parse_render_max_dimension, should_auto_launch_desktop_app,
     };
     use std::path::Path;
+
+    #[test]
+    fn cargo_binary_name_matches_product_artifact_name() {
+        assert_eq!(env!("CARGO_BIN_NAME"), "scalpel");
+    }
 
     #[test]
     fn parse_render_max_dimension_accepts_positive_pixels() {
@@ -199,5 +211,13 @@ mod tests {
         assert!(!is_scalpel_desktop_executable_path(Path::new(
             "/tmp/pdbg-app"
         )));
+    }
+
+    #[test]
+    fn scalpel_executable_auto_launches_gui_only_without_cli_args() {
+        let path = Path::new("C:/tools/scalpel.exe");
+
+        assert!(should_auto_launch_desktop_app(false, path));
+        assert!(!should_auto_launch_desktop_app(true, path));
     }
 }

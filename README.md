@@ -95,13 +95,13 @@ Build a release binary:
 sh scripts/setup-mupdf.sh
 . third_party/mupdf.env
 cargo build --release -p pdbg-app
-./target/release/pdbg-app --gui --pdf /path/to/file.pdf
+./target/release/scalpel --gui --pdf /path/to/file.pdf
 ```
 
 Increase the render dimension limit for very large pages:
 
 ```sh
-./target/release/pdbg-app --gui --pdf /path/to/file.pdf --render-max-dimension 8192
+./target/release/scalpel --gui --pdf /path/to/file.pdf --render-max-dimension 8192
 ```
 
 The same option is also accepted as `--max-render-dimension`.
@@ -170,7 +170,7 @@ xcode-select --install
 The app binary supports a small set of developer-oriented flags:
 
 ```text
-pdbg-app [--gui] [--pdf <path>] [--gui-smoke-ms <ms>] [--render-max-dimension <px>]
+scalpel [--gui] [--pdf <path>] [--gui-smoke-ms <ms>] [--render-max-dimension <px>]
 ```
 
 Options:

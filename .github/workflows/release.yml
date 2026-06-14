@@ -55,7 +55,7 @@ jobs:
 
           rm -rf dist
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
-          cp target/release/pdbg-app "$app/Contents/MacOS/Scalpel"
+          cp target/release/scalpel "$app/Contents/MacOS/Scalpel"
           cp README.md LICENSE NOTICES "$app/Contents/Resources/"
 
           sips -z 16 16 "$icon_source" --out "$iconset/icon_16x16.png"
@@ -160,7 +160,7 @@ jobs:
           arch="$(uname -m)"
           package="Scalpel-${RELEASE_TAG}-linux-${arch}"
           mkdir -p "dist/${package}"
-          cp target/release/pdbg-app "dist/${package}/scalpel"
+          cp target/release/scalpel "dist/${package}/scalpel"
           cp README.md LICENSE NOTICES "dist/${package}/"
           tar -czf "dist/${package}.tar.gz" -C dist "${package}"
           shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
@@ -244,7 +244,7 @@ jobs:
           $package = "Scalpel-$env:RELEASE_TAG-windows-x64"
           $packageDir = Join-Path "dist" $package
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "target/release/pdbg-app.exe" (Join-Path $packageDir "Scalpel.exe")
+          Copy-Item "target/release/scalpel.exe" (Join-Path $packageDir "Scalpel.exe")
           Copy-Item "README.md", "LICENSE", "NOTICES" $packageDir
           $zip = "dist/$package.zip"
           Compress-Archive -Path "$packageDir/*" -DestinationPath $zip -Force

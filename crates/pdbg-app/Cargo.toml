@@ -13,7 +13,7 @@ rfd = { version = "0.15.4", optional = true }
 path = "src/lib.rs"
 
 [[bin]]
-name = "pdbg-app"
+name = "scalpel"
 path = "src/main.rs"
 
 [features]
