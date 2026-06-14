@@ -257,6 +257,7 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path $inputDir | Out-Null
           Copy-Item "target/release/scalpel.exe" (Join-Path $inputDir "Scalpel.exe")
+          Copy-Item "crates/scalpel-app/assets/icons/scalpel.ico" (Join-Path $inputDir "Scalpel.ico")
           Copy-Item "README.md", "LICENSE", "NOTICES" $inputDir
 
           @"
@@ -269,6 +270,8 @@ jobs:
               Scope="perMachine">
               <MajorUpgrade DowngradeErrorMessage="A newer version of Scalpel is already installed." />
               <MediaTemplate EmbedCab="yes" />
+              <Icon Id="ScalpelIcon" SourceFile="$inputDir\Scalpel.ico" />
+              <Property Id="ARPPRODUCTICON" Value="ScalpelIcon" />
               <Feature Id="Main" Title="Scalpel" Level="1">
                 <ComponentRef Id="ScalpelExeComponent" />
                 <ComponentRef Id="ReadmeComponent" />
@@ -304,7 +307,8 @@ jobs:
                       Name="Scalpel"
                       Description="Scalpel PDF debugger"
                       Target="[#ScalpelExeFile]"
-                      WorkingDirectory="INSTALLFOLDER" />
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="ScalpelIcon" />
                     <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
                     <RegistryValue
                       Root="HKLM"

@@ -152,6 +152,37 @@ fn app_icon_decodes_to_square_rgba_with_transparent_corners() {
 }
 
 #[test]
+fn windows_app_icon_asset_is_multi_size_ico() {
+    let icon_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons/scalpel.ico");
+    let bytes = std::fs::read(&icon_path).expect("Windows app icon asset should exist");
+
+    assert!(bytes.len() >= 6, "ICO header should be present");
+    assert_eq!(&bytes[0..2], &[0, 0], "ICO reserved field must be zero");
+    assert_eq!(&bytes[2..4], &[1, 0], "ICO type must be icon");
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    assert!(count >= 6, "ICO should carry common shell icon sizes");
+    assert!(bytes.len() >= 6 + count * 16, "ICO directory is truncated");
+
+    let sizes: Vec<u16> = (0..count)
+        .map(|index| {
+            let entry_offset = 6 + index * 16;
+            let width = bytes[entry_offset];
+            if width == 0 {
+                256
+            } else {
+                u16::from(width)
+            }
+        })
+        .collect();
+    for expected in [16, 32, 48, 64, 128, 256] {
+        assert!(
+            sizes.contains(&expected),
+            "ICO should include {expected}px for Windows shell scaling"
+        );
+    }
+}
+
+#[test]
 fn page_preview_display_size_reserves_footer_space() {
     let texture_size = egui::vec2(900.0, 1400.0);
     let available = egui::vec2(900.0, 1000.0);

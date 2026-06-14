@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(windows, feature = "gui", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use std::path::Path;
 
 fn main() {
@@ -174,6 +179,16 @@ mod tests {
     #[test]
     fn cargo_binary_name_matches_product_artifact_name() {
         assert_eq!(env!("CARGO_BIN_NAME"), "scalpel");
+    }
+
+    #[test]
+    fn windows_release_binary_declares_gui_subsystem() {
+        let main_source = include_str!("main.rs");
+
+        assert!(
+            main_source.contains("windows_subsystem = \"windows\""),
+            "Windows release builds must use the GUI subsystem so installer launches do not show a console window"
+        );
     }
 
     #[test]
