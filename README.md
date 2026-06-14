@@ -267,9 +267,9 @@ Current packaged platforms:
 
 - macOS: `Scalpel-<tag>-macos-<arch>.app.zip`
 - Linux: `Scalpel-<tag>-linux-<arch>.tar.gz`
-- Windows: `Scalpel-<tag>-windows-x64.zip`
+- Windows: `Scalpel-<tag>-windows-x64.msi`
 
-Each archive includes:
+Each package includes:
 
 - Scalpel desktop app or executable
 - `README.md`

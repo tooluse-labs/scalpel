@@ -175,7 +175,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    name: build Windows zip
+    name: build Windows installer
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -237,26 +237,99 @@ jobs:
             throw "MuPDF libmupdf.lib was not produced at $libDir"
           }
 
-      - name: Package Windows zip
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global wix --version 6.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Package Windows installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $package = "Scalpel-$env:RELEASE_TAG-windows-x64"
-          $packageDir = Join-Path "dist" $package
-          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "target/release/scalpel.exe" (Join-Path $packageDir "Scalpel.exe")
-          Copy-Item "README.md", "LICENSE", "NOTICES" $packageDir
-          $zip = "dist/$package.zip"
-          Compress-Archive -Path "$packageDir/*" -DestinationPath $zip -Force
-          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          "$hash  $package.zip" | Out-File -Encoding ascii "$zip.sha256"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $distDir = (New-Item -ItemType Directory -Force -Path "dist").FullName
+          $inputDir = Join-Path $distDir "wix-input"
+          $wxs = Join-Path $distDir "Scalpel.wxs"
+          $msi = Join-Path $distDir "$package.msi"
+
+          New-Item -ItemType Directory -Force -Path $inputDir | Out-Null
+          Copy-Item "target/release/scalpel.exe" (Join-Path $inputDir "Scalpel.exe")
+          Copy-Item "README.md", "LICENSE", "NOTICES" $inputDir
+
+          @"
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package
+              Name="Scalpel"
+              Manufacturer="tooluse-labs"
+              Version="$version"
+              UpgradeCode="{B51E6D6B-0C44-48DA-91C4-1C250C98B726}"
+              Scope="perMachine">
+              <MajorUpgrade DowngradeErrorMessage="A newer version of Scalpel is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+              <Feature Id="Main" Title="Scalpel" Level="1">
+                <ComponentRef Id="ScalpelExeComponent" />
+                <ComponentRef Id="ReadmeComponent" />
+                <ComponentRef Id="LicenseComponent" />
+                <ComponentRef Id="NoticesComponent" />
+                <ComponentRef Id="StartMenuShortcutComponent" />
+              </Feature>
+            </Package>
+
+            <Fragment>
+              <StandardDirectory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="Scalpel">
+                  <Component Id="ScalpelExeComponent" Guid="{E6756D58-FF80-4C63-8C9F-CFD2DDAED62B}">
+                    <File Id="ScalpelExeFile" Source="$inputDir\Scalpel.exe" KeyPath="yes" />
+                  </Component>
+                  <Component Id="ReadmeComponent" Guid="{24F3AA4B-99E9-482B-A06D-BC38EA4C42E7}">
+                    <File Id="ReadmeFile" Source="$inputDir\README.md" KeyPath="yes" />
+                  </Component>
+                  <Component Id="LicenseComponent" Guid="{9F29CD56-8C77-4D8E-818E-A11DA3182D49}">
+                    <File Id="LicenseFile" Source="$inputDir\LICENSE" KeyPath="yes" />
+                  </Component>
+                  <Component Id="NoticesComponent" Guid="{845B69F6-BE76-495E-BCA9-A2F0822DAD32}">
+                    <File Id="NoticesFile" Source="$inputDir\NOTICES" KeyPath="yes" />
+                  </Component>
+                </Directory>
+              </StandardDirectory>
+
+              <StandardDirectory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Scalpel">
+                  <Component Id="StartMenuShortcutComponent" Guid="{933B6413-D70D-4E0A-B132-CE6D197626B8}">
+                    <Shortcut
+                      Id="ApplicationStartMenuShortcut"
+                      Name="Scalpel"
+                      Description="Scalpel PDF debugger"
+                      Target="[#ScalpelExeFile]"
+                      WorkingDirectory="INSTALLFOLDER" />
+                    <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+                    <RegistryValue
+                      Root="HKLM"
+                      Key="Software\tooluse-labs\Scalpel"
+                      Name="Installed"
+                      Type="integer"
+                      Value="1"
+                      KeyPath="yes" />
+                  </Component>
+                </Directory>
+              </StandardDirectory>
+            </Fragment>
+          </Wix>
+          "@ | Out-File -Encoding utf8 $wxs
+
+          wix build $wxs -arch x64 -o $msi
+          $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
+          "$hash  $package.msi" | Out-File -Encoding ascii "$msi.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-windows
           path: |
-            dist/*.zip
+            dist/*.msi
             dist/*.sha256
           if-no-files-found: error
 
@@ -283,5 +356,5 @@ jobs:
           files: |
             dist/Scalpel-*.app.zip
             dist/Scalpel-*.tar.gz
-            dist/Scalpel-*-windows-*.zip
+            dist/Scalpel-*-windows-*.msi
             dist/*.sha256
