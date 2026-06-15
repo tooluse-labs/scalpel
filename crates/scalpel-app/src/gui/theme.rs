@@ -257,6 +257,20 @@ impl Palette {
     }
 }
 
+pub(crate) fn selected_row_button<'a>(
+    selected: bool,
+    atoms: impl egui::IntoAtoms<'a>,
+) -> egui::Button<'a> {
+    let button = egui::Button::selectable(selected, atoms);
+    if selected {
+        button
+            .fill(theme().selected_bg)
+            .stroke(egui::Stroke::new(1.0, theme().accent))
+    } else {
+        button
+    }
+}
+
 pub(crate) fn panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(theme().panel)

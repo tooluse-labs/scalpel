@@ -1029,7 +1029,7 @@ impl GuiShellApp {
             for row in range {
                 let selected = row == self.selected_row;
                 let job = self.tree.row_layout_job(row, selected);
-                if ui.selectable_label(selected, job).clicked() {
+                if ui.add(selected_row_button(selected, job)).clicked() {
                     self.select_row_from_tree(row);
                 }
             }
@@ -1071,9 +1071,7 @@ impl GuiShellApp {
                         let row_response = ui
                             .add_sized(
                                 egui::vec2(row_width, ui.text_style_height(&TextStyle::Body) + 4.0),
-                                egui::Button::selectable(selected, ())
-                                    .left_text(job)
-                                    .truncate(),
+                                selected_row_button(selected, ()).left_text(job).truncate(),
                             )
                             .on_hover_text(row_label);
                         if selected && scroll_selected {
@@ -2947,12 +2945,12 @@ impl GuiShellApp {
                 } else {
                     theme().text
                 };
-                let response = ui.selectable_label(
+                let response = ui.add(selected_row_button(
                     selected,
                     RichText::new(line.text.as_str())
                         .font(mono_font_id(STREAM_VIEW_FONT_SIZE))
                         .color(color),
-                );
+                ));
                 if response.clicked() {
                     self.real_stream_selected_block = Some(selection_key.to_string());
                     self.select_nice_stream_selection_for_preview(object, selection_key, &rows);

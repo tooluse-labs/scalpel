@@ -2,6 +2,14 @@ use super::*;
 #[cfg(feature = "real-mupdf")]
 use crate::gui::app::stream_export_worker;
 
+static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    THEME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn workspace_layout_preserves_initial_preview_width_on_retina_sized_window() {
     let layout = workspace_panel_layout(1024.0);
@@ -1722,6 +1730,7 @@ fn real_tree_row_anatomy_uses_kind_count_ref_preview_and_diagnostics() {
 
 #[test]
 fn selected_real_tree_rows_use_selected_text_for_all_non_warning_segments() {
+    let _theme_guard = theme_test_guard();
     set_dark_mode(true);
     let summary = ObjectSummary {
         id: NodeId::XrefObject {
@@ -1755,6 +1764,7 @@ fn selected_real_tree_rows_use_selected_text_for_all_non_warning_segments() {
 
 #[test]
 fn selected_virtual_tree_rows_use_selected_text_for_both_segments() {
+    let _theme_guard = theme_test_guard();
     set_dark_mode(true);
     let tree = VirtualObjectTree::new(8);
 
@@ -2132,6 +2142,7 @@ fn displayed_file_paths_decode_common_html_entities() {
 
 #[test]
 fn page_preview_tint_dims_only_in_dark_mode() {
+    let _theme_guard = theme_test_guard();
     set_dark_mode(false);
     assert_eq!(page_preview_image_tint(), Color32::WHITE);
 
@@ -2146,6 +2157,7 @@ fn page_preview_tint_dims_only_in_dark_mode() {
 
 #[test]
 fn inspector_image_preview_tint_matches_page_preview_tint() {
+    let _theme_guard = theme_test_guard();
     set_dark_mode(false);
     assert_eq!(inspector_image_preview_tint(), page_preview_image_tint());
 
@@ -2816,6 +2828,9 @@ fn fake_shell_keeps_mock_page_preview() {
 
 #[test]
 fn theme_defines_named_font_stacks_and_severity_colors() {
+    let _theme_guard = theme_test_guard();
+    set_dark_mode(false);
+
     let fonts = scalpel_fonts();
     assert!(fonts.font_data.contains_key("InterVariable"));
     assert!(fonts.font_data.contains_key("JetBrainsMono-Regular"));
@@ -2840,6 +2855,7 @@ fn theme_defines_named_font_stacks_and_severity_colors() {
 
 #[test]
 fn dark_theme_selection_colors_keep_stream_text_readable() {
+    let _theme_guard = theme_test_guard();
     set_dark_mode(true);
 
     assert_contrast_at_least(theme().selected_text, theme().selected_bg, 4.5);
