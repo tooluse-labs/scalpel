@@ -81,7 +81,7 @@ Download the installer or archive for your platform from GitHub Releases,
 install or unpack it, and run Scalpel.
 
 ```sh
-# macOS installer: install Scalpel-<tag>-macos-<arch>.pkg
+# macOS DMG: mount, then drag Scalpel.app to Applications
 # macOS archive: open Scalpel.app
 # Linux: ./scalpel
 # Windows: Scalpel.exe
@@ -285,7 +285,7 @@ or when `.github/workflows/release.yml` is run manually with a tag.
 
 Current packaged platforms:
 
-- macOS: `Scalpel-<tag>-macos-<arch>.pkg` and
+- macOS: `Scalpel-<tag>-macos-<arch>.dmg` and
   `Scalpel-<tag>-macos-<arch>.app.zip`
 - Linux: `Scalpel-<tag>-linux-<arch>.tar.gz`
 - Windows: `Scalpel-<tag>-windows-x64.msi`

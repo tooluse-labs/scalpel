@@ -52,7 +52,8 @@ jobs:
           icon_source="crates/scalpel-app/assets/icons/scalpel-mark.png"
           iconset="dist/Scalpel.iconset"
           artifact="Scalpel-${RELEASE_TAG}-macos-${arch}.app.zip"
-          installer="Scalpel-${RELEASE_TAG}-macos-${arch}.pkg"
+          dmg="Scalpel-${RELEASE_TAG}-macos-${arch}.dmg"
+          dmg_root="dist/dmg-root"
 
           rm -rf dist
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
@@ -103,13 +104,16 @@ jobs:
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "dist/${artifact}"
           shasum -a 256 "dist/${artifact}" > "dist/${artifact}.sha256"
-          COPYFILE_DISABLE=1 pkgbuild \
-            --component "$app" \
-            --install-location "/Applications" \
-            --identifier "com.tooluse-labs.scalpel.pkg" \
-            --version "$version" \
-            "dist/${installer}"
-          shasum -a 256 "dist/${installer}" > "dist/${installer}.sha256"
+          mkdir -p "$dmg_root"
+          cp -R "$app" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create \
+            -volname "Scalpel ${version}" \
+            -srcfolder "$dmg_root" \
+            -ov \
+            -format UDZO \
+            "dist/${dmg}"
+          shasum -a 256 "dist/${dmg}" > "dist/${dmg}.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
@@ -117,7 +121,7 @@ jobs:
           name: release-macos
           path: |
             dist/*.zip
-            dist/*.pkg
+            dist/*.dmg
             dist/*.sha256
           if-no-files-found: error
 
@@ -368,7 +372,7 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             dist/Scalpel-*.app.zip
-            dist/Scalpel-*-macos-*.pkg
+            dist/Scalpel-*-macos-*.dmg
             dist/Scalpel-*.tar.gz
             dist/Scalpel-*-windows-*.msi
             dist/*.sha256
