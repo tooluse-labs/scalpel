@@ -52,6 +52,7 @@ jobs:
           icon_source="crates/scalpel-app/assets/icons/scalpel-mark.png"
           iconset="dist/Scalpel.iconset"
           artifact="Scalpel-${RELEASE_TAG}-macos-${arch}.app.zip"
+          installer="Scalpel-${RELEASE_TAG}-macos-${arch}.pkg"
 
           rm -rf dist
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
@@ -98,9 +99,17 @@ jobs:
           EOF
 
           plutil -lint "$app/Contents/Info.plist"
+          xattr -cr "$app"
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "dist/${artifact}"
           shasum -a 256 "dist/${artifact}" > "dist/${artifact}.sha256"
+          COPYFILE_DISABLE=1 pkgbuild \
+            --component "$app" \
+            --install-location "/Applications" \
+            --identifier "com.tooluse-labs.scalpel.pkg" \
+            --version "$version" \
+            "dist/${installer}"
+          shasum -a 256 "dist/${installer}" > "dist/${installer}.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
@@ -108,6 +117,7 @@ jobs:
           name: release-macos
           path: |
             dist/*.zip
+            dist/*.pkg
             dist/*.sha256
           if-no-files-found: error
 
@@ -358,6 +368,7 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             dist/Scalpel-*.app.zip
+            dist/Scalpel-*-macos-*.pkg
             dist/Scalpel-*.tar.gz
             dist/Scalpel-*-windows-*.msi
             dist/*.sha256

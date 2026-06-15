@@ -20,8 +20,8 @@ Scalpel is an early desktop preview. The app is already useful for inspecting
 local PDFs, but APIs, package names, and UI details may still change before a
 stable release.
 
-Current release workflow builds packaged Scalpel desktop archives for macOS,
-Linux, and Windows.
+Current release workflow builds packaged Scalpel desktop installers or archives
+for macOS, Linux, and Windows.
 
 ## Features
 
@@ -77,11 +77,12 @@ locked.
 
 ### From A Release Package
 
-Download the archive for your platform from GitHub Releases, unpack it, and run
-Scalpel.
+Download the installer or archive for your platform from GitHub Releases,
+install or unpack it, and run Scalpel.
 
 ```sh
-# macOS: open Scalpel.app
+# macOS installer: install Scalpel-<tag>-macos-<arch>.pkg
+# macOS archive: open Scalpel.app
 # Linux: ./scalpel
 # Windows: Scalpel.exe
 ```
@@ -279,12 +280,13 @@ More detail: [`docs/pdf-debugger-architecture.md`](docs/pdf-debugger-architectur
 
 ## Releases
 
-GitHub Actions publishes release archives when a tag matching `v*` is pushed, or
-when `.github/workflows/release.yml` is run manually with a tag.
+GitHub Actions publishes release artifacts when a tag matching `v*` is pushed,
+or when `.github/workflows/release.yml` is run manually with a tag.
 
 Current packaged platforms:
 
-- macOS: `Scalpel-<tag>-macos-<arch>.app.zip`
+- macOS: `Scalpel-<tag>-macos-<arch>.pkg` and
+  `Scalpel-<tag>-macos-<arch>.app.zip`
 - Linux: `Scalpel-<tag>-linux-<arch>.tar.gz`
 - Windows: `Scalpel-<tag>-windows-x64.msi`
 
@@ -294,9 +296,11 @@ Each package includes:
 - `README.md`
 - `LICENSE`
 - `NOTICES`
-- SHA-256 checksum file next to the archive
+- SHA-256 checksum file next to the release artifact
 
 The workflow builds MuPDF from the pinned source archive before building the app.
+macOS packages still need Developer ID signing and notarization before public
+distribution if they should open without Gatekeeper verification prompts.
 
 ## License And Source Offer
 
