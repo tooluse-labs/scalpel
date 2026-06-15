@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CC: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       RUSTFLAGS: -Clink-arg=-fsanitize=address -Clink-arg=-fsanitize=undefined
     steps:
