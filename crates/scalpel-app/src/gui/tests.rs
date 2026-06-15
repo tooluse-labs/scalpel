@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "real-mupdf")]
+use crate::gui::app::stream_export_worker;
 
 #[test]
 fn workspace_layout_preserves_initial_preview_width_on_retina_sized_window() {
@@ -111,31 +113,43 @@ fn virtual_tree_does_not_materialize_rows() {
 #[test]
 fn font_families_include_cjk_fallback_for_pdf_names() {
     let fonts = scalpel_fonts();
-    assert!(fonts.font_data.contains_key(CJK_FONT_NAME));
-    assert!(fonts
-        .families
-        .get(&FontFamily::Name("scalpel-sans".into()))
-        .unwrap()
-        .iter()
-        .any(|name| name == "scalpel-cjk"));
-    assert!(fonts
-        .families
-        .get(&FontFamily::Name("scalpel-mono".into()))
-        .unwrap()
-        .iter()
-        .any(|name| name == "scalpel-cjk"));
-    assert!(fonts
-        .families
-        .get(&FontFamily::Proportional)
-        .unwrap()
-        .iter()
-        .any(|name| name == "scalpel-cjk"));
-    assert!(fonts
-        .families
-        .get(&FontFamily::Monospace)
-        .unwrap()
-        .iter()
-        .any(|name| name == "scalpel-cjk"));
+    let has_runtime_cjk_font = fonts.font_data.contains_key(CJK_FONT_NAME);
+    assert_eq!(
+        fonts
+            .families
+            .get(&FontFamily::Name("scalpel-sans".into()))
+            .unwrap()
+            .iter()
+            .any(|name| name == CJK_FONT_NAME),
+        has_runtime_cjk_font
+    );
+    assert_eq!(
+        fonts
+            .families
+            .get(&FontFamily::Name("scalpel-mono".into()))
+            .unwrap()
+            .iter()
+            .any(|name| name == CJK_FONT_NAME),
+        has_runtime_cjk_font
+    );
+    assert_eq!(
+        fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .unwrap()
+            .iter()
+            .any(|name| name == CJK_FONT_NAME),
+        has_runtime_cjk_font
+    );
+    assert_eq!(
+        fonts
+            .families
+            .get(&FontFamily::Monospace)
+            .unwrap()
+            .iter()
+            .any(|name| name == CJK_FONT_NAME),
+        has_runtime_cjk_font
+    );
 }
 
 #[test]

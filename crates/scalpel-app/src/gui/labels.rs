@@ -9,10 +9,11 @@ pub(crate) fn tree_text_format(color: Color32) -> egui::TextFormat {
 }
 
 pub(crate) fn file_chip_label(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
+    let trimmed = path.trim_end_matches(|ch| ch == '/' || ch == '\\');
+    let display_path = if trimmed.is_empty() { path } else { trimmed };
+    display_path
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .find(|segment| !segment.is_empty())
         .unwrap_or(path)
         .to_string()
 }

@@ -32,7 +32,12 @@ jobs:
       - name: Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: C shim sanitizer tests
-        run: cargo test --workspace
+        run: |
+          cargo test -p scalpel-shim
+          cargo test -p scalpel-core
+          cargo test -p scalpel-mcp
+          cargo test -p scalpel-contract-tests
+          cargo test -p scalpel-app --no-default-features --features gui
 
   tsan:
     name: tsan
