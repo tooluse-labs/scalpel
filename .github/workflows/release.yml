@@ -19,9 +19,17 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
-  build-macos:
-    name: build macOS app
-    runs-on: macos-14
+  build-macos-arch:
+    name: build macOS app (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -43,77 +51,81 @@ jobs:
           . third_party/mupdf.env
           cargo build --release -p scalpel-app
 
-      - name: Package Scalpel.app
+      - name: Package architecture app
         run: |
           set -eu
-          arch="$(uname -m)"
           version="${RELEASE_TAG#v}"
           app="dist/Scalpel.app"
-          icon_source="crates/scalpel-app/assets/icons/scalpel-mark.png"
-          iconset="dist/Scalpel.iconset"
-          artifact="Scalpel-${RELEASE_TAG}-macos-${arch}.app.zip"
-          dmg="Scalpel-${RELEASE_TAG}-macos-${arch}.dmg"
+          artifact="dist/scalpel-macos-${{ matrix.arch }}.app.zip"
 
           rm -rf dist
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
-          cp target/release/scalpel "$app/Contents/MacOS/Scalpel"
-          cp README.md LICENSE NOTICES "$app/Contents/Resources/"
+          sh scripts/package-macos-app.sh target/release/scalpel "$app" "$version"
+          lipo -verify_arch "${{ matrix.arch }}" "$app/Contents/MacOS/Scalpel"
+          ditto -c -k --keepParent "$app" "$artifact"
 
-          sips -z 16 16 "$icon_source" --out "$iconset/icon_16x16.png"
-          sips -z 32 32 "$icon_source" --out "$iconset/icon_16x16@2x.png"
-          sips -z 32 32 "$icon_source" --out "$iconset/icon_32x32.png"
-          sips -z 64 64 "$icon_source" --out "$iconset/icon_32x32@2x.png"
-          sips -z 128 128 "$icon_source" --out "$iconset/icon_128x128.png"
-          sips -z 256 256 "$icon_source" --out "$iconset/icon_128x128@2x.png"
-          sips -z 256 256 "$icon_source" --out "$iconset/icon_256x256.png"
-          sips -z 512 512 "$icon_source" --out "$iconset/icon_256x256@2x.png"
-          sips -z 512 512 "$icon_source" --out "$iconset/icon_512x512.png"
-          sips -z 1024 1024 "$icon_source" --out "$iconset/icon_512x512@2x.png"
-          iconutil -c icns "$iconset" -o "$app/Contents/Resources/Scalpel.icns"
+      - name: Upload architecture app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-${{ matrix.arch }}
+          path: dist/scalpel-macos-${{ matrix.arch }}.app.zip
+          if-no-files-found: error
 
-          cat > "$app/Contents/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDisplayName</key>
-            <string>Scalpel</string>
-            <key>CFBundleExecutable</key>
-            <string>Scalpel</string>
-            <key>CFBundleIconFile</key>
-            <string>Scalpel</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.tooluse-labs.scalpel</string>
-            <key>CFBundleName</key>
-            <string>Scalpel</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${version}</string>
-            <key>CFBundleVersion</key>
-            <string>${version}</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>12.0</string>
-          </dict>
-          </plist>
-          EOF
+  package-macos-universal:
+    name: package macOS universal app
+    runs-on: macos-14
+    needs:
+      - build-macos-arch
+    steps:
+      - uses: actions/checkout@v4
 
-          plutil -lint "$app/Contents/Info.plist"
+      - name: Download architecture apps
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/macos-arch
+          pattern: macos-app-*
+          merge-multiple: true
+
+      - name: Package universal Scalpel.app
+        run: |
+          set -eu
+          version="${RELEASE_TAG#v}"
+          arm_zip="dist/macos-arch/scalpel-macos-arm64.app.zip"
+          x64_zip="dist/macos-arch/scalpel-macos-x86_64.app.zip"
+          arm_dir="dist/macos-arch/arm64"
+          x64_dir="dist/macos-arch/x86_64"
+          app="dist/Scalpel.app"
+          release_dir="dist/release"
+          artifact="Scalpel-${RELEASE_TAG}-macos-universal.app.zip"
+          dmg="Scalpel-${RELEASE_TAG}-macos-universal.dmg"
+
+          test -f "$arm_zip"
+          test -f "$x64_zip"
+          rm -rf "$arm_dir" "$x64_dir" "$app" "$release_dir"
+          mkdir -p "$arm_dir" "$x64_dir" "$release_dir"
+          ditto -x -k "$arm_zip" "$arm_dir"
+          ditto -x -k "$x64_zip" "$x64_dir"
+          ditto "$arm_dir/Scalpel.app" "$app"
+          lipo -create \
+            "$arm_dir/Scalpel.app/Contents/MacOS/Scalpel" \
+            "$x64_dir/Scalpel.app/Contents/MacOS/Scalpel" \
+            -output "$app/Contents/MacOS/Scalpel"
+          chmod 755 "$app/Contents/MacOS/Scalpel"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/Scalpel"
           xattr -cr "$app"
           codesign --force --deep --sign - "$app"
-          ditto -c -k --keepParent "$app" "dist/${artifact}"
-          shasum -a 256 "dist/${artifact}" > "dist/${artifact}.sha256"
-          sh scripts/package-macos-dmg.sh "$app" "dist/${dmg}" "$version"
-          shasum -a 256 "dist/${dmg}" > "dist/${dmg}.sha256"
+          ditto -c -k --keepParent "$app" "$release_dir/$artifact"
+          shasum -a 256 "$release_dir/$artifact" > "$release_dir/$artifact.sha256"
+          sh scripts/package-macos-dmg.sh "$app" "$release_dir/$dmg" "$version"
+          shasum -a 256 "$release_dir/$dmg" > "$release_dir/$dmg.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-macos
           path: |
-            dist/*.zip
-            dist/*.dmg
-            dist/*.sha256
+            dist/release/*.zip
+            dist/release/*.dmg
+            dist/release/*.sha256
           if-no-files-found: error
 
   build-linux:
@@ -345,7 +357,7 @@ jobs:
     name: publish release
     runs-on: ubuntu-latest
     needs:
-      - build-macos
+      - package-macos-universal
       - build-linux
       - build-windows
     steps:
@@ -353,6 +365,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: release-*
           merge-multiple: true
 
       - name: Publish GitHub release
@@ -362,8 +375,8 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
-            dist/Scalpel-*.app.zip
-            dist/Scalpel-*-macos-*.dmg
-            dist/Scalpel-*.tar.gz
+            dist/Scalpel-*-macos-universal.app.zip
+            dist/Scalpel-*-macos-universal.dmg
+            dist/Scalpel-*-linux-*.tar.gz
             dist/Scalpel-*-windows-*.msi
             dist/*.sha256
