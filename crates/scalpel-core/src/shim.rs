@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "real-mupdf")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "real-mupdf")]
+const IMAGE_PREVIEW_OUTPUT_BYTES_UNLIMITED: u64 = u64::MAX;
+
 #[derive(Debug)]
 pub struct ShimError {
     pub status: raw::pdbg_status,
@@ -1327,7 +1330,7 @@ impl PdbgDoc {
                 self.raw.as_ptr(),
                 wire::raw_object_id(object),
                 max_dimension,
-                0,
+                IMAGE_PREVIEW_OUTPUT_BYTES_UNLIMITED,
                 cancel,
                 &mut image,
                 &mut err,
