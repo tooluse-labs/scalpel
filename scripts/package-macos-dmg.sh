@@ -31,6 +31,11 @@ rw_dmg="$work_dir/scalpel-rw.dmg"
 swift_cache="$work_dir/swift-cache"
 swift_script="$work_dir/dmg-background.swift"
 attached=0
+app_size_kb=$(du -sk "$app_path" | awk '{print $1}')
+dmg_size_mb=$((app_size_kb / 1024 + 160))
+if [ "$dmg_size_mb" -lt 320 ]; then
+  dmg_size_mb=320
+fi
 
 cleanup() {
   if [ "$attached" -eq 1 ]; then
@@ -108,7 +113,8 @@ SWIFT
 
 mkdir -p "$mount_dir" "$swift_cache"
 rm -f "$dmg_path"
-hdiutil create -quiet -fs HFS+ -volname "$volume_name" -size 220m "$rw_dmg"
+printf 'creating DMG working image: %sm\n' "$dmg_size_mb"
+hdiutil create -quiet -fs HFS+ -volname "$volume_name" -size "${dmg_size_mb}m" "$rw_dmg"
 hdiutil attach "$rw_dmg" -quiet -mountpoint "$mount_dir" -noverify
 attached=1
 
