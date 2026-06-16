@@ -60,7 +60,7 @@ jobs:
 
           rm -rf dist
           sh scripts/package-macos-app.sh target/release/scalpel "$app" "$version"
-          lipo -verify_arch "${{ matrix.arch }}" "$app/Contents/MacOS/Scalpel"
+          lipo "$app/Contents/MacOS/Scalpel" -verify_arch "${{ matrix.arch }}"
           ditto -c -k --keepParent "$app" "$artifact"
 
       - name: Upload architecture app
@@ -110,7 +110,7 @@ jobs:
             "$x64_dir/Scalpel.app/Contents/MacOS/Scalpel" \
             -output "$app/Contents/MacOS/Scalpel"
           chmod 755 "$app/Contents/MacOS/Scalpel"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/Scalpel"
+          lipo "$app/Contents/MacOS/Scalpel" -verify_arch arm64 x86_64
           xattr -cr "$app"
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "$release_dir/$artifact"
