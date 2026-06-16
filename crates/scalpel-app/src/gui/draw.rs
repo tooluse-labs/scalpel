@@ -560,9 +560,10 @@ impl GuiShellApp {
         let mut close_requested = false;
         let mupdf_version = mupdf_version_label();
         let backend = backend_label();
+        let backend_detail = backend_detail_label(backend, &mupdf_version);
         let platform = platform_label();
         let render_limit = render_limit_label(self.render_max_dimension);
-        let about_text = about_info_text(backend, &mupdf_version, &platform, &render_limit);
+        let about_text = about_info_text(&backend_detail, &platform, &render_limit);
         let modal_response = egui::Modal::new(egui::Id::new("about_dialog"))
             .backdrop_color(egui::Color32::from_black_alpha(72))
             .frame(
@@ -579,26 +580,44 @@ impl GuiShellApp {
                     }),
             )
             .show(ctx, |ui| {
-                ui.set_width(520.0);
+                ui.set_width(500.0);
                 egui::Frame::new()
                     .fill(theme().panel)
-                    .inner_margin(egui::Margin::symmetric(22, 16))
+                    .inner_margin(egui::Margin::symmetric(22, 15))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             if let Some(texture) = &self.about_logo_texture {
                                 ui.add(
-                                    egui::Image::new((texture.id(), egui::vec2(56.0, 56.0)))
+                                    egui::Image::new((texture.id(), egui::vec2(52.0, 52.0)))
                                         .corner_radius(10),
                                 );
-                                ui.add_space(12.0);
+                                ui.add_space(13.0);
                             }
                             ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new("Scalpel")
-                                        .strong()
-                                        .size(22.0)
-                                        .color(theme().text),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Scalpel")
+                                            .strong()
+                                            .size(22.0)
+                                            .color(theme().text),
+                                    );
+                                    ui.add_space(6.0);
+                                    egui::Frame::new()
+                                        .fill(theme().selected_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme().accent))
+                                        .corner_radius(6)
+                                        .inner_margin(egui::Margin::symmetric(7, 2))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "v{}",
+                                                    env!("CARGO_PKG_VERSION")
+                                                ))
+                                                .size(11.5)
+                                                .color(theme().selected_text),
+                                            );
+                                        });
+                                });
                                 ui.add_space(2.0);
                                 ui.label(
                                     RichText::new("PDF structure dissection tool")
@@ -628,32 +647,31 @@ impl GuiShellApp {
                     });
 
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(22, 18))
+                    .inner_margin(egui::Margin::symmetric(22, 17))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(
-                                "Dissect object trees, streams, xref tables, rendered pages, text positions, image resources, and diagnostics.",
+                                "Inspect object trees, streams, xref tables, rendered pages, resources, and diagnostics.",
                             )
                             .size(13.5)
                             .color(theme().muted),
                         );
-                        ui.add_space(18.0);
+                        ui.add_space(16.0);
 
                         egui::Frame::new()
-                            .fill(theme().code_bg)
+                            .fill(theme().surface)
                             .stroke(egui::Stroke::new(1.0, theme().border))
                             .corner_radius(8)
-                            .inner_margin(egui::Margin::symmetric(16, 13))
+                            .inner_margin(egui::Margin::symmetric(14, 12))
                             .show(ui, |ui| {
                                 egui::Grid::new("about_info_grid")
                                     .num_columns(2)
-                                    .spacing(egui::vec2(24.0, 10.0))
+                                    .spacing(egui::vec2(22.0, 9.0))
+                                    .striped(false)
                                     .show(ui, |ui| {
-                                        about_info_row(ui, "Version", env!("CARGO_PKG_VERSION"));
+                                        about_info_row(ui, "Backend", &backend_detail);
                                         about_info_row(ui, "Commit", build_commit_label());
                                         about_info_row(ui, "Release date", release_date_label());
-                                        about_info_row(ui, "Backend", backend);
-                                        about_info_row(ui, "MuPDF Version", &mupdf_version);
                                         about_info_row(ui, "OS", &platform);
                                         about_info_row(ui, "Build", build_profile_label());
                                         about_info_row(ui, "Render limit", &render_limit);
@@ -661,7 +679,7 @@ impl GuiShellApp {
                                     });
                             });
 
-                        ui.add_space(18.0);
+                        ui.add_space(17.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add(
@@ -3082,6 +3100,15 @@ fn backend_label() -> &'static str {
     }
 }
 
+fn backend_detail_label(backend: &str, mupdf_version: &str) -> String {
+    let version = mupdf_version.trim();
+    if backend == "MuPDF" && !matches!(version, "" | "unknown" | "not linked") {
+        format!("{backend} {version}")
+    } else {
+        backend.to_string()
+    }
+}
+
 fn build_profile_label() -> &'static str {
     if cfg!(debug_assertions) {
         "debug"
@@ -3098,18 +3125,12 @@ fn release_date_label() -> &'static str {
     option_env!("SCALPEL_RELEASE_DATE").unwrap_or("unknown")
 }
 
-fn about_info_text(
-    backend: &str,
-    mupdf_version: &str,
-    platform: &str,
-    render_limit: &str,
-) -> String {
+fn about_info_text(backend_detail: &str, platform: &str, render_limit: &str) -> String {
     [
         format!("{APP_TITLE} {}", env!("CARGO_PKG_VERSION")),
         format!("Commit: {}", build_commit_label()),
         format!("Release date: {}", release_date_label()),
-        format!("Backend: {backend}"),
-        format!("MuPDF Version: {mupdf_version}"),
+        format!("Backend: {backend_detail}"),
         format!("OS: {platform}"),
         format!("Build: {}", build_profile_label()),
         format!("Render limit: {render_limit}"),
@@ -3215,16 +3236,25 @@ mod about_tests {
     use super::*;
 
     #[test]
-    fn about_info_text_lists_mupdf_version_explicitly() {
+    fn backend_detail_label_combines_mupdf_name_and_version() {
+        assert_eq!(backend_detail_label("MuPDF", "1.27.2"), "MuPDF 1.27.2");
+        assert_eq!(backend_detail_label("MuPDF", "not linked"), "MuPDF");
+        assert_eq!(
+            backend_detail_label("sample backend", "not linked"),
+            "sample backend"
+        );
+    }
+
+    #[test]
+    fn about_info_text_lists_backend_with_mupdf_version() {
         let text = about_info_text(
-            "MuPDF",
-            "1.27.2",
+            "MuPDF 1.27.2",
             "windows / x86_64",
             "4 GiB output / 32768 px max dimension",
         );
 
-        assert!(text.contains("Backend: MuPDF"));
-        assert!(text.contains("MuPDF Version: 1.27.2"));
+        assert!(text.contains("Backend: MuPDF 1.27.2"));
+        assert!(!text.contains("MuPDF Version"));
     }
 
     #[test]
