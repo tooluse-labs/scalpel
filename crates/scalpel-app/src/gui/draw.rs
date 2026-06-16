@@ -881,18 +881,20 @@ impl GuiShellApp {
             egui::vec2(ui.available_width(), TOP_BAR_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = 9.0;
                 ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
                 ui.spacing_mut().interact_size.y = TOP_BAR_BUTTON_HEIGHT;
                 let brand = ui
                     .add(
-                        egui::Label::new(
+                        egui::Button::new(
                             RichText::new("Scalpel")
                                 .strong()
                                 .size(15.0)
                                 .color(theme().top_bar_text),
                         )
-                        .sense(egui::Sense::click()),
+                        .fill(theme().top_bar)
+                        .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT))
+                        .min_size(egui::vec2(76.0, TOP_BAR_BUTTON_HEIGHT)),
                     )
                     .on_hover_text("About Scalpel");
                 if brand.hovered() {
@@ -902,7 +904,7 @@ impl GuiShellApp {
                     self.about_dialog_open = true;
                 }
                 top_bar_separator(ui);
-                if top_bar_button(ui, "Open PDF...", true).clicked() {
+                if top_bar_primary_button(ui, "Open PDF...", true).clicked() {
                     self.open_pdf_with_file_dialog();
                 }
                 if !self.recent_pdf_paths.is_empty() {

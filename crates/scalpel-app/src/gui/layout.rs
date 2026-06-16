@@ -290,6 +290,35 @@ pub(crate) fn top_bar_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
     )
 }
 
+pub(crate) fn top_bar_primary_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(label).strong().size(12.0).color(if enabled {
+            theme().surface
+        } else {
+            theme().top_bar_muted
+        }))
+        .fill(if enabled {
+            theme().accent
+        } else {
+            theme().top_bar_button
+        })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if enabled {
+                theme().accent
+            } else {
+                theme().border
+            },
+        ))
+        .min_size(egui::vec2(98.0, TOP_BAR_BUTTON_HEIGHT)),
+    )
+}
+
 pub(crate) fn top_bar_icon_button(
     ui: &mut egui::Ui,
     label: &str,
