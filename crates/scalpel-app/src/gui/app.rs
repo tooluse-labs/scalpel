@@ -199,6 +199,9 @@ impl GuiShellApp {
             open_pdf_job: None,
             about_dialog_open: false,
             about_logo_texture: None,
+            update_check_job: None,
+            update_check_result: None,
+            update_check_error: None,
             left_panel_width: ui_settings.left_panel_width,
             right_panel_width: ui_settings.right_panel_width,
             tree,
@@ -285,6 +288,60 @@ impl GuiShellApp {
         };
         app.refresh_real_render();
         app
+    }
+
+    pub(crate) fn start_update_check(&mut self) {
+        if self.update_check_job.is_some() {
+            return;
+        }
+        self.update_check_result = None;
+        self.update_check_error = None;
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        self.update_check_job = Some(BackgroundJob::spawn_uncancellable(
+            current_version.clone(),
+            move || check_for_update(&current_version, APP_LATEST_RELEASE_API_URL),
+        ));
+        self.status_log
+            .push("checking GitHub releases for updates".to_string());
+    }
+
+    pub(crate) fn poll_update_check_job(&mut self) {
+        match self.update_check_job.as_ref().map(BackgroundJob::poll) {
+            None | Some(JobPoll::Pending) => {}
+            Some(JobPoll::Finished(output)) => {
+                self.update_check_job = None;
+                match output.result {
+                    Ok(result) => {
+                        let latest = result.latest_tag.clone();
+                        if result.is_newer {
+                            self.status_log.push(format!(
+                                "update available: {latest} (current v{})",
+                                output.key
+                            ));
+                        } else {
+                            self.status_log.push(format!(
+                                "Scalpel is up to date at v{} (latest {latest})",
+                                output.key
+                            ));
+                        }
+                        self.update_check_result = Some(result);
+                        self.update_check_error = None;
+                    }
+                    Err(err) => {
+                        self.update_check_result = None;
+                        self.update_check_error = Some(err.clone());
+                        self.status_log.push(format!("update check failed: {err}"));
+                    }
+                }
+            }
+            Some(JobPoll::Disconnected(_)) => {
+                self.update_check_job = None;
+                self.update_check_result = None;
+                self.update_check_error = Some("update check worker disconnected".to_string());
+                self.status_log
+                    .push("update check worker disconnected".to_string());
+            }
+        }
     }
 
     pub(crate) fn selected_object_label(&self) -> String {

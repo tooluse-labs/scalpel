@@ -36,6 +36,7 @@ mod stream;
 mod tests;
 mod theme;
 mod tree;
+mod updates;
 
 // app.rs mostly holds GuiShellApp impl blocks; selected free helpers are shared
 // with drawing code and tests.
@@ -48,6 +49,7 @@ use preview::*;
 use stream::*;
 use theme::*;
 use tree::*;
+use updates::*;
 
 const VIRTUAL_TREE_ROWS: usize = 1_000_000;
 const STREAM_TOTAL_BYTES: usize = 64 * 1024 * 1024;
@@ -107,6 +109,9 @@ const TEXT_CLICK_BBOX_TOLERANCE_PT: f32 = 3.0;
 const VISUAL_CLICK_BBOX_TOLERANCE_PT: f32 = 5.0;
 const APP_TITLE: &str = "Scalpel";
 const APP_GITHUB_URL: &str = "https://github.com/tooluse-labs/scalpel";
+const APP_RELEASES_URL: &str = "https://github.com/tooluse-labs/scalpel/releases";
+const APP_LATEST_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/tooluse-labs/scalpel/releases/latest";
 const LEFT_PANEL_MIN_WIDTH: f32 = 220.0;
 const LEFT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
 const LEFT_PANEL_MAX_WIDTH: f32 = 520.0;
@@ -200,6 +205,9 @@ pub struct GuiShellApp {
     open_pdf_job: Option<OpenPdfJob>,
     about_dialog_open: bool,
     about_logo_texture: Option<egui::TextureHandle>,
+    update_check_job: Option<UpdateCheckJob>,
+    update_check_result: Option<UpdateCheckResult>,
+    update_check_error: Option<String>,
     left_panel_width: Option<f32>,
     right_panel_width: Option<f32>,
     tree: TreeModel,
@@ -298,6 +306,7 @@ impl eframe::App for GuiShellApp {
         self.poll_real_render_job();
         self.poll_object_search_job();
         self.poll_text_search_job();
+        self.poll_update_check_job();
         self.handle_page_keyboard_shortcuts(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         if self.open_pdf_job.is_some()
@@ -308,6 +317,7 @@ impl eframe::App for GuiShellApp {
             || self.real_render_job.is_some()
             || self.object_search_job.is_some()
             || self.text_search_job.is_some()
+            || self.update_check_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(16));
         }

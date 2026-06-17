@@ -676,8 +676,12 @@ impl GuiShellApp {
                                         about_info_row(ui, "Build", build_profile_label());
                                         about_info_row(ui, "Render limit", &render_limit);
                                         about_link_row(ui, "GitHub", APP_GITHUB_URL);
+                                        about_link_row(ui, "Releases", APP_RELEASES_URL);
                                     });
                             });
+
+                        ui.add_space(12.0);
+                        self.draw_about_update_status(ui);
 
                         ui.add_space(17.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -702,6 +706,24 @@ impl GuiShellApp {
                             {
                                 ctx.copy_text(about_text.clone());
                             }
+                            let checking = self.update_check_job.is_some();
+                            if ui
+                                .add_enabled(
+                                    !checking,
+                                    egui::Button::new(
+                                        RichText::new(if checking {
+                                            "Checking..."
+                                        } else {
+                                            "Check Updates"
+                                        })
+                                        .size(13.0),
+                                    )
+                                    .min_size(egui::vec2(118.0, 34.0)),
+                                )
+                                .clicked()
+                            {
+                                self.start_update_check();
+                            }
                         });
                     });
             });
@@ -709,6 +731,79 @@ impl GuiShellApp {
         if modal_response.should_close() || close_requested {
             self.about_dialog_open = false;
         }
+    }
+
+    fn draw_about_update_status(&self, ui: &mut egui::Ui) {
+        if self.update_check_job.is_some() {
+            ui.label(
+                RichText::new("Checking latest GitHub release...")
+                    .size(12.5)
+                    .color(theme().muted),
+            );
+            return;
+        }
+
+        if let Some(err) = &self.update_check_error {
+            egui::Frame::new()
+                .fill(theme().error_bg)
+                .stroke(egui::Stroke::new(1.0, theme().error_fg))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(10, 7))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("Update check failed: {err}"))
+                            .size(12.5)
+                            .color(theme().error_fg),
+                    );
+                    ui.add_space(4.0);
+                    ui.hyperlink_to(RichText::new("Open releases").size(12.5), APP_RELEASES_URL);
+                });
+            return;
+        }
+
+        if let Some(result) = &self.update_check_result {
+            if result.is_newer {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Update available: {} (current v{})",
+                            result.latest_tag,
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .size(12.5)
+                        .color(theme().text),
+                    );
+                    ui.hyperlink_to(
+                        RichText::new("Open release").size(12.5),
+                        &result.release_url,
+                    );
+                });
+            } else {
+                ui.label(
+                    RichText::new(format!(
+                        "Scalpel is up to date. Latest release: {}.",
+                        result.latest_tag
+                    ))
+                    .size(12.5)
+                    .color(theme().muted),
+                );
+            }
+            if let Some(published_at) = &result.published_at {
+                ui.add_space(3.0);
+                ui.label(
+                    RichText::new(format!("Published {published_at}"))
+                        .size(11.5)
+                        .color(theme().muted),
+                );
+            }
+            return;
+        }
+
+        ui.label(
+            RichText::new("Manual update checks only. Downloads open on GitHub releases.")
+                .size(12.5)
+                .color(theme().muted),
+        );
     }
 
     pub(crate) fn open_pdf_from_path(&mut self, path: String) {
@@ -3137,6 +3232,7 @@ fn about_info_text(backend_detail: &str, platform: &str, render_limit: &str) -> 
         format!("Build: {}", build_profile_label()),
         format!("Render limit: {render_limit}"),
         format!("GitHub: {APP_GITHUB_URL}"),
+        format!("Releases: {APP_RELEASES_URL}"),
     ]
     .join("\n")
 }

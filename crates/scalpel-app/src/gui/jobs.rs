@@ -155,6 +155,7 @@ pub(crate) type RealObjectSearchJob = BackgroundJob<String, ObjectSearchResult>;
 pub(crate) type OpenPdfJob = BackgroundJob<String, OpenPdfJobResult>;
 pub(crate) type ImagePreviewJob = BackgroundJob<ObjectId, ImagePreview>;
 pub(crate) type StreamExportJob = BackgroundJob<StreamExportKey, StreamSaveOutcome>;
+pub(crate) type UpdateCheckJob = BackgroundJob<String, UpdateCheckResult>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StreamExportKey {
