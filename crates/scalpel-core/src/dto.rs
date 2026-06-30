@@ -614,6 +614,8 @@ pub enum VisualElementKind {
     Image,
     Vector,
     Grid,
+    Annotation,
+    Widget,
     Unknown,
 }
 
@@ -624,6 +626,8 @@ impl VisualElementKind {
             Self::Image => "image",
             Self::Vector => "vector",
             Self::Grid => "grid",
+            Self::Annotation => "annotation",
+            Self::Widget => "widget",
             Self::Unknown => "unknown",
         }
     }
@@ -635,6 +639,8 @@ pub struct VisualElement {
     pub bbox: PageRect,
     pub object: Option<ObjectId>,
     pub untrusted: bool,
+    pub object_type: Option<String>,
+    pub object_data: Option<String>,
 }
 
 #[derive(Clone, Debug)]

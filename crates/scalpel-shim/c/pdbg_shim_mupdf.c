@@ -813,12 +813,94 @@ static pdbg_visual_kind visual_kind_from_stext_block(int type)
     }
 }
 
+static void copy_visual_string(char *dst, size_t dst_len, const char *value)
+{
+    if (!dst || dst_len == 0)
+        return;
+    snprintf(dst, dst_len, "%s", value ? value : "");
+}
+
+static void append_visual_data_field(char *dst, size_t dst_len, const char *name, const char *value)
+{
+    if (!dst || dst_len == 0 || !name || !value || !*value)
+        return;
+
+    size_t used = strlen(dst);
+    if (used >= dst_len - 1)
+        return;
+
+    snprintf(dst + used, dst_len - used, "%s%s=%s", used ? " " : "", name, value);
+}
+
+static void pdf_obj_value_text(fz_context *ctx, pdf_obj *obj, char *dst, size_t dst_len)
+{
+    if (!dst || dst_len == 0)
+        return;
+    dst[0] = '\0';
+    if (!obj)
+        return;
+
+    if (pdf_is_name(ctx, obj)) {
+        copy_visual_string(dst, dst_len, pdf_to_name(ctx, obj));
+    } else if (pdf_is_string(ctx, obj)) {
+        copy_visual_string(dst, dst_len, pdf_to_text_string(ctx, obj));
+    } else {
+        size_t len = 0;
+        char *printed = pdf_sprint_obj(ctx, dst, dst_len, &len, obj, 1, 1);
+        if (printed != dst) {
+            copy_visual_string(dst, dst_len, printed);
+            fz_free(ctx, printed);
+        } else if (dst_len > 0) {
+            dst[dst_len - 1] = '\0';
+        }
+    }
+}
+
+static void append_pdf_obj_data_field(
+    fz_context *ctx,
+    char *dst,
+    size_t dst_len,
+    const char *name,
+    pdf_obj *obj)
+{
+    char value[96];
+    pdf_obj_value_text(ctx, obj, value, sizeof(value));
+    append_visual_data_field(dst, dst_len, name, value);
+}
+
+static const char *widget_type_name(enum pdf_widget_type type)
+{
+    switch (type) {
+    case PDF_WIDGET_TYPE_BUTTON:
+        return "button";
+    case PDF_WIDGET_TYPE_CHECKBOX:
+        return "checkbox";
+    case PDF_WIDGET_TYPE_COMBOBOX:
+        return "combobox";
+    case PDF_WIDGET_TYPE_LISTBOX:
+        return "listbox";
+    case PDF_WIDGET_TYPE_RADIOBUTTON:
+        return "radiobutton";
+    case PDF_WIDGET_TYPE_SIGNATURE:
+        return "signature";
+    case PDF_WIDGET_TYPE_TEXT:
+        return "text";
+    case PDF_WIDGET_TYPE_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
 static int append_visual_element(
+    fz_context *ctx,
     pdbg_visual_page *page,
     uint32_t page_index,
     pdbg_visual_kind kind,
     fz_rect bbox,
     fz_rect page_bounds,
+    pdf_obj *object,
+    const char *object_type,
+    const char *object_data,
     size_t max_elements,
     pdbg_status *status,
     pdbg_error *err)
@@ -861,11 +943,22 @@ static int append_visual_element(
     element->height = bbox.y1 - bbox.y0;
     element->page_index = page_index;
     element->untrusted = 1;
+    if (ctx && object) {
+        int object_num = pdf_to_num(ctx, object);
+        if (object_num > 0) {
+            element->object.num = object_num;
+            element->object.gen = pdf_to_gen(ctx, object);
+            element->has_object = 1;
+        }
+    }
+    copy_visual_string(element->object_type, sizeof(element->object_type), object_type);
+    copy_visual_string(element->object_data, sizeof(element->object_data), object_data);
     page->len += 1;
     return 1;
 }
 
 static int append_stext_visual_blocks(
+    fz_context *ctx,
     pdbg_visual_page *visuals,
     uint32_t page_index,
     fz_stext_block *block,
@@ -895,6 +988,7 @@ static int append_stext_visual_blocks(
         if (block->type == FZ_STEXT_BLOCK_STRUCT) {
             if (block->u.s.down &&
                 !append_stext_visual_blocks(
+                    ctx,
                     visuals,
                     page_index,
                     block->u.s.down->first_block,
@@ -923,10 +1017,161 @@ static int append_stext_visual_blocks(
             continue;
 
         if (!append_visual_element(
+                ctx,
                 visuals,
                 page_index,
                 visual_kind_from_stext_block(block->type),
                 block->bbox,
+                page_bounds,
+                NULL,
+                NULL,
+                NULL,
+                max_elements,
+                status,
+                err)) {
+            return 0;
+        }
+    }
+
+    return *status == PDBG_OK;
+}
+
+static void annotation_object_type(
+    fz_context *ctx,
+    pdf_annot *annot,
+    int is_widget,
+    char *dst,
+    size_t dst_len)
+{
+    if (is_widget) {
+        snprintf(
+            dst,
+            dst_len,
+            "widget:%s",
+            widget_type_name(pdf_widget_type(ctx, annot)));
+        return;
+    }
+
+    snprintf(
+        dst,
+        dst_len,
+        "annotation:%s",
+        pdf_string_from_annot_type(ctx, pdf_annot_type(ctx, annot)));
+}
+
+static void annotation_object_data(
+    fz_context *ctx,
+    pdf_annot *annot,
+    int is_widget,
+    char *dst,
+    size_t dst_len)
+{
+    pdf_obj *obj = pdf_annot_obj(ctx, annot);
+    dst[0] = '\0';
+
+    if (is_widget) {
+        char *field_name = pdf_load_field_name(ctx, obj);
+        fz_try(ctx)
+        {
+            append_visual_data_field(dst, dst_len, "name", field_name);
+        }
+        fz_always(ctx)
+            fz_free(ctx, field_name);
+        fz_catch(ctx)
+            fz_rethrow(ctx);
+
+        append_pdf_obj_data_field(ctx, dst, dst_len, "type", pdf_dict_get_inheritable(ctx, obj, PDF_NAME(FT)));
+        append_visual_data_field(dst, dst_len, "value", pdf_field_value(ctx, obj));
+        append_pdf_obj_data_field(ctx, dst, dst_len, "default", pdf_dict_get_inheritable(ctx, obj, PDF_NAME(DV)));
+        append_pdf_obj_data_field(ctx, dst, dst_len, "state", pdf_dict_get(ctx, obj, PDF_NAME(AS)));
+        return;
+    }
+
+    append_pdf_obj_data_field(ctx, dst, dst_len, "contents", pdf_dict_get(ctx, obj, PDF_NAME(Contents)));
+    append_pdf_obj_data_field(ctx, dst, dst_len, "title", pdf_dict_get(ctx, obj, PDF_NAME(T)));
+    append_pdf_obj_data_field(ctx, dst, dst_len, "state", pdf_dict_get(ctx, obj, PDF_NAME(AS)));
+}
+
+static int append_annotation_visual(
+    fz_context *ctx,
+    pdbg_visual_page *visuals,
+    uint32_t page_index,
+    pdf_annot *annot,
+    int is_widget,
+    fz_rect page_bounds,
+    size_t max_elements,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    char object_type[PDBG_VISUAL_OBJECT_TYPE_LEN];
+    char object_data[PDBG_VISUAL_OBJECT_DATA_LEN];
+    annotation_object_type(ctx, annot, is_widget, object_type, sizeof(object_type));
+    annotation_object_data(ctx, annot, is_widget, object_data, sizeof(object_data));
+
+    return append_visual_element(
+        ctx,
+        visuals,
+        page_index,
+        is_widget ? PDBG_VISUAL_WIDGET : PDBG_VISUAL_ANNOTATION,
+        is_widget ? pdf_bound_widget(ctx, annot) : pdf_bound_annot(ctx, annot),
+        page_bounds,
+        pdf_annot_obj(ctx, annot),
+        object_type,
+        object_data,
+        max_elements,
+        status,
+        err);
+}
+
+static int append_page_annotation_visuals(
+    fz_context *ctx,
+    pdbg_visual_page *visuals,
+    uint32_t page_index,
+    fz_page *page,
+    fz_rect page_bounds,
+    size_t max_elements,
+    pdbg_cancel_token *cancel,
+    pdbg_status *status,
+    pdbg_error *err)
+{
+    pdf_page *pdf_page = pdf_page_from_fz_page(ctx, page);
+    if (!pdf_page)
+        return 1;
+
+    for (pdf_annot *annot = pdf_first_annot(ctx, pdf_page); annot && *status == PDBG_OK;
+         annot = pdf_next_annot(ctx, annot)) {
+        if (cancel && atomic_load(&cancel->cancelled)) {
+            *status = PDBG_ERROR_CANCELLED;
+            set_error(err, *status, "cancelled");
+            return 0;
+        }
+        if (!append_annotation_visual(
+                ctx,
+                visuals,
+                page_index,
+                annot,
+                0,
+                page_bounds,
+                max_elements,
+                status,
+                err)) {
+            return 0;
+        }
+    }
+
+    for (pdf_annot *widget = pdf_first_widget(ctx, pdf_page); widget && *status == PDBG_OK;
+         widget = pdf_next_widget(ctx, widget)) {
+        if (cancel && atomic_load(&cancel->cancelled)) {
+            *status = PDBG_ERROR_CANCELLED;
+            set_error(err, *status, "cancelled");
+            return 0;
+        }
+        if (!append_annotation_visual(
+                ctx,
+                visuals,
+                page_index,
+                widget,
+                1,
                 page_bounds,
                 max_elements,
                 status,
@@ -3664,6 +3909,7 @@ pdbg_status pdbg_page_extract_visuals(
 
             if (status == PDBG_OK)
                 append_stext_visual_blocks(
+                    ctx,
                     visuals,
                     page_index,
                     stext->first_block,
@@ -3674,6 +3920,18 @@ pdbg_status pdbg_page_extract_visuals(
                     max_elements,
                     cancel,
                     0,
+                    &status,
+                    err);
+
+            if (status == PDBG_OK)
+                append_page_annotation_visuals(
+                    ctx,
+                    visuals,
+                    page_index,
+                    page,
+                    page_bounds,
+                    max_elements,
+                    cancel,
                     &status,
                     err);
         }

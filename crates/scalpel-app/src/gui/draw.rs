@@ -2600,6 +2600,18 @@ impl GuiShellApp {
                             truncated_monospace(ui, object);
                             ui.end_row();
                         }
+
+                        if let Some(object_type) = hit.object_type.as_ref() {
+                            dense_label(ui, "object type");
+                            truncated_monospace(ui, object_type);
+                            ui.end_row();
+                        }
+
+                        if let Some(object_data) = hit.object_data.as_ref() {
+                            dense_label(ui, "object data");
+                            truncated_monospace(ui, object_data);
+                            ui.end_row();
+                        }
                     }
                 });
         });

@@ -314,8 +314,13 @@ pub enum pdbg_visual_kind {
     PDBG_VISUAL_IMAGE = 1,
     PDBG_VISUAL_VECTOR = 2,
     PDBG_VISUAL_GRID = 3,
+    PDBG_VISUAL_ANNOTATION = 4,
+    PDBG_VISUAL_WIDGET = 5,
     PDBG_VISUAL_UNKNOWN = 255,
 }
+
+pub const PDBG_VISUAL_OBJECT_TYPE_LEN: usize = 64;
+pub const PDBG_VISUAL_OBJECT_DATA_LEN: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -338,6 +343,8 @@ pub struct pdbg_visual_element {
     pub object: pdbg_object_id,
     pub has_object: c_int,
     pub untrusted: c_int,
+    pub object_type: [c_char; PDBG_VISUAL_OBJECT_TYPE_LEN],
+    pub object_data: [c_char; PDBG_VISUAL_OBJECT_DATA_LEN],
 }
 
 #[repr(C)]

@@ -231,8 +231,13 @@ typedef enum pdbg_visual_kind {
     PDBG_VISUAL_IMAGE = 1,
     PDBG_VISUAL_VECTOR = 2,
     PDBG_VISUAL_GRID = 3,
+    PDBG_VISUAL_ANNOTATION = 4,
+    PDBG_VISUAL_WIDGET = 5,
     PDBG_VISUAL_UNKNOWN = 255
 } pdbg_visual_kind;
+
+#define PDBG_VISUAL_OBJECT_TYPE_LEN 64
+#define PDBG_VISUAL_OBJECT_DATA_LEN 256
 
 typedef struct pdbg_visual_options {
     int include_text;
@@ -251,6 +256,8 @@ typedef struct pdbg_visual_element {
     pdbg_object_id object;
     int has_object;
     int untrusted;
+    char object_type[PDBG_VISUAL_OBJECT_TYPE_LEN];
+    char object_data[PDBG_VISUAL_OBJECT_DATA_LEN];
 } pdbg_visual_element;
 
 typedef enum pdbg_repair_policy {

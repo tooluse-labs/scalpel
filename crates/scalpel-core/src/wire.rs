@@ -209,6 +209,8 @@ pub(crate) unsafe fn visual_element(element: &raw::pdbg_visual_element) -> Visua
             raw::pdbg_visual_kind::PDBG_VISUAL_IMAGE => VisualElementKind::Image,
             raw::pdbg_visual_kind::PDBG_VISUAL_VECTOR => VisualElementKind::Vector,
             raw::pdbg_visual_kind::PDBG_VISUAL_GRID => VisualElementKind::Grid,
+            raw::pdbg_visual_kind::PDBG_VISUAL_ANNOTATION => VisualElementKind::Annotation,
+            raw::pdbg_visual_kind::PDBG_VISUAL_WIDGET => VisualElementKind::Widget,
             raw::pdbg_visual_kind::PDBG_VISUAL_UNKNOWN => VisualElementKind::Unknown,
         },
         bbox: PageRect {
@@ -219,7 +221,16 @@ pub(crate) unsafe fn visual_element(element: &raw::pdbg_visual_element) -> Visua
         },
         object: optional_object_id(element.object, element.has_object),
         untrusted: element.untrusted != 0,
+        object_type: c_char_array_string(&element.object_type),
+        object_data: c_char_array_string(&element.object_data),
     }
+}
+
+fn c_char_array_string<const N: usize>(value: &[c_char; N]) -> Option<String> {
+    let text = unsafe { CStr::from_ptr(value.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) unsafe fn diagnostic_list(

@@ -550,6 +550,8 @@ fn preview_click_hit_tests_visual_bbox_in_page_space() {
                     height: 500.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: true,
             },
             VisualElement {
@@ -561,6 +563,34 @@ fn preview_click_hit_tests_visual_bbox_in_page_space() {
                     height: 80.0,
                 },
                 object: Some(ObjectId { num: 12, gen: 0 }),
+                object_type: None,
+                object_data: None,
+                untrusted: false,
+            },
+            VisualElement {
+                kind: VisualElementKind::Widget,
+                bbox: PageRect {
+                    x: 170.0,
+                    y: 70.0,
+                    width: 20.0,
+                    height: 10.0,
+                },
+                object: Some(ObjectId { num: 31, gen: 0 }),
+                object_type: Some("widget:text".to_string()),
+                object_data: Some("name=Email value=user@example.test".to_string()),
+                untrusted: false,
+            },
+            VisualElement {
+                kind: VisualElementKind::Text,
+                bbox: PageRect {
+                    x: 174.0,
+                    y: 72.0,
+                    width: 12.0,
+                    height: 5.0,
+                },
+                object: Some(ObjectId { num: 32, gen: 0 }),
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
         ],
@@ -579,6 +609,28 @@ fn preview_click_hit_tests_visual_bbox_in_page_space() {
     assert_eq!(hit.kind, VisualElementKind::Image);
     assert_eq!(hit.object, Some(ObjectId { num: 12, gen: 0 }));
     assert!(hit.contains_click);
+
+    let widget_click = PagePreviewClick {
+        render_x: 360.0,
+        render_y: 150.0,
+        ..click
+    };
+    let widget_hit = visual_hit_from_page_click(&page, widget_click, 2.0).unwrap();
+    assert_eq!(widget_hit.kind, VisualElementKind::Widget);
+    assert_eq!(widget_hit.object, Some(ObjectId { num: 31, gen: 0 }));
+    assert_eq!(widget_hit.object_type.as_deref(), Some("widget:text"));
+    assert_eq!(
+        widget_hit.object_data.as_deref(),
+        Some("name=Email value=user@example.test")
+    );
+    assert!(widget_hit.contains_click);
+
+    let widget_text_overlap_hit = visual_hit_from_page_click(&page, widget_click, 2.0).unwrap();
+    assert_eq!(widget_text_overlap_hit.kind, VisualElementKind::Widget);
+    assert_eq!(
+        widget_text_overlap_hit.object,
+        Some(ObjectId { num: 31, gen: 0 })
+    );
 
     let miss = PagePreviewClick {
         render_x: 2.0,
@@ -603,6 +655,8 @@ fn visual_hit_for_object_unions_matching_bboxes() {
                     height: 30.0,
                 },
                 object: Some(object),
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -614,6 +668,8 @@ fn visual_hit_for_object_unions_matching_bboxes() {
                     height: 25.0,
                 },
                 object: Some(object),
+                object_type: None,
+                object_data: None,
                 untrusted: true,
             },
             VisualElement {
@@ -625,6 +681,8 @@ fn visual_hit_for_object_unions_matching_bboxes() {
                     height: 10.0,
                 },
                 object: Some(ObjectId { num: 99, gen: 0 }),
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
         ],
@@ -659,6 +717,8 @@ fn visual_hit_for_page_visual_union_uses_all_visible_bboxes() {
                     height: 40.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -670,6 +730,8 @@ fn visual_hit_for_page_visual_union_uses_all_visible_bboxes() {
                     height: 30.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -681,6 +743,8 @@ fn visual_hit_for_page_visual_union_uses_all_visible_bboxes() {
                     height: 10.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: true,
             },
         ],
@@ -827,6 +891,8 @@ fn selecting_tree_row_clears_preview_hit_selection() {
             height: 4.0,
         },
         object: None,
+        object_type: None,
+        object_data: None,
         untrusted: true,
         contains_click: true,
     });
@@ -836,6 +902,46 @@ fn selecting_tree_row_clears_preview_hit_selection() {
     assert!(app.preview_click.is_none());
     assert!(app.selected_visual_hit.is_none());
     assert!(app.selected_text_hit.is_none());
+}
+
+#[test]
+fn widget_preview_click_does_not_open_stream_fallback() {
+    let mut app = GuiShellApp::new();
+    app.selected_text_hit = Some(TextSearchHit {
+        page_index: 0,
+        span_index: 0,
+        excerpt: "user@example.test".to_string(),
+        bbox: Some(PageRect {
+            x: 86.0,
+            y: 96.0,
+            width: 90.0,
+            height: 14.0,
+        }),
+        untrusted: false,
+    });
+    app.selected_visual_hit = Some(PreviewVisualHit {
+        page_index: 0,
+        element_index: 4,
+        kind: VisualElementKind::Widget,
+        bbox: PageRect {
+            x: 80.0,
+            y: 90.0,
+            width: 140.0,
+            height: 30.0,
+        },
+        object: Some(ObjectId { num: 5, gen: 0 }),
+        object_type: Some("widget:text".to_string()),
+        object_data: Some("name=Email value=user@example.test".to_string()),
+        untrusted: false,
+        contains_click: true,
+    });
+
+    assert!(!app.open_nice_stream_for_preview_selection(0));
+    assert!(app.pending_preview_stream_selection.is_none());
+    assert!(app
+        .status_log
+        .iter()
+        .any(|line| line.contains("stream selection skipped")));
 }
 
 #[test]
@@ -885,6 +991,8 @@ fn visual_object_attribution_text_hides_missing_object() {
             height: 10.0,
         },
         object: None,
+        object_type: None,
+        object_data: None,
         untrusted: true,
         contains_click: true,
     };
@@ -908,6 +1016,8 @@ fn visual_test_element(x: f32) -> VisualElement {
             height: 1.0,
         },
         object: None,
+        object_type: None,
+        object_data: None,
         untrusted: true,
     }
 }
@@ -1288,6 +1398,8 @@ fn nice_stream_visual_selection_matches_vector_and_image_order() {
                     height: 5.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -1299,6 +1411,8 @@ fn nice_stream_visual_selection_matches_vector_and_image_order() {
                     height: 20.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -1310,6 +1424,8 @@ fn nice_stream_visual_selection_matches_vector_and_image_order() {
                     height: 25.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
         ],
@@ -1362,6 +1478,8 @@ fn nice_stream_image_selection_uses_cm_bbox_for_highlight() {
                     height: 50.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -1373,6 +1491,8 @@ fn nice_stream_image_selection_uses_cm_bbox_for_highlight() {
                     height: 50.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
         ],
@@ -1417,6 +1537,8 @@ fn nice_stream_visual_hit_prefers_image_bbox_overlap_over_ordinal() {
                 height: 10.0,
             },
             object: None,
+            object_type: None,
+            object_data: None,
             untrusted: false,
         }],
     };
@@ -1426,6 +1548,8 @@ fn nice_stream_visual_hit_prefers_image_bbox_overlap_over_ordinal() {
         kind: VisualElementKind::Image,
         bbox: page.elements[0].bbox.clone(),
         object: None,
+        object_type: None,
+        object_data: None,
         untrusted: false,
         contains_click: true,
     };
@@ -1460,6 +1584,8 @@ fn nice_stream_visual_hit_selects_matching_draw_operation() {
                     height: 20.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
             VisualElement {
@@ -1471,6 +1597,8 @@ fn nice_stream_visual_hit_selects_matching_draw_operation() {
                     height: 25.0,
                 },
                 object: None,
+                object_type: None,
+                object_data: None,
                 untrusted: false,
             },
         ],
@@ -1481,6 +1609,8 @@ fn nice_stream_visual_hit_selects_matching_draw_operation() {
         kind: VisualElementKind::Image,
         bbox: page.elements[1].bbox.clone(),
         object: None,
+        object_type: None,
+        object_data: None,
         untrusted: false,
         contains_click: true,
     };

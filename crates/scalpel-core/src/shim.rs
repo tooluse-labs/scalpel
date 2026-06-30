@@ -849,6 +849,8 @@ impl FakeDoc {
                 },
                 object: None,
                 untrusted: true,
+                object_type: None,
+                object_data: None,
             });
         }
         if request.include_images {
@@ -862,6 +864,8 @@ impl FakeDoc {
                 },
                 object: None,
                 untrusted: true,
+                object_type: None,
+                object_data: None,
             });
         }
         if request.include_vectors {
@@ -875,6 +879,8 @@ impl FakeDoc {
                 },
                 object: None,
                 untrusted: true,
+                object_type: None,
+                object_data: None,
             });
         }
         if request.max_elements != 0 && request.max_elements < elements.len() {
@@ -2378,6 +2384,8 @@ mod tests {
             "javascript_disabled"
         );
         assert_eq!(ResourceGroup::XObjects.as_public_str(), "xobjects");
+        assert_eq!(VisualElementKind::Annotation.as_public_str(), "annotation");
+        assert_eq!(VisualElementKind::Widget.as_public_str(), "widget");
     }
 
     #[cfg(feature = "real-mupdf")]
@@ -3135,6 +3143,60 @@ mod tests {
         }
         pdf.push_str(&format!(
             "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    fn synthetic_widget_pdf() -> Vec<u8> {
+        fn push_object(pdf: &mut String, offsets: &mut Vec<usize>, number: usize, body: &str) {
+            while offsets.len() <= number {
+                offsets.push(0);
+            }
+            offsets[number] = pdf.len();
+            pdf.push_str(&format!("{number} 0 obj\n{body}\nendobj\n"));
+        }
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0];
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /NeedAppearances true >> >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Annots [5 0 R] /Contents 4 0 R >>",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            "<< /Length 0 >>\nstream\n\nendstream",
+        );
+        push_object(
+            &mut pdf,
+            &mut offsets,
+            5,
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Email) /V (user@example.test) /Rect [40 120 160 145] /P 3 0 R /F 4 /DA (/Helv 10 Tf 0 g) >>",
+        );
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size 6 >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }
@@ -3987,6 +4049,33 @@ mod tests {
         let err = doc.render_page(&request).unwrap_err();
         assert_eq!(err.status, raw::pdbg_status::PDBG_ERROR_LIMIT);
         assert!(err.message.contains("pixel"));
+    }
+
+    #[cfg(feature = "real-mupdf")]
+    #[test]
+    fn real_mupdf_shim_extracts_widget_visual_payload() {
+        let path = write_temp_real_pdf("widget-visual", &synthetic_widget_pdf());
+        let shim = RealMuPdfShim::new().unwrap();
+        let mut doc = shim.open_document(path.to_string_lossy().as_ref()).unwrap();
+
+        let visuals = doc.extract_visuals(&VisualRequest::page(0)).unwrap();
+        let widget = visuals
+            .elements
+            .iter()
+            .find(|element| element.kind == VisualElementKind::Widget)
+            .expect("expected widget visual element");
+
+        assert_eq!(widget.object, Some(ObjectId { num: 5, gen: 0 }));
+        assert_eq!(widget.object_type.as_deref(), Some("widget:text"));
+        let data = widget.object_data.as_deref().unwrap_or_default();
+        assert!(data.contains("name=Email"), "{data}");
+        assert!(data.contains("type=Tx"), "{data}");
+        assert!(data.contains("value=user@example.test"), "{data}");
+        assert!(widget.bbox.width > 0.0);
+        assert!(widget.bbox.height > 0.0);
+
+        drop(doc);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "real-mupdf")]

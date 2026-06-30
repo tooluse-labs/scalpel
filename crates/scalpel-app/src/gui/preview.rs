@@ -425,6 +425,8 @@ pub(crate) struct PreviewVisualHit {
     pub(crate) kind: VisualElementKind,
     pub(crate) bbox: PageRect,
     pub(crate) object: Option<ObjectId>,
+    pub(crate) object_type: Option<String>,
+    pub(crate) object_data: Option<String>,
     pub(crate) untrusted: bool,
     pub(crate) contains_click: bool,
 }
@@ -651,10 +653,16 @@ pub(crate) fn visual_hit_from_page_click(
             let contains = rect_contains_point(&element.bbox, page_x, page_y);
             let distance_sq = rect_distance_sq_to_point(&element.bbox, page_x, page_y);
             let tolerance_sq = VISUAL_CLICK_BBOX_TOLERANCE_PT * VISUAL_CLICK_BBOX_TOLERANCE_PT;
+            let annotation_or_widget_contains = contains
+                && matches!(
+                    element.kind,
+                    VisualElementKind::Annotation | VisualElementKind::Widget
+                );
             (contains || distance_sq <= tolerance_sq).then_some((
                 index,
                 element,
                 contains,
+                annotation_or_widget_contains,
                 distance_sq,
                 rect_area(&element.bbox),
             ))
@@ -662,20 +670,25 @@ pub(crate) fn visual_hit_from_page_click(
         .min_by(|left, right| {
             let left_contains = left.2 as u8;
             let right_contains = right.2 as u8;
+            let left_annotation_or_widget_contains = left.3 as u8;
+            let right_annotation_or_widget_contains = right.3 as u8;
             right_contains
                 .cmp(&left_contains)
+                .then_with(|| {
+                    right_annotation_or_widget_contains.cmp(&left_annotation_or_widget_contains)
+                })
+                .then_with(|| {
+                    left.5
+                        .partial_cmp(&right.5)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| {
                     left.4
                         .partial_cmp(&right.4)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .then_with(|| {
-                    left.3
-                        .partial_cmp(&right.3)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
         })
-        .map(|(index, element, contains_click, _, _)| {
+        .map(|(index, element, contains_click, _, _, _)| {
             visual_element_to_hit(page.page_index, index, element, contains_click)
         })
 }
@@ -704,6 +717,8 @@ pub(crate) fn visual_hit_for_object(
         kind,
         bbox,
         object: Some(object),
+        object_type: first.object_type.clone(),
+        object_data: first.object_data.clone(),
         untrusted,
         contains_click: false,
     })
@@ -735,6 +750,8 @@ pub(crate) fn visual_hit_for_page_visual_union(
         kind,
         bbox,
         object: Some(object),
+        object_type: None,
+        object_data: None,
         untrusted,
         contains_click: false,
     })
@@ -772,6 +789,8 @@ pub(crate) fn visual_hit_for_element_indices(
         kind,
         bbox,
         object: Some(object),
+        object_type: first.object_type.clone(),
+        object_data: first.object_data.clone(),
         untrusted,
         contains_click: false,
     })
@@ -797,6 +816,8 @@ pub(crate) fn nice_stream_visual_hit_for_selection(
             kind: VisualElementKind::Image,
             bbox,
             object: Some(object),
+            object_type: None,
+            object_data: None,
             untrusted: true,
             contains_click: false,
         });
@@ -1159,6 +1180,7 @@ pub(crate) fn nice_stream_reverse_visual_kind_candidates(
         VisualElementKind::Vector | VisualElementKind::Grid => {
             vec![VisualElementKind::Vector, VisualElementKind::Unknown]
         }
+        VisualElementKind::Annotation | VisualElementKind::Widget => Vec::new(),
         VisualElementKind::Unknown => vec![VisualElementKind::Unknown],
     }
 }
@@ -1309,6 +1331,8 @@ pub(crate) fn visual_element_to_hit(
         kind: element.kind,
         bbox: element.bbox.clone(),
         object: element.object,
+        object_type: element.object_type.clone(),
+        object_data: element.object_data.clone(),
         untrusted: element.untrusted,
         contains_click,
     }

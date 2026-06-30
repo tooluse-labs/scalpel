@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "scalpel-app"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "eframe",
  "rfd",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "scalpel-contract-tests"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "scalpel-app",
  "scalpel-core",
@@ -2435,21 +2435,21 @@ dependencies = [
 
 [[package]]
 name = "scalpel-core"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "scalpel-shim",
 ]
 
 [[package]]
 name = "scalpel-mcp"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "scalpel-core",
 ]
 
 [[package]]
 name = "scalpel-shim"
-version = "0.2.16"
+version = "0.2.17"
 
 [[package]]
 name = "scoped-tls"

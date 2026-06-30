@@ -36,6 +36,14 @@ pub(crate) fn stream_export_worker(
         .map_err(|err| err.message)
 }
 
+pub(crate) fn preview_visual_hit_should_stay_on_object(hit: &PreviewVisualHit) -> bool {
+    hit.contains_click
+        && matches!(
+            hit.kind,
+            VisualElementKind::Annotation | VisualElementKind::Widget
+        )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedXObject {
     pub(crate) object: ObjectId,
@@ -1793,6 +1801,18 @@ impl GuiShellApp {
     }
 
     pub(crate) fn open_nice_stream_for_preview_selection(&mut self, page_index: usize) -> bool {
+        if self
+            .selected_visual_hit
+            .as_ref()
+            .is_some_and(preview_visual_hit_should_stay_on_object)
+        {
+            self.pending_preview_stream_selection = None;
+            self.status_log.push(
+                "selected annotation/widget preview object; stream selection skipped".to_string(),
+            );
+            return false;
+        }
+
         if self.selected_text_hit.is_none() && self.selected_visual_hit.is_none() {
             self.pending_preview_stream_selection = None;
             return false;
