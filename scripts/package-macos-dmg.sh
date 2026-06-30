@@ -124,7 +124,7 @@ mkdir -p "$mount_dir/.background"
 CLANG_MODULE_CACHE_PATH="$swift_cache" swift "$swift_script" "$mount_dir/.background/background.png"
 chflags hidden "$mount_dir/.background" >/dev/null 2>&1 || true
 
-osascript <<APPLESCRIPT
+if ! osascript <<APPLESCRIPT
 tell application "Finder"
   set volumeFolder to POSIX file "$mount_dir" as alias
   open volumeFolder
@@ -150,6 +150,9 @@ tell application "Finder"
   close volumeWindow
 end tell
 APPLESCRIPT
+then
+  echo "warning: Finder DMG layout customization failed; continuing with default DMG layout" >&2
+fi
 
 sync
 sleep 1
